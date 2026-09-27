@@ -7544,6 +7544,165 @@ mod tests {
         ));
     }
 
+    fn relation_fixture_observation(
+        revision_id: &RevisionId,
+        key: &str,
+        responds_to: &[&crate::model::ObservationId],
+        occurred_at: &str,
+    ) -> ShoreEvent {
+        ShoreEvent::new(
+            EventType::ReviewObservationRecorded,
+            format!("fixture:relation:{key}"),
+            EventTarget::for_revision(
+                JournalId::new("journal:change-endpoint"),
+                revision_id.clone(),
+                Some(crate::model::TrackId::new("agent:relation-bound")),
+            )
+            .expect("build observation target"),
+            Writer::shore_local("change-endpoint-test"),
+            crate::session::event::ReviewObservationRecordedPayload {
+                observation_id: crate::model::ObservationId::new(format!(
+                    "obs:sha256:{:0>64}",
+                    key.bytes()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                )),
+                target: crate::model::ReviewTargetRef::Revision {
+                    revision_id: revision_id.clone(),
+                },
+                title: format!("relation bound {key}"),
+                body: None,
+                body_content_type: Default::default(),
+                body_artifact_path: None,
+                body_byte_size: None,
+                body_content_hash: None,
+                tags: Vec::new(),
+                confidence: None,
+                supersedes_observation_ids: Vec::new(),
+                responds_to_observation_ids: responds_to.iter().map(|id| (*id).clone()).collect(),
+            },
+            occurred_at,
+        )
+        .expect("build observation event")
+    }
+
+    #[test]
+    fn derived_relation_targets_read_one_row_per_named_fact_as_the_revision_grows() {
+        let fixture = ActiveChangeFixture::new(&[&[Some("relation bound proposal")]]);
+        let revision_id = fixture.changes[0].revision.revision_id.clone();
+        let root = relation_fixture_observation(&revision_id, "root", &[], "2026-08-11T00:00:00Z");
+        let root_id: crate::model::ObservationId =
+            serde_json::from_value(root.payload["observationId"].clone()).unwrap();
+        record_fixture_event(&fixture.store, root.clone());
+        let reply = relation_fixture_observation(
+            &revision_id,
+            "reply",
+            &[&root_id],
+            "2026-08-12T00:00:00Z",
+        );
+        record_fixture_event(&fixture.store, reply.clone());
+        let request = crate::session::DerivedTimelinePageRequestV1::new(
+            1,
+            crate::session::DerivedTimelineOrderV1::Desc,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+            crate::session::DerivedTimelinePagePositionV1::Initial,
+        )
+        .unwrap();
+        let counted_read = |label: char| {
+            fixture
+                .runtime
+                .current()
+                .expect("warm the relation fixture before counting");
+            let scope = LongitudinalCountingScopeV1::new(label.to_string().repeat(64)).unwrap();
+            let guard = scope.enter();
+            let DerivedChangeOutcomeV1::Ready(page) = fixture
+                .access
+                .timeline(&request, &crate::session::TrustSet::default())
+                .unwrap()
+            else {
+                panic!("relation Timeline must be ready");
+            };
+            drop(guard);
+            (page.document().entries.clone(), scope.snapshot().counters)
+        };
+
+        let (before, before_counters) = counted_read('b');
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].event_id, reply.event_id);
+        let expected = vec![crate::documents::EventHistoryRelationTargetV1 {
+            fact_id: root_id.as_str().to_owned(),
+            event_id: root.event_id.clone(),
+        }];
+        assert_eq!(before[0].relation_targets, expected);
+        assert_eq!(before_counters.timeline_relation_target_rows, 1);
+
+        // Unrelated facts accumulate on the same referenced Revision, all
+        // earlier than the reply so the one-entry page is unchanged.
+        for index in 0..24 {
+            record_fixture_event(
+                &fixture.store,
+                relation_fixture_observation(
+                    &revision_id,
+                    &format!("unrelated{index}"),
+                    &[],
+                    &format!("2026-08-11T01:{index:02}:00Z"),
+                ),
+            );
+        }
+        let (after, after_counters) = counted_read('c');
+        assert_eq!(after[0].event_id, reply.event_id);
+        assert_eq!(after[0].relation_targets, expected);
+        assert_eq!(
+            after_counters.timeline_relation_target_rows,
+            before_counters.timeline_relation_target_rows,
+            "relation targets read one representative row per named fact, not the Revision's facts"
+        );
+
+        let events = fixture.store.list_events().expect("read relation events");
+        let strict = crate::session::project_event_history(
+            &events,
+            &crate::session::project_change_documents(&events).expect("project Changes"),
+            inspect_journal_records(
+                StoreBackend::Local(fixture._temp.path().to_path_buf())
+                    .journal()
+                    .as_ref(),
+            )
+            .expect("inspect relation authority")
+            .cursor,
+            "relation-parity-stamp".to_owned(),
+            &crate::session::TrustSet::default(),
+        )
+        .expect("project strict relation Timeline")
+        .document();
+        let strict_reply = strict
+            .entries
+            .iter()
+            .find(|entry| entry.event_id == reply.event_id)
+            .expect("strict reply entry");
+        assert_eq!(strict_reply, &after[0], "strict and derived lanes agree");
+
+        let connection =
+            rusqlite::Connection::open(fixture.database_path()).expect("open relation sidecar");
+        let plan =
+            crate::session::derived_access::sqlite::timeline_relation_representative_query_plan(
+                &connection,
+            )
+            .expect("explain relation lookup");
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("representative USING PRIMARY KEY")),
+            "relation lookup must probe the representative primary key: {plan:#?}"
+        );
+        assert!(
+            !plan.iter().any(|detail| detail.starts_with("SCAN")),
+            "relation lookup must never scan: {plan:#?}"
+        );
+    }
+
     #[test]
     fn derived_timeline_counters_separate_bounded_and_exhaustive_work() {
         let structured = ActiveChangeFixture::new(&[&[Some("bounded proposal prose")]]);

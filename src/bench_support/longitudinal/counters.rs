@@ -1580,6 +1580,7 @@ fn counter_delta(
         timeline_sqlite_candidates: delta!(timeline_sqlite_candidates),
         timeline_sqlite_window_rows: delta!(timeline_sqlite_window_rows),
         timeline_sqlite_facet_rows: delta!(timeline_sqlite_facet_rows),
+        timeline_relation_target_rows: delta!(timeline_relation_target_rows),
         timeline_selected_carriers: delta!(timeline_selected_carriers),
         timeline_revision_candidate_carriers: delta!(timeline_revision_candidate_carriers),
         timeline_removal_support_carriers: delta!(timeline_removal_support_carriers),
@@ -1721,6 +1722,10 @@ change_counter!(
 change_counter!(
     record_timeline_sqlite_facet_rows,
     timeline_sqlite_facet_rows
+);
+change_counter!(
+    record_timeline_relation_target_rows,
+    timeline_relation_target_rows
 );
 change_counter!(
     record_timeline_selected_carriers,
@@ -2813,6 +2818,7 @@ mod tests {
         record_timeline_sqlite_candidates(107);
         record_timeline_sqlite_window_rows(109);
         record_timeline_sqlite_facet_rows(113);
+        record_timeline_relation_target_rows(223);
         record_timeline_selected_carriers(127);
         record_timeline_revision_candidate_carriers(129);
         record_timeline_removal_support_carriers(131);
@@ -2868,6 +2874,7 @@ mod tests {
                 timeline_sqlite_candidates: 107,
                 timeline_sqlite_window_rows: 109,
                 timeline_sqlite_facet_rows: 113,
+                timeline_relation_target_rows: 223,
                 timeline_selected_carriers: 127,
                 timeline_revision_candidate_carriers: 129,
                 timeline_removal_support_carriers: 131,

@@ -14,10 +14,11 @@ use rusqlite::types::Value;
 use crate::bench_support::longitudinal::{
     reach_timeline_carrier_locators_selected_v1, record_timeline_correlation_support_carriers,
     record_timeline_entries_emitted, record_timeline_exhaustive_candidates,
-    record_timeline_removal_support_carriers, record_timeline_revision_candidate_carriers,
-    record_timeline_selected_carriers, record_timeline_signature_support_carriers,
-    record_timeline_sqlite_candidates, record_timeline_sqlite_facet_rows,
-    record_timeline_sqlite_window_rows, record_timeline_trust_support_carriers,
+    record_timeline_relation_target_rows, record_timeline_removal_support_carriers,
+    record_timeline_revision_candidate_carriers, record_timeline_selected_carriers,
+    record_timeline_signature_support_carriers, record_timeline_sqlite_candidates,
+    record_timeline_sqlite_facet_rows, record_timeline_sqlite_window_rows,
+    record_timeline_trust_support_carriers,
 };
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::documents::{
@@ -33,14 +34,14 @@ use crate::session::derived_access::history::{
 use crate::session::derived_access::locator::LocatorRead;
 use crate::session::derived_access::service::DerivedAccessService;
 use crate::session::derived_access::sqlite::{
-    HydratedLocatorRow, ProductHistoryFact, ProposalCarrierLocator, timeline_revision_fact_rows,
+    HydratedLocatorRow, ProductHistoryFact, ProposalCarrierLocator,
+    timeline_relation_representative,
 };
 use crate::session::derived_access::support::{SupportEventPlan, support_event_plan};
 use crate::session::event::{EventType, ShoreEvent};
 use crate::session::projection::event_history::{
-    EVENT_HISTORY_RECORDING_EVENT_TYPES, EventHistoryEntryDraftV1, EventHistoryRelationIndexV1,
-    attach_event_history_relation_targets, bind_selected_event_history_trust,
-    event_history_relation_references, project_selected_event_history_without_trust,
+    EventHistoryEntryDraftV1, EventHistoryRelationRecordV1, attach_event_history_relation_targets,
+    bind_selected_event_history_trust, project_selected_event_history_without_trust,
 };
 use crate::session::workflow::{
     MatchKind, QueryClause, QueryDiagnosticCode, QuerySurface, event_history_search_record,
@@ -2161,41 +2162,37 @@ pub(super) fn prepare_timeline_page(
 }
 
 /// Resolve each selected entry's relationship ids to their recording events
-/// with the same rule as the strict Timeline projection. Each lookup reads one
-/// referenced Revision's facts through its index, bounded by the page.
+/// with the same rule as the strict Timeline projection. Each distinct
+/// referenced fact costs one keyed probe of the representative table that
+/// reads at most one row, so the work is bounded by the ids the page names and
+/// never by how many facts a referenced Revision carries.
 fn attach_derived_relation_targets(
     connection: &rusqlite::Connection,
     as_of: TruthCursor,
     entries: &mut [EventHistoryEntryV1],
 ) -> Result<(), TimelinePageError> {
-    let revisions = entries
-        .iter()
-        .filter_map(|entry| {
-            event_history_relation_references(entry).map(|(revision_id, _)| revision_id.clone())
-        })
-        .collect::<BTreeSet<_>>();
-    let mut index = EventHistoryRelationIndexV1::default();
-    for revision_id in revisions {
-        let rows = timeline_revision_fact_rows(connection, &revision_id, as_of)
-            .map_err(|error| error.to_string())?;
-        for row in rows {
-            if row.fact_id.is_empty()
-                || !EVENT_HISTORY_RECORDING_EVENT_TYPES
-                    .iter()
-                    .any(|event_type| event_type.as_str() == row.event_type)
-            {
-                continue;
-            }
-            index.insert(
-                revision_id.clone(),
-                row.fact_id,
-                &row.occurred_at,
-                &EventId::new(row.event_id),
-            );
+    attach_event_history_relation_targets(entries, |family, fact_id| {
+        let row =
+            timeline_relation_representative(connection, family.semantic_family(), fact_id, as_of)
+                .map_err(|error| TimelinePageError::from(error.to_string()))?;
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        record_timeline_relation_target_rows(usize::from(row.is_some()));
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        if row.event_type != family.recording_event_type().as_str() {
+            return Err(TimelinePageError::from(format!(
+                "relation representative for {fact_id} is not a recording event"
+            )));
         }
-    }
-    attach_event_history_relation_targets(entries, &index);
-    Ok(())
+        Ok(Some(EventHistoryRelationRecordV1 {
+            event_id: EventId::new(row.event_id),
+            timeline_revision_id: match (row.timeline_member, row.revision_id) {
+                (true, Some(revision_id)) => Some(RevisionId::new(revision_id)),
+                _ => None,
+            },
+        }))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
