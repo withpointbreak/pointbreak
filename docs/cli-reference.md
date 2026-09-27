@@ -406,6 +406,15 @@ and explicit follow/park behavior for incoming events. The server owns the filte
 Change-aware attribution. The browser keeps only a bounded page-local window in the DOM and never infers
 one Change or Revision when an event has multiple contexts.
 
+Follow and park are Timeline actions. While an event detail is open, the Timeline follow control stays
+visible and reports the retained monitor state (Following, Parked, or Show N new), but it is not operable:
+the toggle is `aria-disabled` there and acts only on the Timeline route. The detail pane reads the loaded
+history page and never a parked window, so the monitor observes incoming events only on the Timeline
+itself; the count shown with a detail open is the one from the last Timeline observation, not a live
+count. Keeping park and resume on the Timeline keeps follow semantics defined in one place instead of
+adding an interaction between the monitor and exact-event reading. Return to the Timeline to park or
+resume.
+
 The Changes and Attention lenses render Change cards, explicit current-Revision choices,
 relation-claim provenance, exact captured resources, fact origin/currency, association comparisons,
 and separately identified Revision interdiffs. Parallel current Revisions remain distinct from a
