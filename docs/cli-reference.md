@@ -1802,6 +1802,14 @@ pointbreak revision show [REVISION] [--repo <path>] [--track <track-id>] \
 - If multiple revisions exist, pass the `[REVISION]` positional. It is a **head seed**: a current
   head resolves exactly; a superseded revision resolves its thread's current head; and a thread with
   competing heads is reported as competing rather than auto-picked.
+- `revision show` retains legacy proposal-supersession selection and facets and does not follow Change
+  replacement: the `[REVISION]` head seed, `validationChecks[].supersededByRevisions`, and
+  `stale_by_superseding_revision` read the proposal-borne `supersedes` list only, so a Revision a
+  Change has replaced still resolves to itself. On a store that holds Change authority the document
+  says so with the advisory diagnostic `change_replacement_not_followed`, and the text digest ends
+  with the same pointer. Read Change-scoped replacement with `pointbreak change show <change-id>`
+  (current set) and the exact Revision with `pointbreak change revision <change-id> <revision-id>
+  --artifact-hash <sha256>`; `change revision` shares this projection without the redirect.
 - The output includes revision identity, event-set freshness metadata, filters, summary counts,
   current assessment status, native observations, input requests, assessments, validation checks,
   projection rows, and diagnostics.
