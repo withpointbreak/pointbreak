@@ -86,6 +86,31 @@ pub fn revision_supersession_classification(
     map
 }
 
+/// Classify every captured revision the way `revision list --filter` reads it:
+/// through Change-scoped replacement (ADR-0042), with the same authority rule
+/// as [`SupersessionView::replacement_from_events`].
+///
+/// `state` comes from the replacement view. `competing` comes from the
+/// competition graph attention reads (`change_aware_supersession`): once the
+/// store holds any Change claim it carries no edges, because divergence inside
+/// a Change surfaces through the Change lifecycle and two Changes that each
+/// replace a shared Revision do not compete. A store without Change claims
+/// classifies exactly as [`revision_supersession_classification`] over its
+/// proposal-borne view.
+pub fn revision_replacement_classification(
+    events: &[ShoreEvent],
+) -> Result<BTreeMap<RevisionId, RevisionClassificationFacet>> {
+    let legacy = SupersessionView::from_events(events)?;
+    let changes = crate::session::projection::change::project_changes(events)?;
+    let views = crate::session::workflow::attention::change_aware_supersession(&legacy, &changes);
+    let contested = revision_supersession_classification(&views.competition);
+    let mut classification = revision_supersession_classification(&views.replacement);
+    for (revision, facet) in &mut classification {
+        facet.competing = contested.get(revision).is_some_and(|facet| facet.competing);
+    }
+    Ok(classification)
+}
+
 impl SupersessionView {
     /// Builds the view from synthetic `revision -> supersedes` edges.
     ///
@@ -795,6 +820,49 @@ mod tests {
                 "{:?}",
                 view.diagnostics
             );
+        }
+
+        #[test]
+        fn classification_reads_change_scoped_replacement() {
+            let mut store = ChangeStoreEvents::default();
+            let a = store.revision("a", "one");
+            let b = store.revision("b", "one");
+            let c = store.revision("c", "two");
+            let x = store.change(&[&a, &b]);
+            store.replace(&x, &b, &a);
+            let y = store.change(&[&c, &a]);
+
+            // Still current in y: nothing is replaced yet.
+            let classes = revision_replacement_classification(&store.events).unwrap();
+            for revision in [&a, &b, &c] {
+                assert_eq!(classes[&revision.revision_id].state, "isolated");
+            }
+
+            // Replaced in every Change that holds it: superseded, with both
+            // successors as heads, and not contested (two Changes each replacing
+            // a shared Revision do not compete).
+            store.replace(&y, &c, &a);
+            let classes = revision_replacement_classification(&store.events).unwrap();
+            assert_eq!(classes[&a.revision_id].state, "superseded");
+            assert_eq!(classes[&b.revision_id].state, "head");
+            assert_eq!(classes[&c.revision_id].state, "head");
+            assert!(classes.values().all(|facet| !facet.competing));
+        }
+
+        #[test]
+        fn classification_without_change_claims_is_unchanged() {
+            // A proposal-borne fork: b and c both supersede a.
+            let mut store = ChangeStoreEvents::default();
+            let a = store.revision("a", "one");
+            store.revision_superseding("b", "one", vec![a.revision_id.clone()]);
+            store.revision_superseding("c", "one", vec![a.revision_id.clone()]);
+            let legacy = revision_supersession_classification(
+                &SupersessionView::from_events(&store.events).unwrap(),
+            );
+            let classes = revision_replacement_classification(&store.events).unwrap();
+            assert_eq!(classes, legacy);
+            assert_eq!(classes[&a.revision_id].state, "superseded");
+            assert!(classes[&a.revision_id].competing);
         }
 
         #[test]

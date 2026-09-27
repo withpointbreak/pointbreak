@@ -2844,6 +2844,8 @@ fn change_replacement_attention_equals_strict_replay_after_every_prefix() {
         .find(|component| names(component).contains(&revision_id("replaced").as_str().to_owned()))
         .expect("thread of the replaced Revision");
     assert_eq!(names(thread).len(), 3, "{thread}");
+    // The revision family classifies from the same replacement view.
+    assert_eq!(strict.revisions["supersession"], *supersession);
 }
 
 /// Two individually acyclic Change histories over the same Revisions

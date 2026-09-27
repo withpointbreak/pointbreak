@@ -1763,7 +1763,11 @@ use the summary as the primary selection label.
   (`open|answered|unassessed|stale|follow-up|contested|superseded`), `tag:` (full string or
   first-colon key), `attention:` (`open-request|unassessed|validation-context|follow-up|stale-fact`),
   and `before:`/`after:` (ISO-8601 prefixes over the capture time); bare terms match the revision's
-  human text, and a leading `-` negates a clause. Only a filtered listing builds the per-revision
+  human text, and a leading `-` negates a clause. `is:superseded` and `is:contested` read replacement
+  from the same authority as `attention list`: on a store that holds Change claims a revision is
+  superseded only when every Change that holds it has replaced it, and nothing is contested (divergence
+  inside a Change surfaces through `change show`); proposal-borne `supersedes` decides them only on a
+  store with no Change claims. Only a filtered listing builds the per-revision
   overviews and supersession classification — a plain listing pays no new cost — and a grouped row
   filters on its representative revision. A known-but-unsupported qualifier (`type:`/`check:` on
   this surface) exits non-zero with the diagnostic; the deprecated `status:` alias for

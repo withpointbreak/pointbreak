@@ -122,8 +122,8 @@ pub use projection::{
     RevisionRefUnavailableReasonV1, RevisionsByBase, SessionState, StoreIdIndex, SupersessionView,
     WithdrawnCommitAssociation, WithdrawnRefAssociation, change_document_projection_stamp,
     project_change_documents, project_changes, read_events, read_events_for_display,
-    rebind_event_history_source_projection_stamp, revision_supersession_classification,
-    store_id_index,
+    rebind_event_history_source_projection_stamp, revision_replacement_classification,
+    revision_supersession_classification, store_id_index,
 };
 pub use sensitivity_vocabulary::{SensitivityKind, SensitivityPolicyOutcome, SensitivitySeverity};
 pub use signing::{
