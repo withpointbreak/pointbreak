@@ -357,6 +357,14 @@ impl DerivedChangeAccess {
         &self,
         change: &ChangeId,
     ) -> Result<DerivedChangeOutcomeV1<crate::documents::ChangeDetailDocumentV1>> {
+        self.review_generation_detail_document_with_hook(change, || {})
+    }
+
+    fn review_generation_detail_document_with_hook(
+        &self,
+        change: &ChangeId,
+        after_hydration: impl FnOnce(),
+    ) -> Result<DerivedChangeOutcomeV1<crate::documents::ChangeDetailDocumentV1>> {
         let generation = self.review_generation()?;
         Ok(match generation {
             DerivedChangeOutcomeV1::Ready(generation) => {
@@ -419,6 +427,15 @@ impl DerivedChangeAccess {
                             ));
                         }
                     };
+                after_hydration();
+                // Hydration read authoritative carriers after the generation's
+                // own terminal proof, so the detail re-proves currentness itself.
+                if let Some(outcome) = self.generation_terminal_proof_outcome(
+                    current.generation_id(),
+                    &generation.checkpoint_sha256,
+                ) {
+                    return Ok(outcome);
+                }
                 DerivedChangeOutcomeV1::Ready(
                     facade.detail_document_with_hydrated_proposals(change, &proposals)?,
                 )
@@ -511,17 +528,32 @@ impl DerivedChangeAccess {
 
         hook();
 
+        if let Some(outcome) =
+            self.generation_terminal_proof_outcome(&generation_id, &checkpoint.checkpoint_sha256)
+        {
+            return Ok(outcome);
+        }
+        Ok(DerivedChangeOutcomeV1::Ready(generation))
+    }
+
+    /// Terminal currentness proof for whole-generation reads: re-read current
+    /// and require the generation and checkpoint the response was composed at.
+    fn generation_terminal_proof_outcome<T>(
+        &self,
+        generation_id: &str,
+        checkpoint_sha256: &str,
+    ) -> Option<DerivedChangeOutcomeV1<T>> {
         let final_current = match self.runtime.current() {
             Ok(RuntimeCurrentRead::Ready(current)) => current,
             Ok(RuntimeCurrentRead::Unavailable(_)) | Err(_) => {
-                return Ok(DerivedChangeOutcomeV1::retryable(
+                return Some(DerivedChangeOutcomeV1::retryable(
                     DerivedProjectionFailureCodeV1::ProjectionUnstable,
                     "derived Change generation moved before response completion",
                 ));
             }
         };
         if final_current.generation_id() != generation_id {
-            return Ok(DerivedChangeOutcomeV1::retryable(
+            return Some(DerivedChangeOutcomeV1::retryable(
                 DerivedProjectionFailureCodeV1::ProjectionUnstable,
                 "derived Change generation changed before response completion",
             ));
@@ -529,20 +561,19 @@ impl DerivedChangeAccess {
         let final_checkpoint = match final_current.pin_change_reader_checkpoint() {
             Ok(checkpoint) => checkpoint,
             Err(LifecycleError::TruthChanged) => {
-                return Ok(DerivedChangeOutcomeV1::retryable(
+                return Some(DerivedChangeOutcomeV1::retryable(
                     DerivedProjectionFailureCodeV1::ProjectionUnstable,
                     "derived Change checkpoint moved before response completion",
                 ));
             }
-            Err(error) => return Ok(lifecycle_failure_outcome(error)),
+            Err(error) => return Some(lifecycle_failure_outcome(error)),
         };
-        if final_checkpoint.checkpoint_sha256 != checkpoint.checkpoint_sha256 {
-            return Ok(DerivedChangeOutcomeV1::retryable(
+        (final_checkpoint.checkpoint_sha256 != checkpoint_sha256).then(|| {
+            DerivedChangeOutcomeV1::retryable(
                 DerivedProjectionFailureCodeV1::ProjectionUnstable,
                 "derived Change checkpoint changed before response completion",
-            ));
-        }
-        Ok(DerivedChangeOutcomeV1::Ready(generation))
+            )
+        })
     }
 
     pub fn changes(
@@ -5617,6 +5648,40 @@ mod tests {
             DerivedProjectionFailureCodeV1::ProjectionUnstable
         );
         assert!(document.is_retryable());
+    }
+
+    #[test]
+    fn review_generation_detail_document_maps_post_hydration_drift_to_retryable() {
+        let fixture = ActiveChangeFixture::new(&[&[
+            Some("moving detail state"),
+            Some("moving detail state"),
+        ]]);
+        let change_id = fixture.changes[0].change_id.clone();
+        let mut appended = false;
+        let outcome = fixture
+            .access
+            .review_generation_detail_document_with_hook(&change_id, || {
+                fixture.append_unrelated("review-detail-post-hydration-movement");
+                appended = true;
+            })
+            .expect("read the detail across post-hydration movement");
+        assert!(appended, "the post-hydration hook must run");
+        let DerivedChangeOutcomeV1::Retryable(document) = outcome else {
+            panic!("movement after proposal hydration must be retryable, not Ready");
+        };
+        assert_eq!(
+            document.code(),
+            DerivedProjectionFailureCodeV1::ProjectionUnstable
+        );
+        assert!(document.is_retryable());
+
+        let DerivedChangeOutcomeV1::Ready(_) = fixture
+            .access
+            .review_generation_detail_document(&change_id)
+            .expect("reread the detail once current is stable")
+        else {
+            panic!("a stable reread after the movement must be ready");
+        };
     }
 
     #[test]
