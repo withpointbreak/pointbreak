@@ -26,10 +26,12 @@ const INDEX_BODY = `
       <span id="store-chip" class="store-identity-chip" tabindex="0" aria-label="local review server">
         <span id="refresh" class="store-live" data-state="idle" title="Auto-refresh status" aria-hidden="true"></span>
         <span id="store-chip-repo" class="store-identity-repo">local server</span>
+        <span id="store-chip-advisory" class="store-identity-advisory hidden" aria-hidden="true">⚠</span>
         <span class="store-identity-caret" aria-hidden="true">▾</span>
       </span>
       <div class="store-identity-detail" aria-hidden="true">
         <dl id="store-identity-rows"></dl>
+        <p id="store-identity-advisory" class="store-identity-advisory-note hidden"></p>
         <div class="store-identity-stats">
           <span id="stat-events" class="stat" title="durable events in the store">— events</span>
           <span id="stat-units" class="stat" title="Changes in the current page">— Changes</span>

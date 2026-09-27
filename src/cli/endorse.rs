@@ -36,6 +36,14 @@ pub(super) struct EndorseArgs {
     format_args: output::FormatArgs,
 }
 
+impl EndorseArgs {
+    /// The repository whose write store this invocation resolves (always: every
+    /// form writes). Feeds the shared CLI write seam (`cli::write_store_repo`).
+    pub(super) fn write_store_repo(&self) -> Option<&std::path::Path> {
+        Some(&self.repo)
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EndorseBody {

@@ -4143,6 +4143,12 @@ struct IdentityPayload {
     schema: &'static str,
     #[serde(flatten)]
     identity: StoreIdentity,
+    /// The best-effort family-split advisory (ADR-0033, issue #404), verbatim
+    /// from the same library signal `store status` and the CLI write seam
+    /// surface. Absent when there is nothing to advise or the lookup fails —
+    /// identity chrome never fails on it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    family_link_advisory: Option<String>,
 }
 
 /// The path-private repo/store identity the inspector chrome renders (issue #391):
@@ -4155,6 +4161,9 @@ pub(super) fn identity_json(repo: &Path) -> Result<String, String> {
     let payload = IdentityPayload {
         schema: "pointbreak.inspect-identity",
         identity,
+        family_link_advisory: pointbreak::session::family_link_advisory(repo)
+            .ok()
+            .flatten(),
     };
     serde_json::to_string(&payload).map_err(|error| error.to_string())
 }

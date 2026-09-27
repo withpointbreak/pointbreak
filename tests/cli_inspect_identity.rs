@@ -35,6 +35,9 @@ fn identity_reports_clone_placement_and_repo_basename() {
     // No family under the clone-local tier; no worktree row in the main worktree.
     assert!(id.get("family").is_none() || id["family"].is_null());
     assert!(id.get("worktree").is_none() || id["worktree"].is_null());
+    // The family-split advisory is additive and omitted when there is nothing
+    // to advise (issue #404).
+    assert!(id.get("familyLinkAdvisory").is_none());
 }
 
 #[test]

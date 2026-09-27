@@ -25,6 +25,19 @@ pub(super) struct AssociationArgs {
     command: AssociationCommand,
 }
 
+impl AssociationArgs {
+    /// The repository whose write store this invocation resolves, or `None` for
+    /// a read. Feeds the shared CLI write seam (`cli::write_store_repo`).
+    pub(super) fn write_store_repo(&self) -> Option<&std::path::Path> {
+        match &self.command {
+            AssociationCommand::Record(args) => Some(&args.repo),
+            AssociationCommand::Land(args) => Some(&args.repo),
+            AssociationCommand::Withdraw(args) => Some(&args.repo),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum AssociationCommand {
     Record(AssociationRecordArgs),

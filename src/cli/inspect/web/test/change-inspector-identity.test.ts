@@ -16,7 +16,21 @@ describe("Inspector identity DTO", () => {
     expect(decodeInspectorIdentity(identity)).toEqual(identity);
   });
 
+  it("accepts an optional server-supplied family-split advisory", () => {
+    const advised = {
+      ...identity,
+      familyLinkAdvisory:
+        "a sibling worktree is linked to family store pointbreak; run pointbreak store link pointbreak",
+    };
+    expect(decodeInspectorIdentity(advised)).toEqual(advised);
+    expect(
+      decodeInspectorIdentity(identity).familyLinkAdvisory,
+    ).toBeUndefined();
+  });
+
   it.each([
+    ["empty advisory", { ...identity, familyLinkAdvisory: "" }],
+    ["non-string advisory", { ...identity, familyLinkAdvisory: true }],
     ["wrong schema", { ...identity, schema: "pointbreak.inspect-other" }],
     ["empty repository", { ...identity, repository: "" }],
     [

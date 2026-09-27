@@ -259,6 +259,8 @@ export function renderChangeInspectorIdentity(
   const repository = document.querySelector<HTMLElement>("#store-chip-repo");
   const chip = document.querySelector<HTMLElement>("#store-chip");
   const rows = document.querySelector<HTMLElement>("#store-identity-rows");
+  const advisory = identity?.familyLinkAdvisory;
+  renderFamilyLinkAdvisory(advisory);
   if (identity === null) {
     if (repository) repository.textContent = "local server";
     chip?.setAttribute("aria-label", "local review server");
@@ -284,11 +286,28 @@ export function renderChangeInspectorIdentity(
     rows.replaceChildren(...children);
   }
   if (repository) repository.textContent = identity.repository;
+  const label = values.map(([name, value]) => `${name} ${value}`).join(", ");
   chip?.setAttribute(
     "aria-label",
-    values.map(([label, value]) => `${label} ${value}`).join(", "),
+    advisory === undefined ? label : `${label}, advisory ${advisory}`,
   );
   document.title = `${identity.repository} · ${INSPECTOR_TITLE}`;
+}
+
+/**
+ * Paint the server-supplied family-split advisory near the store-identity chip
+ * (issue #404): a warning mark on the chip and the advisory text, verbatim, in
+ * the detail popover. The client never composes or infers the advisory.
+ */
+function renderFamilyLinkAdvisory(advisory: string | undefined): void {
+  const mark = document.querySelector<HTMLElement>("#store-chip-advisory");
+  const note = document.querySelector<HTMLElement>("#store-identity-advisory");
+  mark?.classList.toggle("hidden", advisory === undefined);
+  if (mark) mark.title = advisory ?? "";
+  if (note) {
+    note.textContent = advisory ?? "";
+    note.classList.toggle("hidden", advisory === undefined);
+  }
 }
 
 function replaceMasterWith(...children: Node[]): void {

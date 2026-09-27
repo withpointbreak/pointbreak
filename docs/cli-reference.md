@@ -899,8 +899,12 @@ commit and a single `pointbreak store link` binds the main checkout and every cu
 a `familyRef` or `cloneRef` there is rejected with guidance to run `pointbreak store link <slug>`.
 A worktree can still opt out locally with `pointbreak store mode ephemeral`. When a worktree writes
 to its clone-local store while a sibling worktree of the same clone is linked, `pointbreak store
-status` and `pointbreak capture` surface a one-line advisory pointing at `pointbreak store link
-<slug>` — the split is signalled, never silent. Before any family write,
+status`, every verb that resolves a write store (`capture`, `change` writers, `association`
+record/land/withdraw, `observation add`, `validation add`, `assessment add`, `input-request`
+open/respond, `endorse`, `fact port`, and `store remove`/`gc`/`compact`), and the Inspector's store
+chip surface a one-line advisory pointing at `pointbreak store link <slug>` — the split is signalled,
+never silent. Write verbs print it on stderr after a successful write, from one shared CLI seam; it
+never fails the command. Before any family write,
 `link` runs its gates in order: it refuses an ephemeral worktree (override `--include-ephemeral`) and
 a sensitivity-flagged worktree (override `--include-sensitive`), refuses a slug already stamped for a
 different family, and warns (without blocking) on a sync-managed filesystem path or when the clone

@@ -747,8 +747,9 @@
       "repository",
       "worktree",
       "placement",
-      "family"
-    ]) || document2.schema !== "pointbreak.inspect-identity" || !nonEmptyString(document2.storeIdentity) || !nonEmptyString(document2.contextIdentity) || !basename(document2.repository) || document2.worktree !== void 0 && !basename(document2.worktree) || placement === null || !hasOnlyKeys(placement, ["tier", "label"]) || expectedLabel === null || placement.label !== expectedLabel || family !== void 0 && (family === null || !hasOnlyKeys(family, ["id"]) || !familySlug(family.id)) || tier === "family" !== (family !== void 0)) {
+      "family",
+      "familyLinkAdvisory"
+    ]) || document2.schema !== "pointbreak.inspect-identity" || !nonEmptyString(document2.storeIdentity) || !nonEmptyString(document2.contextIdentity) || !basename(document2.repository) || document2.worktree !== void 0 && !basename(document2.worktree) || document2.familyLinkAdvisory !== void 0 && !nonEmptyString(document2.familyLinkAdvisory) || placement === null || !hasOnlyKeys(placement, ["tier", "label"]) || expectedLabel === null || placement.label !== expectedLabel || family !== void 0 && (family === null || !hasOnlyKeys(family, ["id"]) || !familySlug(family.id)) || tier === "family" !== (family !== void 0)) {
       throw new Error("invalid Inspector identity DTO");
     }
     return {
@@ -761,7 +762,8 @@
         tier,
         label: expectedLabel
       },
-      ...family === void 0 ? {} : { family: { id: family.id } }
+      ...family === void 0 ? {} : { family: { id: family.id } },
+      ...document2.familyLinkAdvisory === void 0 ? {} : { familyLinkAdvisory: document2.familyLinkAdvisory }
     };
   }
   __name(decodeInspectorIdentity, "decodeInspectorIdentity");
@@ -8383,6 +8385,8 @@
     const repository = document.querySelector("#store-chip-repo");
     const chip = document.querySelector("#store-chip");
     const rows = document.querySelector("#store-identity-rows");
+    const advisory = identity?.familyLinkAdvisory;
+    renderFamilyLinkAdvisory(advisory);
     if (identity === null) {
       if (repository) repository.textContent = "local server";
       chip?.setAttribute("aria-label", "local review server");
@@ -8398,9 +8402,9 @@
     if (identity.worktree) values.push(["worktree", identity.worktree]);
     if (rows) {
       const children = [];
-      for (const [label2, value] of values) {
+      for (const [label3, value] of values) {
         const term = document.createElement("dt");
-        term.textContent = label2;
+        term.textContent = label3;
         const description = document.createElement("dd");
         description.textContent = value;
         children.push(term, description);
@@ -8408,13 +8412,25 @@
       rows.replaceChildren(...children);
     }
     if (repository) repository.textContent = identity.repository;
+    const label2 = values.map(([name, value]) => `${name} ${value}`).join(", ");
     chip?.setAttribute(
       "aria-label",
-      values.map(([label2, value]) => `${label2} ${value}`).join(", ")
+      advisory === void 0 ? label2 : `${label2}, advisory ${advisory}`
     );
     document.title = `${identity.repository} · ${INSPECTOR_TITLE}`;
   }
   __name(renderChangeInspectorIdentity, "renderChangeInspectorIdentity");
+  function renderFamilyLinkAdvisory(advisory) {
+    const mark = document.querySelector("#store-chip-advisory");
+    const note = document.querySelector("#store-identity-advisory");
+    mark?.classList.toggle("hidden", advisory === void 0);
+    if (mark) mark.title = advisory ?? "";
+    if (note) {
+      note.textContent = advisory ?? "";
+      note.classList.toggle("hidden", advisory === void 0);
+    }
+  }
+  __name(renderFamilyLinkAdvisory, "renderFamilyLinkAdvisory");
   function replaceMasterWith(...children) {
     const master = document.querySelector("#master");
     if (!master) return;
