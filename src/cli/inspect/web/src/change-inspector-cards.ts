@@ -139,6 +139,48 @@ function attentionPresentation(
   };
 }
 
+/**
+ * One current exact Revision named from its server presentation entry, the
+ * single client mapping shared by Change cards and the Change detail chooser.
+ * Only a supplied summary yields a label; without one the exact identity names
+ * the peer and the server's absent-summary cue, when sent, is carried beside it.
+ */
+export function currentRevisionPeer(
+  revision: RevisionRef,
+  entry: ChangePresentation["currentRevisions"][number] | undefined,
+): ChangeCardPeer {
+  const summaryLabel =
+    entry?.summarySource === "revision_proposal_summary"
+      ? entry.revisionProposalSummary
+      : undefined;
+  const identity = exactRevisionAccessibleIdentity(revision);
+  // Only a supplied summary yields a label: the server's finished string, or
+  // the summary itself from an older server that sends no `label`. Without
+  // one the exact identity names the peer; the client never invents a
+  // headline (#752).
+  const visibleLabel =
+    summaryLabel === undefined ? undefined : (entry?.label ?? summaryLabel);
+  const absentSummaryCue =
+    entry?.summarySource === "absent" ? entry.absentSummaryCue : undefined;
+  return {
+    revision,
+    ...(visibleLabel === undefined ? {} : { label: visibleLabel }),
+    ...(absentSummaryCue === undefined ? {} : { absentSummaryCue }),
+    visibleIdentity: shortExactRevision(revision),
+    // The accessible name leads with the same visible label the card shows
+    // (never a raw summary that could drift from it), and stays identity-led
+    // for an absent summary so it never claims a summary that was not given.
+    accessibleName:
+      visibleLabel !== undefined
+        ? `Current Revision — ${visibleLabel}; ${identity}`
+        : absentSummaryCue !== undefined
+          ? `Current Revision — ${identity}; ${absentSummaryCue}`
+          : `Current Revision — ${identity}`,
+    title: identity,
+    copyText: exactRevisionCopyText([revision]),
+  };
+}
+
 export function changeCardPresentation(
   summary: ChangeSummary,
   presentation: ChangePresentation | undefined,
@@ -149,41 +191,14 @@ export function changeCardPresentation(
       entry,
     ]),
   );
-  const peers = summary.currentRevisionRefs.map((revision) => {
-    const entry = byExactIdentity.get(
-      `${revision.revisionId}\u0000${revision.objectArtifactContentHash}`,
-    );
-    const summaryLabel =
-      entry?.summarySource === "revision_proposal_summary"
-        ? entry.revisionProposalSummary
-        : undefined;
-    const identity = exactRevisionAccessibleIdentity(revision);
-    // Only a supplied summary yields a label: the server's finished string, or
-    // the summary itself from an older server that sends no `label`. Without
-    // one the exact identity names the peer; the client never invents a
-    // headline (#752).
-    const visibleLabel =
-      summaryLabel === undefined ? undefined : (entry?.label ?? summaryLabel);
-    const absentSummaryCue =
-      entry?.summarySource === "absent" ? entry.absentSummaryCue : undefined;
-    return {
+  const peers = summary.currentRevisionRefs.map((revision) =>
+    currentRevisionPeer(
       revision,
-      ...(visibleLabel === undefined ? {} : { label: visibleLabel }),
-      ...(absentSummaryCue === undefined ? {} : { absentSummaryCue }),
-      visibleIdentity: shortExactRevision(revision),
-      // The accessible name leads with the same visible label the card shows
-      // (never a raw summary that could drift from it), and stays identity-led
-      // for an absent summary so it never claims a summary that was not given.
-      accessibleName:
-        visibleLabel !== undefined
-          ? `Current Revision — ${visibleLabel}; ${identity}`
-          : absentSummaryCue !== undefined
-            ? `Current Revision — ${identity}; ${absentSummaryCue}`
-            : `Current Revision — ${identity}`,
-      title: identity,
-      copyText: exactRevisionCopyText([revision]),
-    };
-  });
+      byExactIdentity.get(
+        `${revision.revisionId}\u0000${revision.objectArtifactContentHash}`,
+      ),
+    ),
+  );
   const onlyPeer = peers.length === 1 ? peers[0] : undefined;
   const headline =
     onlyPeer === undefined

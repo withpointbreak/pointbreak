@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
+use super::change_detail_proposals::DetailProposalHydrationError;
 use super::change_revision_reads::ExactRevisionSessionStateV1;
 use super::lifecycle::LifecycleError;
 use super::locator::LocatorRead;
@@ -359,14 +360,68 @@ impl DerivedChangeAccess {
         let generation = self.review_generation()?;
         Ok(match generation {
             DerivedChangeOutcomeV1::Ready(generation) => {
-                let document = ChangeDocumentFacadeV1::new(
+                let facade = ChangeDocumentFacadeV1::new(
                     generation.projection().clone(),
                     generation.document_projection().clone(),
                 )?
                 .with_ordering(generation.ordering().clone())?
-                .with_generation_stamp(generation.stamp().to_owned())?
-                .detail_document(change)?;
-                DerivedChangeOutcomeV1::Ready(document)
+                .with_generation_stamp(generation.stamp().to_owned())?;
+                // Current-Revision presentation entries (#755) hydrate their
+                // proposal carriers at this generation's own checkpoint.
+                let revisions = facade
+                    .detail_document(change)?
+                    .detail
+                    .current_revision_refs
+                    .into_iter()
+                    .collect::<BTreeSet<_>>();
+                let current = match self.runtime.current() {
+                    Ok(RuntimeCurrentRead::Ready(current)) => current,
+                    Ok(RuntimeCurrentRead::Unavailable(_)) | Err(_) => {
+                        return Ok(DerivedChangeOutcomeV1::retryable(
+                            DerivedProjectionFailureCodeV1::ProjectionUnstable,
+                            "derived Change generation moved before detail composition",
+                        ));
+                    }
+                };
+                let checkpoint = match current.pin_change_reader_checkpoint() {
+                    Ok(checkpoint) => checkpoint,
+                    Err(LifecycleError::TruthChanged) => {
+                        return Ok(DerivedChangeOutcomeV1::retryable(
+                            DerivedProjectionFailureCodeV1::ProjectionUnstable,
+                            "derived Change checkpoint moved before detail composition",
+                        ));
+                    }
+                    Err(error) => return Ok(lifecycle_failure_outcome(error)),
+                };
+                if checkpoint.checkpoint_sha256 != generation.checkpoint_sha256 {
+                    return Ok(DerivedChangeOutcomeV1::retryable(
+                        DerivedProjectionFailureCodeV1::ProjectionUnstable,
+                        "derived Change checkpoint changed before detail composition",
+                    ));
+                }
+                let proposals =
+                    match super::change_detail_proposals::hydrate_current_revision_proposals(
+                        current.service(),
+                        &revisions,
+                        checkpoint.truth_cursor,
+                    ) {
+                        Ok(proposals) => proposals,
+                        Err(DetailProposalHydrationError::Stale(message)) => {
+                            return Ok(DerivedChangeOutcomeV1::retryable(
+                                DerivedProjectionFailureCodeV1::ProjectionStale,
+                                message,
+                            ));
+                        }
+                        Err(DetailProposalHydrationError::Invalid(message)) => {
+                            return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                                DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                                message,
+                            ));
+                        }
+                    };
+                DerivedChangeOutcomeV1::Ready(
+                    facade.detail_document_with_hydrated_proposals(change, &proposals)?,
+                )
             }
             DerivedChangeOutcomeV1::AuthorityUnavailable(document) => {
                 DerivedChangeOutcomeV1::AuthorityUnavailable(document)
@@ -5605,6 +5660,14 @@ mod tests {
             .expect("bind the staged generation stamp")
             .detail_document(&change_id)
             .expect("compose strict Change detail");
+        // The detail's current-Revision presentation entries are the page's
+        // own entries for this Change (#755).
+        let mut expected = expected;
+        expected.detail.current_revision_presentations = Some(
+            page.document.presentations[&change_id]
+                .current_revisions
+                .clone(),
+        );
         assert_eq!(detail, expected);
         assert_eq!(
             detail.detail.projection_stamp,
@@ -8173,6 +8236,20 @@ mod tests {
         expected.detail.summary.projection_stamp = String::new();
         actual.detail.projection_stamp = String::new();
         actual.detail.summary.projection_stamp = String::new();
+        // Current-Revision presentation entries (#755) are the Change page's
+        // own entries for this Change.
+        let DerivedChangeOutcomeV1::Ready(page) = fixture
+            .access
+            .changes(&DerivedChangePageRequestV1::Bare)
+            .unwrap()
+        else {
+            panic!("fixture page must be ready");
+        };
+        expected.detail.current_revision_presentations = Some(
+            page.document.presentations[&change_id]
+                .current_revisions
+                .clone(),
+        );
         assert_eq!(
             actual, expected,
             "every other detail byte equals the authoritative composition"
@@ -8971,6 +9048,16 @@ mod tests {
         let actual = serde_json::to_string_pretty(&snapshot).unwrap();
         const EXPECTED: &str = r#"{
   "detail": {
+    "currentRevisionPresentations": [
+      {
+        "absentSummaryCue": "No summary supplied",
+        "revision": {
+          "objectArtifactContentHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "revisionId": "rev:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "summarySource": "absent"
+      }
+    ],
     "currentRevisionRefs": [
       {
         "objectArtifactContentHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",

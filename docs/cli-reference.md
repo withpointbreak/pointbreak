@@ -333,7 +333,12 @@ conflicting, or otherwise ambiguous authority record remains unavailable rather 
 `ready`. The current bulk-adoption commands are one temporary procedure for the first cohort, not an
 implicit general-purpose migration path.
 
-`list`, `attention`, and `show` render the authoritative Change projection. A Change may have multiple
+`list`, `attention`, and `show` render the authoritative Change projection. The `show` document
+(`pointbreak.review-change`) also carries `currentRevisionPresentations`: one entry per
+`currentRevisionRefs` member, in the same order, built by the same fold as the Inspector Changes page's
+`presentations[].currentRevisions[]` (the proposal summary and `label` when one was supplied, otherwise
+the `absentSummaryCue`). The member is additive and optional, so the document stays version 1. The
+Inspector's Change detail chooser reads only this member. A Change may have multiple
 legitimate current Revisions; `select` therefore requires `--revision` when there is no unique current
 candidate and returns a self-hashed cursor rather than writing state. Supplying a previous `--cursor`
 revalidates the graph before returning a new selection. `revision` and `resource` require the exact

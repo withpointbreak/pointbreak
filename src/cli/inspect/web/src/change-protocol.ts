@@ -703,6 +703,13 @@ export interface ChangeDetail {
   diagnostics: string[];
   projectionStamp: string;
   /**
+   * Server-owned presentation entries for `currentRevisionRefs`, built by the
+   * same fold as the list page's `presentations[].currentRevisions[]` (#755).
+   * Version stays 1: the member is additive and optional, so a detail from an
+   * older server without it still parses, and its chooser shows exact ids only.
+   */
+  currentRevisionPresentations?: ChangePresentation["currentRevisions"];
+  /**
    * Non-durable Inspector geometry. This private projection is deliberately
    * absent from the shared Change-reader document when no graph can be laid
    * out.
@@ -1081,6 +1088,7 @@ export function decodeChangeDetail(value: unknown): ChangeDetail {
     detail.perCurrentRevisionQualification;
   const operativeObligations = detail.operativeObligations;
   const diagnostics = detail.diagnostics;
+  const currentRevisionPresentations = detail.currentRevisionPresentations;
   const inspectorPresentation = detail.inspectorPresentation;
   if (
     detail.schema !== "pointbreak.review-change" ||
@@ -1110,7 +1118,11 @@ export function decodeChangeDetail(value: unknown): ChangeDetail {
       currentRevisionRefs,
     ) ||
     !isStringArray(operativeObligations) ||
-    !isStringArray(diagnostics)
+    !isStringArray(diagnostics) ||
+    !isDetailCurrentRevisionPresentations(
+      currentRevisionPresentations,
+      currentRevisionRefs,
+    )
   ) {
     throw new Error("invalid Change detail DTO");
   }
@@ -1143,8 +1155,35 @@ export function decodeChangeDetail(value: unknown): ChangeDetail {
     operativeObligations,
     diagnostics,
     projectionStamp: stamp,
+    ...(currentRevisionPresentations === undefined
+      ? {}
+      : { currentRevisionPresentations }),
     inspectorPresentation,
   };
+}
+
+/**
+ * The detail's optional current-Revision presentation entries: when present,
+ * exactly one well-formed entry per current exact Revision, in the document's
+ * own `currentRevisionRefs` order.
+ */
+function isDetailCurrentRevisionPresentations(
+  value: unknown,
+  currentRevisionRefs: RevisionRef[],
+): value is ChangePresentation["currentRevisions"] | undefined {
+  if (value === undefined) return true;
+  return (
+    Array.isArray(value) &&
+    value.length === currentRevisionRefs.length &&
+    value.every(
+      (entry, index) =>
+        isPresentationRevision(entry) &&
+        sameRevision(
+          (entry as { revision: RevisionRef }).revision,
+          currentRevisionRefs[index],
+        ),
+    )
+  );
 }
 
 export function decodeChangeRevisionDetail(

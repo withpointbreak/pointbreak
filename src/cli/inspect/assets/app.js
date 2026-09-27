@@ -913,6 +913,7 @@
     const perCurrentRevisionQualification = detail.perCurrentRevisionQualification;
     const operativeObligations = detail.operativeObligations;
     const diagnostics = detail.diagnostics;
+    const currentRevisionPresentations = detail.currentRevisionPresentations;
     const inspectorPresentation = detail.inspectorPresentation;
     if (detail.schema !== "pointbreak.review-change" || detail.version !== 1 || !nonEmptyString2(stamp) || !isChangeSummary(summary, stamp) || !isChangeMemberRevisions(memberRevisions) || !isUnavailableChangeMemberRevisions(unavailableMemberRevisions) || !isMembershipClaims(membershipClaims, summary.changeId) || !isClaimWithdrawals(membershipWithdrawals) || !Array.isArray(relationClaims) || !relationClaims.every(
       (claim) => isRelationClaim(claim, summary.changeId)
@@ -921,7 +922,10 @@
     ) || !Array.isArray(currentRevisionRefs) || !currentRevisionRefs.every(isRevisionRef) || !sameRevisionSet(currentRevisionRefs, summary.currentRevisionRefs) || !isRevisionQualifications(
       perCurrentRevisionQualification,
       currentRevisionRefs
-    ) || !isStringArray(operativeObligations) || !isStringArray(diagnostics)) {
+    ) || !isStringArray(operativeObligations) || !isStringArray(diagnostics) || !isDetailCurrentRevisionPresentations(
+      currentRevisionPresentations,
+      currentRevisionRefs
+    )) {
       throw new Error("invalid Change detail DTO");
     }
     if (!isChangeDetailInspectorPresentation(inspectorPresentation, {
@@ -951,10 +955,21 @@
       operativeObligations,
       diagnostics,
       projectionStamp: stamp,
+      ...currentRevisionPresentations === void 0 ? {} : { currentRevisionPresentations },
       inspectorPresentation
     };
   }
   __name(decodeChangeDetail, "decodeChangeDetail");
+  function isDetailCurrentRevisionPresentations(value, currentRevisionRefs) {
+    if (value === void 0) return true;
+    return Array.isArray(value) && value.length === currentRevisionRefs.length && value.every(
+      (entry, index) => isPresentationRevision(entry) && sameRevision(
+        entry.revision,
+        currentRevisionRefs[index]
+      )
+    );
+  }
+  __name(isDetailCurrentRevisionPresentations, "isDetailCurrentRevisionPresentations");
   function decodeChangeRevisionDetail(value) {
     const detail = object(value, "Change Revision detail");
     const revision2 = detail.revision;
@@ -6424,6 +6439,25 @@
     };
   }
   __name(attentionPresentation, "attentionPresentation");
+  function currentRevisionPeer(revision2, entry) {
+    const summaryLabel = entry?.summarySource === "revision_proposal_summary" ? entry.revisionProposalSummary : void 0;
+    const identity = exactRevisionAccessibleIdentity(revision2);
+    const visibleLabel = summaryLabel === void 0 ? void 0 : entry?.label ?? summaryLabel;
+    const absentSummaryCue = entry?.summarySource === "absent" ? entry.absentSummaryCue : void 0;
+    return {
+      revision: revision2,
+      ...visibleLabel === void 0 ? {} : { label: visibleLabel },
+      ...absentSummaryCue === void 0 ? {} : { absentSummaryCue },
+      visibleIdentity: shortExactRevision(revision2),
+      // The accessible name leads with the same visible label the card shows
+      // (never a raw summary that could drift from it), and stays identity-led
+      // for an absent summary so it never claims a summary that was not given.
+      accessibleName: visibleLabel !== void 0 ? `Current Revision — ${visibleLabel}; ${identity}` : absentSummaryCue !== void 0 ? `Current Revision — ${identity}; ${absentSummaryCue}` : `Current Revision — ${identity}`,
+      title: identity,
+      copyText: exactRevisionCopyText([revision2])
+    };
+  }
+  __name(currentRevisionPeer, "currentRevisionPeer");
   function changeCardPresentation(summary, presentation) {
     const byExactIdentity = new Map(
       (presentation?.currentRevisions ?? []).map((entry) => [
@@ -6431,27 +6465,14 @@
         entry
       ])
     );
-    const peers = summary.currentRevisionRefs.map((revision2) => {
-      const entry = byExactIdentity.get(
-        `${revision2.revisionId}\0${revision2.objectArtifactContentHash}`
-      );
-      const summaryLabel = entry?.summarySource === "revision_proposal_summary" ? entry.revisionProposalSummary : void 0;
-      const identity = exactRevisionAccessibleIdentity(revision2);
-      const visibleLabel = summaryLabel === void 0 ? void 0 : entry?.label ?? summaryLabel;
-      const absentSummaryCue = entry?.summarySource === "absent" ? entry.absentSummaryCue : void 0;
-      return {
-        revision: revision2,
-        ...visibleLabel === void 0 ? {} : { label: visibleLabel },
-        ...absentSummaryCue === void 0 ? {} : { absentSummaryCue },
-        visibleIdentity: shortExactRevision(revision2),
-        // The accessible name leads with the same visible label the card shows
-        // (never a raw summary that could drift from it), and stays identity-led
-        // for an absent summary so it never claims a summary that was not given.
-        accessibleName: visibleLabel !== void 0 ? `Current Revision — ${visibleLabel}; ${identity}` : absentSummaryCue !== void 0 ? `Current Revision — ${identity}; ${absentSummaryCue}` : `Current Revision — ${identity}`,
-        title: identity,
-        copyText: exactRevisionCopyText([revision2])
-      };
-    });
+    const peers = summary.currentRevisionRefs.map(
+      (revision2) => currentRevisionPeer(
+        revision2,
+        byExactIdentity.get(
+          `${revision2.revisionId}\0${revision2.objectArtifactContentHash}`
+        )
+      )
+    );
     const onlyPeer = peers.length === 1 ? peers[0] : void 0;
     const headline = onlyPeer === void 0 ? peers.length === 0 ? "Current Revision unavailable" : "Multiple current Revisions need selection" : onlyPeer.label ?? onlyPeer.visibleIdentity;
     const currentRevisionName = peers.length === 0 ? "Current Revision unavailable" : peers.length === 1 ? peers[0].accessibleName : `Current Revisions — ${peers.map(
@@ -9606,7 +9627,7 @@
     return nodes;
   }
   __name(renderCapturedResource, "renderCapturedResource");
-  function renderCurrentRevisionChoices(changeId, revisions, query, actions2) {
+  function renderCurrentRevisionChoices(changeId, revisions, presentations, query, actions2) {
     const choices = document.createElement("section");
     choices.className = "detail-current-revisions";
     choices.append(detailHeading("Current Revisions", 3));
@@ -9614,15 +9635,32 @@
       choices.append(message("No current Revision is available."));
       return choices;
     }
-    for (const revision2 of revisions) {
+    for (const [index, revision2] of revisions.entries()) {
+      const peer = currentRevisionPeer(revision2, presentations?.[index]);
       const button2 = document.createElement("button");
       button2.type = "button";
-      button2.className = "ghost mono";
-      button2.textContent = shortExact(revision2);
+      button2.className = "ghost detail-current-revision";
+      const identity = document.createElement("code");
+      identity.className = "mono";
+      identity.textContent = shortExact(revision2);
+      if (peer.label !== void 0) {
+        const label2 = document.createElement("span");
+        label2.className = "detail-current-revision-summary";
+        label2.textContent = peer.label;
+        button2.append(label2, " ", identity);
+      } else {
+        button2.append(identity);
+        if (peer.absentSummaryCue !== void 0) {
+          const cue = document.createElement("span");
+          cue.className = "change-card-summary-absent";
+          cue.textContent = ` · ${peer.absentSummaryCue}`;
+          button2.append(cue);
+        }
+      }
       button2.title = exactRevisionAccessibleIdentity(revision2);
       button2.setAttribute(
         "aria-label",
-        `Current Revision: open ${exactRevisionAccessibleIdentity(revision2)}; for Change ${changeId}`
+        peer.label !== void 0 ? `Current Revision: ${peer.label}; open ${exactRevisionAccessibleIdentity(revision2)}; for Change ${changeId}` : peer.absentSummaryCue !== void 0 ? `Current Revision: open ${exactRevisionAccessibleIdentity(revision2)}; ${peer.absentSummaryCue}; for Change ${changeId}` : `Current Revision: open ${exactRevisionAccessibleIdentity(revision2)}; for Change ${changeId}`
       );
       button2.dataset.changeId = changeId;
       button2.dataset.revisionId = revision2.revisionId;
@@ -9713,6 +9751,7 @@
       renderCurrentRevisionChoices(
         route.changeId,
         detail.currentRevisionRefs,
+        detail.currentRevisionPresentations,
         route.query,
         actions2
       )
@@ -10051,6 +10090,8 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         renderCurrentRevisionChoices(
           changeRoute.changeId,
           snapshot2.selected.currentRevisionRefs,
+          // A loading placeholder has no detail document, so no presentation.
+          void 0,
           changeRoute.query,
           actions2
         )

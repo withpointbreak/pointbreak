@@ -31,6 +31,7 @@ import type {
   FactContent,
   FactRelationshipGraphNode,
   ReaderProfile,
+  RevisionRef,
   RevisionResource,
 } from "../src/change-protocol";
 import { authorityCursor } from "./support/authority";
@@ -2983,6 +2984,169 @@ describe("Change inspector render", () => {
       changeId: route.changeId,
       revision: route.from,
       query: {},
+    });
+  });
+
+  describe("Change detail current-Revision chooser", () => {
+    const secondRevision = {
+      revisionId: "revision:sha256:two",
+      objectArtifactContentHash: "sha256:artifact-two",
+    };
+
+    function renderDetailChooser(
+      currentRevisionRefs: RevisionRef[],
+      currentRevisionPresentations: ChangeDetail["currentRevisionPresentations"],
+    ): { navigate: ReturnType<typeof vi.fn>; buttons: HTMLButtonElement[] } {
+      const navigate = vi.fn();
+      prepareChangeInspectorShell({ navigate });
+      const state = createChangeInspectorState({
+        kind: "change",
+        changeId: "change:sha256:one",
+        query: {},
+      });
+      state.publish(stageGeneration(profile, changes, attention, profile));
+      const reading = changeReading();
+      if (reading.kind !== "change") throw new Error("fixture is a Change");
+      reading.document = {
+        ...reading.document,
+        summary: { ...reading.document.summary, currentRevisionRefs },
+        currentRevisionRefs,
+        ...(currentRevisionPresentations === undefined
+          ? {}
+          : { currentRevisionPresentations }),
+      };
+      renderChangeInspector(
+        state.snapshot(),
+        { navigate },
+        { reading, refusal: null },
+      );
+      return {
+        navigate,
+        buttons: [
+          ...document.querySelectorAll<HTMLButtonElement>(
+            "#detail-body .detail-current-revisions button",
+          ),
+        ],
+      };
+    }
+
+    it("shows a supplied summary first and the short exact id in monospace", () => {
+      const { buttons } = renderDetailChooser(
+        [revision],
+        [
+          {
+            revision,
+            revisionProposalSummary: "Preserve atomic captures",
+            summarySource: "revision_proposal_summary",
+            label: "Preserve atomic captures",
+          },
+        ],
+      );
+      expect(buttons).toHaveLength(1);
+      const [button] = buttons;
+      expect(button?.textContent).toBe(
+        "Preserve atomic captures revision:sha256:one · sha256:artifact",
+      );
+      expect(
+        button?.querySelector(".detail-current-revision-summary")?.textContent,
+      ).toBe("Preserve atomic captures");
+      expect(button?.querySelector("code.mono")?.textContent).toBe(
+        "revision:sha256:one · sha256:artifact",
+      );
+      // Summary before identity in DOM order.
+      expect(button?.firstElementChild?.className).toBe(
+        "detail-current-revision-summary",
+      );
+      expect(button?.getAttribute("aria-label")).toBe(
+        "Current Revision: Preserve atomic captures; open exact Revision revision:sha256:one; artifact sha256:artifact; for Change change:sha256:one",
+      );
+      expect(button?.title).toBe(
+        "exact Revision revision:sha256:one; artifact sha256:artifact",
+      );
+    });
+
+    it("shows the exact id with the server absent-summary cue when no summary was supplied", () => {
+      const { buttons } = renderDetailChooser(
+        [revision],
+        [
+          {
+            revision,
+            summarySource: "absent",
+            absentSummaryCue: "No summary supplied",
+          },
+        ],
+      );
+      expect(buttons).toHaveLength(1);
+      const [button] = buttons;
+      expect(button?.textContent).toBe(
+        "revision:sha256:one · sha256:artifact · No summary supplied",
+      );
+      expect(
+        button?.querySelector(".change-card-summary-absent")?.textContent,
+      ).toBe(" · No summary supplied");
+      expect(
+        button?.querySelector(".detail-current-revision-summary"),
+      ).toBeNull();
+      expect(button?.getAttribute("aria-label")).toBe(
+        "Current Revision: open exact Revision revision:sha256:one; artifact sha256:artifact; No summary supplied; for Change change:sha256:one",
+      );
+    });
+
+    it("names two current Revisions with mixed summary availability in document order", () => {
+      const { buttons, navigate } = renderDetailChooser(
+        [revision, secondRevision],
+        [
+          {
+            revision,
+            summarySource: "absent",
+            absentSummaryCue: "No summary supplied",
+          },
+          {
+            revision: secondRevision,
+            revisionProposalSummary: "Parallel proposal",
+            summarySource: "revision_proposal_summary",
+            label: "Parallel proposal",
+          },
+        ],
+      );
+      expect(buttons.map((button) => button.textContent)).toEqual([
+        "revision:sha256:one · sha256:artifact · No summary supplied",
+        "Parallel proposal revision:sha256:two · sha256:artifact-two",
+      ]);
+      expect(buttons.map((button) => button.dataset.revisionId)).toEqual([
+        revision.revisionId,
+        secondRevision.revisionId,
+      ]);
+      expect(buttons[1]?.getAttribute("aria-label")).toContain(
+        "Parallel proposal",
+      );
+      // Keyboard order and focus are unchanged: native buttons in document
+      // order, no tabindex override, each opening its exact Revision.
+      for (const button of buttons) {
+        expect(button.type).toBe("button");
+        expect(button.hasAttribute("tabindex")).toBe(false);
+      }
+      buttons[1]?.click();
+      expect(navigate).toHaveBeenCalledWith({
+        kind: "revision",
+        changeId: "change:sha256:one",
+        revision: secondRevision,
+        query: {},
+      });
+    });
+
+    it("shows exact ids only when the detail carries no presentation member", () => {
+      const { buttons } = renderDetailChooser(
+        [revision, secondRevision],
+        undefined,
+      );
+      expect(buttons.map((button) => button.textContent)).toEqual([
+        "revision:sha256:one · sha256:artifact",
+        "revision:sha256:two · sha256:artifact-two",
+      ]);
+      expect(buttons[0]?.getAttribute("aria-label")).toBe(
+        "Current Revision: open exact Revision revision:sha256:one; artifact sha256:artifact; for Change change:sha256:one",
+      );
     });
   });
 
