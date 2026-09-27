@@ -2374,6 +2374,17 @@ mod tests {
             .unwrap()
     }
 
+    /// Whether the events directory is proven unchanged since `stamp`. On
+    /// NTFS the stamp carries the volume-wide USN cursor, which moves with
+    /// unrelated activity, so raw stamp equality is not the question.
+    fn journal_unchanged_since(root: &std::path::Path, stamp: &JournalChangeStamp) -> bool {
+        crate::session::derived_access::QualificationLocalJournal::new(root)
+            .changes_since(stamp)
+            .unwrap()
+            .verdict
+            == crate::session::store::backend::JournalChangeVerdict::Stable
+    }
+
     /// Record authority without derived publication so the generation's
     /// recorded authority is definitely superseded, then remember the verdict
     /// through a request that opens the published generation.
@@ -2396,7 +2407,7 @@ mod tests {
         let key = runtime
             .remembered_rebuild_required_key()
             .expect("a definite rebuild_required verdict is remembered");
-        assert_eq!(key.journal_stamp(), &observed_journal_stamp(root));
+        assert!(journal_unchanged_since(root, key.journal_stamp()));
         // A repeated request is served from the remembered verdict.
         assert_eq!(
             runtime_availability(&runtime),
@@ -2455,7 +2466,7 @@ mod tests {
         assert_eq!(remembered.generation_id(), generation.generation_id);
         // Settlement happened inside the same generation and left the observed
         // journal stamp unchanged, so only the recorded authority moved.
-        assert_eq!(observed_journal_stamp(root.path()), stamp_at_failure);
+        assert!(journal_unchanged_since(root.path(), &stamp_at_failure));
         assert_eq!(
             lifecycle
                 .published_generation_identity_read_only()
@@ -2528,7 +2539,10 @@ mod tests {
             std::fs::copy(entry.path(), events.join(entry.file_name())).unwrap();
         }
         std::fs::remove_dir_all(&moved).unwrap();
-        assert_ne!(&observed_journal_stamp(root.path()), before.journal_stamp());
+        assert!(!journal_unchanged_since(
+            root.path(),
+            before.journal_stamp()
+        ));
         assert_eq!(
             runtime_availability(&runtime),
             DerivedAccessAvailability::RebuildRequired
@@ -2537,7 +2551,7 @@ mod tests {
             .remembered_rebuild_required_key()
             .expect("the verdict is re-established under the new key");
         assert_ne!(after, before);
-        assert_eq!(after.journal_stamp(), &observed_journal_stamp(root.path()));
+        assert!(journal_unchanged_since(root.path(), after.journal_stamp()));
     }
 
     #[test]
