@@ -7662,6 +7662,33 @@ mod tests {
             "relation targets read one representative row per named fact, not the Revision's facts"
         );
 
+        // A second carrier records the same root fact earlier in Timeline
+        // order. Both lanes target the representative (smallest event id),
+        // never the earliest occurrence.
+        let root_payload: crate::session::event::ReviewObservationRecordedPayload =
+            serde_json::from_value(root.payload.clone()).expect("decode root payload");
+        let duplicate = ShoreEvent::new(
+            EventType::ReviewObservationRecorded,
+            "fixture:relation:root-duplicate",
+            root.target.clone(),
+            Writer::shore_local("change-endpoint-test"),
+            root_payload,
+            "2026-08-10T23:00:00Z",
+        )
+        .expect("build duplicate root carrier");
+        assert_ne!(duplicate.event_id, root.event_id);
+        record_fixture_event(&fixture.store, duplicate.clone());
+        let representative = root.event_id.clone().min(duplicate.event_id.clone());
+        let (after, _) = counted_read('d');
+        assert_eq!(
+            after[0].relation_targets,
+            vec![crate::documents::EventHistoryRelationTargetV1 {
+                fact_id: root_id.as_str().to_owned(),
+                event_id: representative,
+            }],
+            "a fact recorded twice targets its representative carrier"
+        );
+
         let events = fixture.store.list_events().expect("read relation events");
         let strict = crate::session::project_event_history(
             &events,

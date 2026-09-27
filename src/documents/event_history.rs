@@ -126,10 +126,13 @@ pub struct EventHistoryEntryV1 {
     pub unresolved_revision_ids: Vec<RevisionId>,
     pub summary: EventHistorySummaryV1,
     /// Server-resolved navigation targets for the fact ids this entry's
-    /// relationship fields name. Each target is the Timeline event that
-    /// recorded the referenced fact against the same Revision as this entry's
-    /// review subject. A referenced id without a target here has no
-    /// resolvable recording event, and readers render it as plain text.
+    /// relationship fields name. Each target is the referenced fact's
+    /// representative recording event: of every event that records the fact
+    /// id in its family, the one with the smallest event id. It is a target
+    /// only when that event is a Timeline entry recorded against the same
+    /// Revision as this entry's review subject. A referenced id without a
+    /// target here has no resolvable recording event, and readers render it as
+    /// plain text.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relation_targets: Vec<EventHistoryRelationTargetV1>,
 }
