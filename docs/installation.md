@@ -107,6 +107,53 @@ background.
 The rollout and lifecycle have native qualification on macOS/APFS and Windows/NTFS. Linux remains covered by
 the normal compile and CI lanes; retained-scale Linux behavior has not been separately measured.
 
+### Windows: the NTFS change journal
+
+On Windows, derived acceleration needs an active NTFS USN change journal on the volume that holds the
+store. The journal is how Pointbreak proves that nothing changed its authoritative `events/` directory
+since the derived generation last caught up. System volumes such as `C:` normally have a journal.
+Secondary, removable, and ephemeral volumes may not, for example a cloud VM's temporary disk.
+
+What Pointbreak reads, and only reads:
+
+- It makes two read-only control calls, `FSCTL_QUERY_USN_JOURNAL` for the journal's identity and position
+  and `FSCTL_READ_UNPRIVILEGED_USN_JOURNAL` for the records since its saved position.
+- Both go through a read-only handle to the volume's root directory opened with backup semantics, not raw
+  volume access. Neither call needs administrator rights.
+- Each check reads at most 1 MiB of records. A longer interval is reported as unproven, and the generation
+  is rechecked instead of trusted.
+- The unprivileged read strips file names, so Pointbreak never learns the names of other files on the
+  volume. It matches parent-directory references against its own `events/` directory only.
+- Pointbreak never creates, deletes, resizes, or configures a journal.
+
+When the volume has no active journal, derived access is unavailable and every read uses the
+authoritative path instead. It is not retried, because it lasts until an administrator acts.
+`pointbreak store derived status` reports it as `"availability": "unavailable"` with
+`"reason": "journal_unavailable"`, and its `detail` names the volume and both remedies.
+
+To keep acceleration, an administrator creates a journal on that volume. The maximum size and allocation
+delta are in bytes. Copying the values `fsutil usn queryjournal C:` reports for the system volume is a
+reasonable default.
+
+```powershell
+# Elevated PowerShell or Command Prompt
+fsutil usn queryjournal D:
+fsutil usn createjournal m=<size> a=<delta> D:
+```
+
+Once the journal exists, `pointbreak store derived status` stops reporting `journal_unavailable`, even in
+a process that was already running. Reads keep using the authoritative path until a generation is built,
+so run `pointbreak store derived build` to resume acceleration.
+
+To run without the journal instead, turn derived access off:
+
+```powershell
+$env:POINTBREAK_DERIVED_ACCESS = "off"
+```
+
+With derived access off, Pointbreak makes no journal reads at all. Every read uses the authoritative
+journal and content store, which is slower on large stores but always correct.
+
 ## Checksum verification
 
 Verification is on by default and fails closed. The installer stops without replacing `pointbreak` if:

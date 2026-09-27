@@ -240,6 +240,10 @@ disposable sidecar.
 - Selected-carrier validation or strict replay finds a semantic divergence, false-current state, or removed
   body in the sidecar response path.
 - A supported filesystem cannot provide bounded fail-closed change continuation for the mixed-writer scope.
+  An NTFS volume without an active USN journal is a known instance, decided in issue #825 without
+  reopening this ADR: Pointbreak reports the typed, non-transient `journal_unavailable` reason, the
+  background worker gives up without retrying, and reads fail closed to authoritative truth. It never
+  creates a journal, and no directory-stamp fallback weakens the NTFS guarantee.
 - First-build cost becomes routine rather than exceptional, or measured user impact exceeds the rollout's
   fallback and recovery envelope.
 - A bounded non-Inspector CLI query adopts derived access; it must reuse the selected service and preserve

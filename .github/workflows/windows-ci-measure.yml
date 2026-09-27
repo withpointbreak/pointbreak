@@ -33,6 +33,10 @@ on:
         description: "Report TEMP location, disk backing and C:/D: flush latency (no build; runs alone)"
         type: boolean
         default: false
+      journal_unavailable:
+        description: "Delete D:'s USN journal and record the typed journal_unavailable evidence (#825; runs alone)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -45,8 +49,8 @@ jobs:
   measure:
     timeout-minutes: 90
     name: measure (windows-latest)
-    # The volume probe needs no toolchain or build, so skip this job's setup when it runs.
-    if: ${{ !inputs.volume_probe }}
+    # The volume probe and the journal evidence run alone, so skip this job's setup when either runs.
+    if: ${{ !inputs.volume_probe && !inputs.journal_unavailable }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -242,3 +246,113 @@ jobs:
             Summarize "$name 4 writers wall=$([math]::Round($sw.Elapsed.TotalSeconds, 1))s" $all
           }
 
+  # --- journal-unavailable evidence (#825) -----------------------------------
+  # Derived access needs an active NTFS USN journal on the store's volume. CI's
+  # D: gets one from ci.yml, so no ordinary lane sees a journal-less volume.
+  # This job deletes any journal on the runner's disposable D:, confirms
+  # fsutil reports error 1179 there, then records
+  # native evidence that Pointbreak reports the typed, non-transient
+  # journal_unavailable reason and that the background worker gives up without
+  # a single retry. Pointbreak itself never creates or deletes a journal; only
+  # this disposable runner does.
+  journal-unavailable:
+    timeout-minutes: 60
+    name: journal unavailable evidence (windows-latest)
+    if: ${{ inputs.journal_unavailable }}
+    runs-on: windows-latest
+    env:
+      EVIDENCE_DIR: ${{ github.workspace }}\journal-evidence
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
+        with:
+          tool: nextest
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: build the library tests and the CLI
+        shell: bash
+        run: |
+          cargo nextest run --lib --no-run
+          cargo build --bin pointbreak
+      - name: "delete the USN journal on D:"
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:EVIDENCE_DIR | Out-Null
+          # Hosted images have shipped D: both with and without a journal, so
+          # delete one only when it exists, then require error 1179.
+          $before = fsutil usn queryjournal D: 2>&1 | Out-String
+          $beforeExit = $LASTEXITCODE
+          "--- fsutil usn queryjournal D: (before, exit $beforeExit) ---"; $before
+          "exit $beforeExit`n$before" | Set-Content -Path (Join-Path $env:EVIDENCE_DIR 'queryjournal-before.txt')
+          if ($beforeExit -eq 0) {
+            fsutil usn deletejournal /D D:
+            if ($LASTEXITCODE -ne 0) { throw "could not delete the USN journal on D:" }
+          }
+          $after = fsutil usn queryjournal D: 2>&1 | Out-String
+          $afterExit = $LASTEXITCODE
+          "--- fsutil usn queryjournal D: (after, exit $afterExit) ---"; $after
+          "exit $afterExit`n$after" | Set-Content -Path (Join-Path $env:EVIDENCE_DIR 'queryjournal-after.txt')
+          if ($after -notmatch 'Error 1179') { throw "D: does not report ERROR_JOURNAL_NOT_ACTIVE (1179)" }
+          $global:LASTEXITCODE = 0
+      - name: typed journal_unavailable in the library, no worker retries
+        shell: bash
+        env:
+          POINTBREAK_JOURNAL_EVIDENCE_ROOT: 'D:\pb-825-store'
+        run: |
+          export POINTBREAK_JOURNAL_EVIDENCE_RECEIPT="$EVIDENCE_DIR\\library-receipt.json"
+          cargo nextest run --lib --run-ignored only --no-capture \
+            -E 'test(native_volume_without_a_journal_reports_typed_unavailability_without_retries)'
+      - name: typed journal_unavailable from the CLI
+        shell: bash
+        env:
+          POINTBREAK_HOME: 'D:/pb-825-home'
+        run: |
+          pb="$GITHUB_WORKSPACE/target/debug/pointbreak.exe"
+          out="$(cygpath -u "$EVIDENCE_DIR")"
+          repo='D:/pb-825-repo'
+          mkdir -p "$repo"
+          git -C "$repo" init --quiet
+          git -C "$repo" config user.name 'journal evidence'
+          git -C "$repo" config user.email 'journal-evidence@example.invalid'
+          echo one > "$repo/a.txt"
+          git -C "$repo" add a.txt
+          git -C "$repo" commit --quiet -m initial
+          # Activate the store the way the integration tests do: derived access off.
+          POINTBREAK_DERIVED_ACCESS=off "$pb" key init --name journal-evidence
+          POINTBREAK_DERIVED_ACCESS=off "$pb" change migrate-dry-run --repo "$repo" --format json \
+            > "$out/migrate-dry-run.json"
+          POINTBREAK_DERIVED_ACCESS=off "$pb" change migrate --repo "$repo" \
+            --dry-run "$out/migrate-dry-run.json" \
+            --ack-manifest "$(jq -r .manifestHash "$out/migrate-dry-run.json")" \
+            --ack-cohort-manifest "$(jq -r '.roots[0].cohortManifestHash' "$out/migrate-dry-run.json")" \
+            --ack-minimum-reader review_change_revision_v1 --ack-v0-9-unsupported \
+            --backup 'D:/pb-825-backup' --operation-id journal-evidence --sign-key journal-evidence \
+            --format json > "$out/migrate.json"
+          # With derived access on (the default), a write still publishes truth.
+          echo two >> "$repo/a.txt"
+          capture_exit=0
+          "$pb" capture --repo "$repo" --summary 'journal evidence' \
+            > "$out/capture.json" 2> "$out/capture-stderr.txt" || capture_exit=$?
+          echo "capture exit $capture_exit"; cat "$out/capture-stderr.txt"
+          "$pb" store paths --repo "$repo" | tee "$out/store-paths.json"
+          "$pb" store derived status --repo "$repo" | tee "$out/store-derived-status.json"
+          test "$(jq -r .reason "$out/store-derived-status.json")" = journal_unavailable
+          test "$(jq -r .availability "$out/store-derived-status.json")" = unavailable
+          build_exit=0
+          "$pb" store derived build --repo "$repo" \
+            > "$out/store-derived-build.json" 2> "$out/store-derived-build-stderr.txt" || build_exit=$?
+          echo "store derived build exit $build_exit"; cat "$out/store-derived-build-stderr.txt"
+          test "$build_exit" -ne 0
+          grep -q journal_unavailable "$out/store-derived-build-stderr.txt"
+          test "$capture_exit" -eq 0
+      - name: upload the journal-unavailable receipt
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: journal-unavailable-evidence
+          path: journal-evidence/
+          if-no-files-found: error

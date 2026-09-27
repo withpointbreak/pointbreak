@@ -157,6 +157,45 @@ fn read_i64(bytes: &[u8], offset: usize) -> Result<i64, String> {
         .ok_or_else(|| "NTFS journal record is truncated".to_owned())
 }
 
+/// `ERROR_JOURNAL_NOT_ACTIVE`: the volume has no active USN change journal.
+const ERROR_JOURNAL_NOT_ACTIVE: i32 = 1179;
+
+/// Classify a failed journal control call on the volume mounted at
+/// `volume_mount`. A volume without an active journal is the typed,
+/// administrator-only unavailability; every other native failure keeps its
+/// descriptive message. Kept off `cfg(windows)` so the mapping is testable
+/// on every platform.
+fn journal_call_failure(
+    action: &str,
+    volume_mount: &str,
+    error: &std::io::Error,
+) -> crate::error::ShoreError {
+    match error.raw_os_error() {
+        Some(code @ ERROR_JOURNAL_NOT_ACTIVE) => {
+            crate::error::ShoreError::JournalUnavailable(crate::error::JournalUnavailable {
+                volume: fsutil_volume(volume_mount),
+                os_error: code,
+            })
+        }
+        _ => crate::error::ShoreError::Message(format!("could not {action}: {error}")),
+    }
+}
+
+/// The volume as `fsutil` names it: `D:\` becomes `D:`; a volume mounted in
+/// a folder keeps its mount-point path. The store path is canonical, so the
+/// OS reports the mount point in verbatim form (`\\?\D:\`); the prefix is
+/// dropped because `fsutil` does not take it.
+fn fsutil_volume(volume_mount: &str) -> String {
+    let mount = volume_mount.strip_prefix(r"\\?\").unwrap_or(volume_mount);
+    let trimmed = mount.trim_end_matches('\\');
+    let bytes = trimmed.as_bytes();
+    if bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        trimmed.to_owned()
+    } else {
+        mount.to_owned()
+    }
+}
+
 #[cfg(windows)]
 mod native {
     use std::ffi::{OsStr, OsString, c_void};
@@ -171,7 +210,8 @@ mod native {
         JournalCreatedTransitionVerdict, JournalNativeCursor,
     };
     use super::{
-        ContinuityFailure, DEFAULT_MAX_BYTES, DEFAULT_MAX_RECORDS, parse_page, validate_continuity,
+        ContinuityFailure, DEFAULT_MAX_BYTES, DEFAULT_MAX_RECORDS, journal_call_failure,
+        parse_page, validate_continuity,
     };
     use crate::error::{Result, ShoreError};
 
@@ -225,6 +265,7 @@ mod native {
         cursor: JournalNativeCursor,
         retained_start_usn: i64,
         volume: File,
+        volume_mount: String,
     }
 
     unsafe extern "system" {
@@ -271,6 +312,9 @@ mod native {
         };
         let current = match observe_current(events_dir) {
             Ok(current) => current,
+            // No active journal is not an unproven interval: it cannot clear
+            // until an administrator creates one, so report it typed.
+            Err(error @ ShoreError::JournalUnavailable(_)) => return Err(error),
             Err(error) => {
                 return Ok(indeterminate(
                     before.clone(),
@@ -368,13 +412,13 @@ mod native {
         let id = unsafe { id.assume_init() };
         // SAFETY: successful calls initialized the complete structures.
         let legacy = unsafe { legacy.assume_init() };
-        let volume_path = volume_guid_path(events_dir)?;
+        let (volume_mount, volume_path) = volume_guid_path(events_dir)?;
         let volume = OpenOptions::new()
             .read(true)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
             .open(&volume_path)
             .map_err(|error| native_error("open NTFS volume root", &volume_path, error))?;
-        let journal = query_journal(&volume)?;
+        let journal = query_journal(&volume, &volume_mount)?;
         let cursor = JournalNativeCursor {
             journal_id: journal.journal_id,
             next_usn: journal.next_usn,
@@ -395,6 +439,7 @@ mod native {
             cursor,
             retained_start_usn: journal.first_usn.max(journal.lowest_valid_usn),
             volume,
+            volume_mount,
         })
     }
 
@@ -406,7 +451,7 @@ mod native {
         lowest_valid_usn: i64,
     }
 
-    fn query_journal(volume: &File) -> Result<JournalData> {
+    fn query_journal(volume: &File, volume_mount: &str) -> Result<JournalData> {
         let mut words = [0_u64; 16];
         let mut returned = 0_u32;
         // SAFETY: `words` is aligned writable storage and the volume-root handle
@@ -424,7 +469,11 @@ mod native {
             )
         };
         if ok == 0 {
-            return Err(last_native_error("query NTFS USN journal"));
+            return Err(journal_call_failure(
+                "query NTFS USN journal",
+                volume_mount,
+                &std::io::Error::last_os_error(),
+            ));
         }
         if returned < 32 {
             return Err(ShoreError::Message(
@@ -452,6 +501,7 @@ mod native {
         };
         let current = match observe_current(events_dir) {
             Ok(current) => current,
+            Err(error @ ShoreError::JournalUnavailable(_)) => return Err(error),
             Err(error) => {
                 return Ok(indeterminate(
                     before.clone(),
@@ -514,14 +564,19 @@ mod native {
                 )
             };
             if ok == 0 {
+                let error = std::io::Error::last_os_error();
+                // A journal deleted after the head query fails the read the
+                // same way a missing one fails the query.
+                if let failure @ ShoreError::JournalUnavailable(_) =
+                    journal_call_failure("read NTFS USN journal", &current.volume_mount, &error)
+                {
+                    return Err(failure);
+                }
                 return Ok(indeterminate(
                     current.stamp,
                     bytes_examined,
                     records_examined,
-                    format!(
-                        "unprivileged NTFS journal read failed: {}",
-                        std::io::Error::last_os_error()
-                    ),
+                    format!("unprivileged NTFS journal read failed: {error}"),
                 ));
             }
             let returned = returned as usize;
@@ -586,7 +641,9 @@ mod native {
         })
     }
 
-    fn volume_guid_path(path: &Path) -> Result<PathBuf> {
+    /// The volume's mount point as the OS reports it (for example `D:\`) and
+    /// its volume GUID path.
+    fn volume_guid_path(path: &Path) -> Result<(String, PathBuf)> {
         let input = wide_null(path.as_os_str());
         let mut mount = vec![0_u16; 32_768];
         // SAFETY: input is NUL-terminated and output is writable for the stated
@@ -599,6 +656,9 @@ mod native {
         let mount_len = mount.iter().position(|unit| *unit == 0).ok_or_else(|| {
             ShoreError::Message("NTFS volume mount point was not terminated".to_owned())
         })?;
+        let mount_display = OsString::from_wide(&mount[..mount_len])
+            .to_string_lossy()
+            .into_owned();
         mount.truncate(mount_len + 1);
         let mut volume = vec![0_u16; 1024];
         // SAFETY: mount is NUL-terminated and output is writable for the stated
@@ -616,7 +676,10 @@ mod native {
         let volume_len = volume.iter().position(|unit| *unit == 0).ok_or_else(|| {
             ShoreError::Message("NTFS volume GUID path was not terminated".to_owned())
         })?;
-        Ok(PathBuf::from(OsString::from_wide(&volume[..volume_len])))
+        Ok((
+            mount_display,
+            PathBuf::from(OsString::from_wide(&volume[..volume_len])),
+        ))
     }
 
     fn wide_null(value: &OsStr) -> Vec<u16> {
@@ -663,6 +726,66 @@ pub(super) use native::{capture, changes_since, created_transition};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn journal_not_active_maps_to_the_typed_unavailability() {
+        let error = journal_call_failure(
+            "query NTFS USN journal",
+            r"\\?\D:\",
+            &std::io::Error::from_raw_os_error(1179),
+        );
+        let crate::error::ShoreError::JournalUnavailable(unavailable) = &error else {
+            panic!("os error 1179 must map to the typed unavailability, got {error:?}");
+        };
+        assert_eq!(
+            unavailable,
+            &crate::error::JournalUnavailable {
+                volume: "D:".to_owned(),
+                os_error: 1179,
+            }
+        );
+        let message = error.to_string();
+        // docs/cli-reference.md quotes this text verbatim.
+        assert_eq!(
+            message,
+            "journal_unavailable: the NTFS change journal is not active on volume D: \
+             (os error 1179), so derived access cannot prove authority on it; an administrator \
+             can create one with `fsutil usn createjournal m=<size> a=<delta> D:`, or set \
+             POINTBREAK_DERIVED_ACCESS=off to use authoritative reads (slower but correct); \
+             Pointbreak never creates a journal"
+        );
+    }
+
+    #[test]
+    fn other_native_journal_failures_keep_their_message() {
+        // ERROR_ACCESS_DENIED and ERROR_INVALID_FUNCTION (a non-NTFS volume)
+        // are not the administrator-only journal condition.
+        for code in [5, 1] {
+            let error = journal_call_failure(
+                "query NTFS USN journal",
+                "D:\\",
+                &std::io::Error::from_raw_os_error(code),
+            );
+            let crate::error::ShoreError::Message(message) = &error else {
+                panic!("os error {code} must stay untyped, got {error:?}");
+            };
+            assert!(
+                message.starts_with("could not query NTFS USN journal: "),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn fsutil_volume_names_a_drive_letter_or_keeps_a_mount_folder() {
+        assert_eq!(fsutil_volume("D:\\"), "D:");
+        assert_eq!(fsutil_volume("e:"), "e:");
+        assert_eq!(fsutil_volume("C:\\mnt\\data\\"), "C:\\mnt\\data\\");
+        // Native Windows evidence: a canonical store path yields a verbatim
+        // mount point.
+        assert_eq!(fsutil_volume(r"\\?\D:\"), "D:");
+        assert_eq!(fsutil_volume(r"\\?\C:\mnt\data\"), r"C:\mnt\data\");
+    }
 
     #[test]
     fn default_record_budget_cannot_preempt_the_byte_budget() {

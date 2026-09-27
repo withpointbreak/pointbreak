@@ -2149,13 +2149,16 @@ pub(crate) fn lifecycle_failure_outcome<T>(error: LifecycleError) -> DerivedChan
                 detail,
             )
         }
+        // A volume without an active NTFS journal keeps the code it had when
+        // it arrived wrapped in a cursor error, and is never retryable.
         LifecycleError::Disabled
         | LifecycleError::Quarantined(_)
         | LifecycleError::EmptyStoreIdentity
         | LifecycleError::Validation(_)
         | LifecycleError::Generation(_)
         | LifecycleError::Cursor(_)
-        | LifecycleError::Service(_) => DerivedChangeOutcomeV1::projection_unavailable(
+        | LifecycleError::Service(_)
+        | LifecycleError::JournalUnavailable(_) => DerivedChangeOutcomeV1::projection_unavailable(
             DerivedProjectionFailureCodeV1::ProjectionInvalid,
             detail,
         ),

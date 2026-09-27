@@ -53,6 +53,44 @@ pub enum ShoreError {
 
     #[error("unknown claude code session line type `{kind}` at line {line}")]
     UnknownClaudeSessionLineType { line: usize, kind: String },
+
+    /// The volume holding the store has no active NTFS change journal, so
+    /// derived-access authority cannot be proven there. Only an administrator
+    /// can clear it; it is never transient.
+    #[error("{0}")]
+    JournalUnavailable(JournalUnavailable),
+}
+
+/// Typed, non-transient derived-access unavailability: the NTFS volume that
+/// holds the store has no active USN change journal.
+///
+/// Pointbreak only reads a journal. It never creates, deletes, or resizes one,
+/// so the remedy is an administrator's `fsutil usn createjournal` or the
+/// `POINTBREAK_DERIVED_ACCESS=off` switch, which trades acceleration for
+/// authoritative reads.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JournalUnavailable {
+    /// The volume as `fsutil` accepts it: a drive letter such as `D:`, or the
+    /// mount-point path of a volume mounted in a folder.
+    pub volume: String,
+    /// The native error the journal query returned
+    /// (`ERROR_JOURNAL_NOT_ACTIVE`, 1179).
+    pub os_error: i32,
+}
+
+impl std::fmt::Display for JournalUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "journal_unavailable: the NTFS change journal is not active on volume {volume} \
+             (os error {code}), so derived access cannot prove authority on it; an administrator \
+             can create one with `fsutil usn createjournal m=<size> a=<delta> {volume}`, or set \
+             POINTBREAK_DERIVED_ACCESS=off to use authoritative reads (slower but correct); \
+             Pointbreak never creates a journal",
+            volume = self.volume,
+            code = self.os_error,
+        )
+    }
 }
 
 /// A structured record describing a retired event type or envelope shape: the

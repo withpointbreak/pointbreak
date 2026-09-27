@@ -19,10 +19,10 @@ use crate::bench_support::longitudinal::{
     enter_derived_access_phase_v1, record_authority_identity_rows_scanned,
 };
 use crate::canonical_hash::sha256_bytes_hex;
-use crate::error::ShoreError;
+use crate::error::{JournalUnavailable, ShoreError};
 #[cfg(test)]
 use crate::session::derived_access::authority_check_override::{
-    AuthorityCheckSite, take_queued_authority_check,
+    AuthorityCheckSite, take_queued_authority_check, take_queued_authority_journal_unavailable,
 };
 use crate::session::derived_access::cursor::{
     AppendResolution, CursorDelta, CursorIntent, CursorReceipt, RecoveryResolution,
@@ -175,6 +175,8 @@ pub(crate) enum CursorLedgerError {
     WitnessMismatch(String),
     #[error("truth operation failed: {0}")]
     Truth(String),
+    #[error("{0}")]
+    JournalUnavailable(JournalUnavailable),
     #[error("derived-access layout resolution failed: {0}")]
     Layout(String),
     #[error("SQLite operation {operation} failed: {message}")]
@@ -184,6 +186,17 @@ pub(crate) enum CursorLedgerError {
     },
     #[error("cursor-ledger I/O failed at {path}: {message}")]
     Io { path: PathBuf, message: String },
+}
+
+impl CursorLedgerError {
+    /// A failed authoritative-journal observation. A volume without an active
+    /// NTFS journal keeps its type; every other failure is a `Truth` message.
+    fn journal(error: ShoreError) -> Self {
+        match error {
+            ShoreError::JournalUnavailable(unavailable) => Self::JournalUnavailable(unavailable),
+            error => Self::Truth(error.to_string()),
+        }
+    }
 }
 
 impl From<WriterLockError> for CursorLedgerError {
@@ -288,9 +301,7 @@ impl SqliteCursorLedger {
         journal
             .ensure_authority_directory()
             .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
-        let authority_stamp = journal
-            .change_stamp()
-            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        let authority_stamp = journal.change_stamp().map_err(CursorLedgerError::journal)?;
         initialize_schema(
             &connection,
             &ledger.identity,
@@ -401,9 +412,7 @@ impl SqliteCursorLedger {
             .ensure_authority_directory()
             .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
         let journal = QualificationLocalJournal::new(&ledger.store_root);
-        let authority_before = journal
-            .change_stamp()
-            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        let authority_before = journal.change_stamp().map_err(CursorLedgerError::journal)?;
         let events = EventStore::open(&ledger.store_root)
             .list_events_with_witnesses()
             .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
@@ -520,6 +529,13 @@ impl SqliteCursorLedger {
         before: &JournalChangeStamp,
     ) -> Result<JournalChangeCheck, CursorLedgerError> {
         #[cfg(test)]
+        if let Some(unavailable) = take_queued_authority_journal_unavailable(
+            &self.store_root,
+            AuthorityCheckSite::BootstrapPopulation,
+        ) {
+            return Err(CursorLedgerError::JournalUnavailable(unavailable));
+        }
+        #[cfg(test)]
         if let Some(check) =
             take_queued_authority_check(&self.store_root, AuthorityCheckSite::BootstrapPopulation)
         {
@@ -527,7 +543,7 @@ impl SqliteCursorLedger {
         }
         journal
             .changes_since(before)
-            .map_err(|error| CursorLedgerError::Truth(error.to_string()))
+            .map_err(CursorLedgerError::journal)
     }
 
     pub(crate) fn open(
@@ -870,7 +886,7 @@ impl SqliteCursorLedger {
         let journal = QualificationLocalJournal::new(&self.store_root);
         let authority_observation = journal
             .begin_created_transition(&metadata.authority_stamp, &event.idempotency_key)
-            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+            .map_err(CursorLedgerError::journal)?;
         let proposed_cursor = TruthCursor::new(
             metadata.epoch,
             metadata.head_sequence.checked_add(1).ok_or_else(|| {
@@ -943,7 +959,7 @@ impl SqliteCursorLedger {
         validate_named_carrier(&journal, &event.idempotency_key, &expected_witness)?;
         let transition = journal
             .finish_created_transition(authority_observation)
-            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+            .map_err(CursorLedgerError::journal)?;
         if transition.verdict != JournalCreatedTransitionVerdict::Accepted {
             return Err(CursorLedgerError::AuthorityTransition(format!(
                 "{:?}: {}",
@@ -1896,15 +1912,13 @@ fn capture_created_authority_stamp(
     let journal = QualificationLocalJournal::new(store_root);
     let unchanged = journal
         .changes_since(before)
-        .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        .map_err(CursorLedgerError::journal)?;
     if unchanged.verdict == crate::session::store::backend::JournalChangeVerdict::Stable {
         return Ok(before.clone());
     }
     #[cfg(target_os = "linux")]
     let transition = {
-        let after = journal
-            .change_stamp()
-            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        let after = journal.change_stamp().map_err(CursorLedgerError::journal)?;
         let observed = journal
             .head_marker()
             .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
@@ -1923,7 +1937,7 @@ fn capture_created_authority_stamp(
     #[cfg(not(target_os = "linux"))]
     let transition = journal
         .created_transition(before)
-        .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        .map_err(CursorLedgerError::journal)?;
     if transition.verdict != JournalCreatedTransitionVerdict::Accepted {
         return Err(CursorLedgerError::AuthorityTransition(format!(
             "{:?}: {}",

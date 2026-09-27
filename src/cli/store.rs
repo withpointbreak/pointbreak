@@ -615,6 +615,9 @@ fn derived_status_digest(status: &DerivedHistoryLifecycleStatus) -> String {
             paths.legacy.display()
         ));
     }
+    if let Some(reason) = &status.reason {
+        digest.push_str(&format!("\nreason: {}", reason.as_str()));
+    }
     if let Some(detail) = &status.detail {
         digest.push_str(&format!("\ndetail: {detail}"));
     }
