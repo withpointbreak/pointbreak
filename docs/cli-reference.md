@@ -456,6 +456,11 @@ and Attention lenses page `/api/v2/changes` and `/api/v2/attention`. They open a
 member through
 `/api/v2/changes/{changeId}/revisions/{revisionId}?artifactHash={objectArtifactContentHash}`, so a
 Revision selection always carries its Change membership and exact captured-content identity. Each
+page's `presentations[].currentRevisions[]` entries carry `summarySource`; a supplied proposal summary
+also carries `revisionProposalSummary` and the finished `label`, while an absent one carries no `label`
+and the server-owned `absentSummaryCue` ("No summary supplied"). The card then keeps the exact Revision
+id as its headline and shows the cue as a muted state line. Both members are additive, so the page
+version stays 1. Each
 capture remains distinct, including shared-commit siblings; the CLI's default `revision list`
 presentation may still fold those siblings into a grouped row.
 

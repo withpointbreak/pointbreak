@@ -799,6 +799,67 @@ describe("bounded Change protocol", () => {
     ).toThrow("invalid changes Change page DTO");
   });
 
+  it("accepts the absent-summary cue only on an absent summary", () => {
+    const revision = {
+      revisionId: "rev:sha256:a",
+      objectArtifactContentHash: "sha256:artifact-a",
+    };
+    const withEntry = (
+      entry: ChangePresentation["currentRevisions"][number],
+    ): unknown => {
+      const value = page("pointbreak.inspect-changes-page");
+      const row = (value.changes as ChangeSummary[])[0];
+      if (!row) throw new Error("fixture must include a Change row");
+      row.currentRevisionRefs = [revision];
+      const presentation = value.presentations?.["change:sha256:a"] as
+        | ChangePresentation
+        | undefined;
+      if (!presentation) throw new Error("fixture must include a presentation");
+      presentation.currentRevisions = [entry];
+      return value;
+    };
+    const options = { lens: "changes" as const, bounded: true };
+
+    expect(
+      decodeChangePage(
+        withEntry({
+          revision,
+          summarySource: "absent",
+          absentSummaryCue: "No summary supplied",
+        }),
+        options,
+      ).presentations?.["change:sha256:a"]?.currentRevisions[0]
+        ?.absentSummaryCue,
+    ).toBe("No summary supplied");
+    // An older server sends no cue.
+    expect(() =>
+      decodeChangePage(
+        withEntry({ revision, summarySource: "absent" }),
+        options,
+      ),
+    ).not.toThrow();
+    // A cue beside a supplied summary contradicts the server fold.
+    expect(() =>
+      decodeChangePage(
+        withEntry({
+          revision,
+          summarySource: "revision_proposal_summary",
+          revisionProposalSummary: "Supplied",
+          label: "Supplied",
+          absentSummaryCue: "No summary supplied",
+        }),
+        options,
+      ),
+    ).toThrow("invalid changes Change page DTO");
+    // An empty cue is malformed, not a valid "no cue".
+    expect(() =>
+      decodeChangePage(
+        withEntry({ revision, summarySource: "absent", absentSummaryCue: "" }),
+        options,
+      ),
+    ).toThrow("invalid changes Change page DTO");
+  });
+
   it("rejects malformed nested Change and exact-Revision DTOs", () => {
     const revision = {
       revisionId: "rev:sha256:a",
