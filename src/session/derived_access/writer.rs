@@ -733,7 +733,7 @@ mod tests {
         DerivedHistoryStatus,
     };
     use crate::session::derived_access::lifecycle::{
-        DerivedAccessLifecycle, LifecycleControl, LifecycleError,
+        DerivedAccessLifecycle, LifecycleControl, LifecycleError, LifecycleStatus,
     };
     use crate::session::derived_access::product_contract::{
         DerivedAccessAvailability, DerivedAccessProfile,
@@ -745,7 +745,7 @@ mod tests {
     use crate::session::event::{
         EventSignature, EventTarget, EventType, ReviewInitializedPayload, ShoreEvent, Writer,
     };
-    use crate::session::store::backend::StoreBackend;
+    use crate::session::store::backend::{JournalChangeStamp, StoreBackend};
     use crate::session::store::bundle::import_store_bundle_into_with_verification;
     use crate::session::store::capabilities::{
         AUTHORITY_CURSOR_SCHEMA_V2, CapabilityFixtureState, inspect_journal_records,
@@ -2353,5 +2353,289 @@ mod tests {
         event.signature =
             Some(EventSignature::new_ed25519_v1(signature_byte.to_string().repeat(86)).unwrap());
         event
+    }
+
+    // A remembered `rebuild_required` verdict (#780) is keyed by more than the
+    // generation and journal stamp. These tests prove each invalidation.
+
+    fn runtime_availability(
+        runtime: &crate::session::derived_access::runtime::DerivedAccessRuntime,
+    ) -> DerivedAccessAvailability {
+        use crate::session::derived_access::runtime::RuntimeCurrentRead;
+        match runtime.current().unwrap() {
+            RuntimeCurrentRead::Ready(_) => DerivedAccessAvailability::Current,
+            RuntimeCurrentRead::Unavailable(status) => status.availability,
+        }
+    }
+
+    fn observed_journal_stamp(root: &std::path::Path) -> JournalChangeStamp {
+        crate::session::derived_access::QualificationLocalJournal::new(root)
+            .change_stamp()
+            .unwrap()
+    }
+
+    /// Record authority without derived publication so the generation's
+    /// recorded authority is definitely superseded, then remember the verdict
+    /// through a request that opens the published generation.
+    fn remembered_rebuild_required(
+        root: &std::path::Path,
+        index: usize,
+    ) -> std::sync::Arc<crate::session::derived_access::runtime::DerivedAccessRuntime> {
+        let runtime =
+            crate::session::derived_access::runtime::DerivedAccessRuntime::active_for_test(
+                DerivedAccessProfile::SqliteWalBodylessV1,
+                root,
+            );
+        EventStore::open(root)
+            .record_event_once(&event(index))
+            .unwrap();
+        assert_eq!(
+            runtime_availability(&runtime),
+            DerivedAccessAvailability::RebuildRequired
+        );
+        let key = runtime
+            .remembered_rebuild_required_key()
+            .expect("a definite rebuild_required verdict is remembered");
+        assert_eq!(key.journal_stamp(), &observed_journal_stamp(root));
+        // A repeated request is served from the remembered verdict.
+        assert_eq!(
+            runtime_availability(&runtime),
+            DerivedAccessAvailability::RebuildRequired
+        );
+        assert_eq!(runtime.remembered_rebuild_required_key(), Some(key));
+        runtime
+    }
+
+    #[test]
+    fn remembered_rebuild_required_yields_to_same_generation_settlement_with_an_unchanged_stamp() {
+        use crate::session::DerivedWriteAvailabilityV1::Current;
+        let (root, _backend, lifecycle) = ready_change_lifecycle();
+        let runtime =
+            crate::session::derived_access::runtime::DerivedAccessRuntime::active_for_test(
+                DerivedAccessProfile::SqliteWalBodylessV1,
+                root.path(),
+            );
+        assert_eq!(
+            lifecycle.status_read_only().unwrap().availability,
+            DerivedAccessAvailability::Current
+        );
+        let generation = lifecycle
+            .published_generation_identity_read_only()
+            .unwrap()
+            .unwrap();
+        let observed_at_failure = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let hook_runtime = std::sync::Arc::clone(&runtime);
+        let hook_observed = std::rc::Rc::clone(&observed_at_failure);
+        let hook_root = root.path().to_path_buf();
+        let ack = {
+            let _hook = ProductAppendHookGuard::install(move |point| {
+                if point != AppendCrashPoint::AfterEventPublication {
+                    return;
+                }
+                // The event is published but the generation has not settled:
+                // the reader classifies and remembers `rebuild_required`.
+                let availability = runtime_availability(&hook_runtime);
+                *hook_observed.borrow_mut() = Some((
+                    availability,
+                    hook_runtime.remembered_rebuild_required_key(),
+                    observed_journal_stamp(&hook_root),
+                ));
+            });
+            product_store(root.path())
+                .record_change_event_once_acknowledged(&event(31))
+                .unwrap()
+        };
+        assert_eq!(ack.derived.availability, Current);
+        let (availability, remembered, stamp_at_failure) = observed_at_failure
+            .borrow_mut()
+            .take()
+            .expect("the append reached authoritative publication");
+        assert_eq!(availability, DerivedAccessAvailability::RebuildRequired);
+        let remembered = remembered.expect("the in-flight verdict was remembered");
+        assert_eq!(remembered.generation_id(), generation.generation_id);
+        // Settlement happened inside the same generation and left the observed
+        // journal stamp unchanged, so only the recorded authority moved.
+        assert_eq!(observed_journal_stamp(root.path()), stamp_at_failure);
+        assert_eq!(
+            lifecycle
+                .published_generation_identity_read_only()
+                .unwrap()
+                .unwrap(),
+            generation
+        );
+        assert_eq!(
+            runtime_availability(&runtime),
+            DerivedAccessAvailability::Current
+        );
+        assert_eq!(runtime.remembered_rebuild_required_key(), None);
+    }
+
+    #[test]
+    fn remembered_rebuild_required_is_discarded_by_generation_replacement() {
+        let (root, _backend, lifecycle) = ready_change_lifecycle();
+        let runtime = remembered_rebuild_required(root.path(), 32);
+        let before = runtime.remembered_rebuild_required_key().unwrap();
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        assert_ne!(
+            lifecycle
+                .published_generation_identity_read_only()
+                .unwrap()
+                .unwrap()
+                .generation_id,
+            before.generation_id()
+        );
+        assert_eq!(
+            runtime_availability(&runtime),
+            DerivedAccessAvailability::Current
+        );
+        assert_eq!(runtime.remembered_rebuild_required_key(), None);
+    }
+
+    #[test]
+    fn remembered_rebuild_required_is_discarded_by_store_replacement() {
+        let (root, _backend, _lifecycle) = ready_change_lifecycle();
+        let runtime = remembered_rebuild_required(root.path(), 33);
+        // Replace the whole store at the same path with a fresh, current one.
+        let retired = TempDir::new().unwrap();
+        std::fs::rename(root.path(), retired.path().join("store")).unwrap();
+        std::fs::create_dir(root.path()).unwrap();
+        let backend = StoreBackend::Local(root.path().to_path_buf());
+        write_capability_fixture_for_test(backend.journal().as_ref(), CapabilityFixtureState::L2)
+            .unwrap();
+        active_product_lifecycle(&root)
+            .rebuild(|_| LifecycleControl::Continue)
+            .unwrap();
+        assert_eq!(
+            runtime_availability(&runtime),
+            DerivedAccessAvailability::Current
+        );
+        assert_eq!(runtime.remembered_rebuild_required_key(), None);
+    }
+
+    #[test]
+    fn remembered_rebuild_required_is_discarded_by_journal_continuity_loss() {
+        let (root, _backend, lifecycle) = ready_change_lifecycle();
+        let runtime = remembered_rebuild_required(root.path(), 34);
+        let before = runtime.remembered_rebuild_required_key().unwrap();
+        // Replace the events directory with an identical copy: same records,
+        // but a new directory identity, so continuity with the key is lost.
+        let events = lifecycle.store_root().join("events");
+        let moved = lifecycle.store_root().join("events.moved");
+        std::fs::rename(&events, &moved).unwrap();
+        std::fs::create_dir(&events).unwrap();
+        for entry in std::fs::read_dir(&moved).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), events.join(entry.file_name())).unwrap();
+        }
+        std::fs::remove_dir_all(&moved).unwrap();
+        assert_ne!(&observed_journal_stamp(root.path()), before.journal_stamp());
+        assert_eq!(
+            runtime_availability(&runtime),
+            DerivedAccessAvailability::RebuildRequired
+        );
+        let after = runtime
+            .remembered_rebuild_required_key()
+            .expect("the verdict is re-established under the new key");
+        assert_ne!(after, before);
+        assert_eq!(after.journal_stamp(), &observed_journal_stamp(root.path()));
+    }
+
+    #[test]
+    fn status_polls_share_the_runtime_verdict_and_revalidate_it() {
+        let (root, _backend, _lifecycle) = ready_change_lifecycle();
+        let runtime = remembered_rebuild_required(root.path(), 35);
+        let key = runtime.remembered_rebuild_required_key().unwrap();
+        // Fresh lifecycle objects, as a status poll creates, see the same memo.
+        let polled = runtime
+            .lifecycle_status_read_only(&active_product_lifecycle(&root))
+            .unwrap();
+        assert_eq!(
+            polled.availability,
+            DerivedAccessAvailability::RebuildRequired
+        );
+        assert_eq!(polled.generation_id.as_deref(), Some(key.generation_id()));
+        assert_eq!(runtime.remembered_rebuild_required_key(), Some(key));
+    }
+
+    #[test]
+    fn a_status_poll_remembers_the_verdict_for_a_process_with_a_cached_generation() {
+        let (root, _backend, lifecycle) = ready_change_lifecycle();
+        let runtime =
+            crate::session::derived_access::runtime::DerivedAccessRuntime::active_for_test(
+                DerivedAccessProfile::SqliteWalBodylessV1,
+                root.path(),
+            );
+        assert_eq!(
+            runtime_availability(&runtime),
+            DerivedAccessAvailability::Current
+        );
+        EventStore::open(root.path())
+            .record_event_once(&event(37))
+            .unwrap();
+        // The cached generation answers from its own bounded revalidation and
+        // records nothing: that path also carries transient in-flight appends.
+        assert_eq!(
+            runtime_availability(&runtime),
+            DerivedAccessAvailability::RebuildRequired
+        );
+        assert_eq!(runtime.remembered_rebuild_required_key(), None);
+        let polled = runtime.lifecycle_status_read_only(&lifecycle).unwrap();
+        assert_eq!(
+            polled.availability,
+            DerivedAccessAvailability::RebuildRequired
+        );
+        let key = runtime
+            .remembered_rebuild_required_key()
+            .expect("the status poll proves and remembers the verdict");
+        assert_eq!(
+            runtime_availability(&runtime),
+            DerivedAccessAvailability::RebuildRequired
+        );
+        assert_eq!(runtime.remembered_rebuild_required_key(), Some(key));
+    }
+
+    #[test]
+    fn rebuild_required_verdicts_that_may_clear_are_never_remembered() {
+        let (root, _backend, lifecycle) = ready_change_lifecycle();
+        EventStore::open(root.path())
+            .record_event_once(&event(36))
+            .unwrap();
+        let key = lifecycle.rebuild_required_key().unwrap();
+        assert!(lifecycle.rebuild_required_is_definite(&key));
+        let status = lifecycle.status_read_only().unwrap();
+        assert!(DerivedAccessLifecycle::rebuild_required_key_names(
+            &key, &status
+        ));
+        for unrememberable in [
+            LifecycleStatus {
+                transient_failure: true,
+                ..status.clone()
+            },
+            LifecycleStatus {
+                recovery_deferred: true,
+                ..status.clone()
+            },
+            LifecycleStatus {
+                availability: DerivedAccessAvailability::Unavailable,
+                ..status.clone()
+            },
+            LifecycleStatus {
+                generation_id: Some("another-generation".to_owned()),
+                ..status.clone()
+            },
+        ] {
+            assert!(!DerivedAccessLifecycle::rebuild_required_key_names(
+                &key,
+                &unrememberable
+            ));
+        }
+        // Another profile never produces a key at all.
+        let off = DerivedAccessLifecycle::new(
+            DerivedAccessProfile::Off,
+            root.path(),
+            opaque_path_identity("store", root.path()).unwrap(),
+        )
+        .unwrap();
+        assert!(off.rebuild_required_key().is_none());
     }
 }

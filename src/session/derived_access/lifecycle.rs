@@ -88,6 +88,46 @@ pub(crate) struct LifecycleProgress {
     pub(crate) estimated_remaining_ms: Option<u64>,
 }
 
+/// Everything a remembered `rebuild_required` verdict was established under,
+/// observed from disk without enumerating the Journal or opening a carrier:
+/// the store and derived namespace, the exact publication (descriptor hash
+/// included) and reader receipt, the generation's recorded authority and
+/// checkpoints, and the authoritative journal stamp. Each lookup re-observes
+/// all of it, so another process's settlement, catch-up, rebuild or store
+/// replacement changes the key even when the journal stamp does not.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RebuildRequiredKey {
+    generation: RebuildRequiredGeneration,
+    journal_stamp: JournalChangeStamp,
+}
+
+/// The derived half of a [`RebuildRequiredKey`]: compared for equality.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RebuildRequiredGeneration {
+    store_id: String,
+    derived_root: PathBuf,
+    publication: GenerationPublication,
+    reader_receipt_sha256: Option<String>,
+    recorded: PublicationValidationSnapshot,
+}
+
+#[cfg(test)]
+impl RebuildRequiredKey {
+    pub(crate) fn generation_id(&self) -> &str {
+        &self.generation.publication.generation_id
+    }
+
+    pub(crate) fn journal_stamp(&self) -> &JournalChangeStamp {
+        &self.journal_stamp
+    }
+}
+
+/// Names the publication whose reader receipt, live reader checkpoint and
+/// capability pair one request already validated in `open_current_witnessed`.
+pub(crate) struct ReaderPublicationWitness {
+    publication: GenerationPublication,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LifecycleStatus {
     pub(crate) availability: DerivedAccessAvailability,
@@ -355,18 +395,107 @@ impl DerivedAccessLifecycle {
     /// `store derived build`, and the writer-idle rebuild confirmation. Request
     /// readers and status observers use `status_read_only`.
     pub(crate) fn status(&self) -> Result<LifecycleStatus, LifecycleError> {
-        self.status_with_quarantine(true)
+        self.status_with_quarantine(true, None)
     }
 
     /// Observation classifier: the same classification as `status()` but it
     /// never renames, never takes an exclusive lock and never requests work.
     pub(crate) fn status_read_only(&self) -> Result<LifecycleStatus, LifecycleError> {
-        self.status_with_quarantine(false)
+        self.status_with_quarantine(false, None)
+    }
+
+    /// `status_read_only` for a request whose `open_current_witnessed` call
+    /// already validated this publication's reader receipt and capability
+    /// pair: a failure path validates the pair once per request.
+    pub(crate) fn status_read_only_witnessed(
+        &self,
+        witness: Option<&ReaderPublicationWitness>,
+    ) -> Result<LifecycleStatus, LifecycleError> {
+        self.status_with_quarantine(false, witness)
+    }
+
+    /// Lookup hook for a remembered `rebuild_required` verdict: observe its
+    /// key read-only. `None` when no key can be proven (another profile, no
+    /// publication, rebuild staging in progress, or any read failure), which
+    /// never matches a remembered verdict.
+    pub(crate) fn rebuild_required_key(&self) -> Option<RebuildRequiredKey> {
+        if self.profile != DerivedAccessProfile::SqliteWalBodylessV1 {
+            return None;
+        }
+        if !matches!(self.paths.staging_progress(), Ok(None)) {
+            return None;
+        }
+        let (paths, publication, _lease) = self.stable_current_publication().ok()??;
+        let generation_root = paths.generation(&publication.generation_id);
+        let reader_receipt_sha256 =
+            match std::fs::read(generation_root.join(CHANGE_READER_PROFILE_RESOURCE_V3)) {
+                Ok(bytes) => Some(crate::canonical_hash::sha256_bytes_hex(&bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(_) => return None,
+            };
+        let recorded = DerivedAccessService::open_at(
+            &self.store_root,
+            &generation_root,
+            CursorLedgerIdentity::new(self.store_id.clone()),
+        )
+        .ok()?
+        .publication_validation_snapshot()
+        .ok()?;
+        let journal_stamp = QualificationLocalJournal::new(&self.store_root)
+            .change_stamp()
+            .ok()?;
+        Some(RebuildRequiredKey {
+            generation: RebuildRequiredGeneration {
+                store_id: self.store_id.clone(),
+                derived_root: paths.root().to_path_buf(),
+                publication,
+                reader_receipt_sha256,
+                recorded,
+            },
+            journal_stamp,
+        })
+    }
+
+    /// Lookup hook: whether `key` still holds. The derived half must be
+    /// re-observed unchanged, and the journal must be proven continuous and
+    /// unchanged since the key's stamp with the same native interval check
+    /// that authority freshness uses (on NTFS the volume cursor moves with
+    /// unrelated activity, so stamp equality alone would never hold there).
+    pub(crate) fn rebuild_required_key_holds(&self, key: &RebuildRequiredKey) -> bool {
+        self.rebuild_required_key()
+            .is_some_and(|observed| observed.generation == key.generation)
+            && QualificationLocalJournal::new(&self.store_root)
+                .changes_since(&key.journal_stamp)
+                .is_ok_and(|check| check.verdict == JournalChangeVerdict::Stable)
+    }
+
+    /// Record hook: whether the key's recorded authority is definitely
+    /// superseded by the journal. Only a `Changed` interval qualifies; an
+    /// `Indeterminate` one (or a failed check) may clear on its own and is
+    /// never remembered.
+    pub(crate) fn rebuild_required_is_definite(&self, key: &RebuildRequiredKey) -> bool {
+        QualificationLocalJournal::new(&self.store_root)
+            .changes_since(&key.generation.recorded.authority.change_stamp)
+            .is_ok_and(|check| check.verdict == JournalChangeVerdict::Changed)
+    }
+
+    /// Whether `status` is the classification this key was observed under.
+    pub(crate) fn rebuild_required_key_names(
+        key: &RebuildRequiredKey,
+        status: &LifecycleStatus,
+    ) -> bool {
+        status.availability == DerivedAccessAvailability::RebuildRequired
+            && !status.transient_failure
+            && !status.recovery_deferred
+            && status.journal_unavailable.is_none()
+            && status.generation_id.as_deref()
+                == Some(key.generation.publication.generation_id.as_str())
     }
 
     fn status_with_quarantine(
         &self,
         allow_quarantine: bool,
+        witness: Option<&ReaderPublicationWitness>,
     ) -> Result<LifecycleStatus, LifecycleError> {
         if self.profile == DerivedAccessProfile::Off || !self.paths.root().exists() {
             return Ok(status(DerivedAccessAvailability::Absent, None, None));
@@ -485,11 +614,15 @@ impl DerivedAccessLifecycle {
                 ));
             }
         };
-        if let Err(error) = self.validate_change_reader_publication(
-            &generation_root,
-            &descriptor,
-            &publication_snapshot,
-        ) {
+        let reader_publication_witnessed =
+            witness.is_some_and(|witness| witness.publication == publication);
+        if !reader_publication_witnessed
+            && let Err(error) = self.validate_change_reader_publication(
+                &generation_root,
+                &descriptor,
+                &publication_snapshot,
+            )
+        {
             return match error {
                 LifecycleError::RebuildRequired(detail) => Ok(status(
                     DerivedAccessAvailability::RebuildRequired,
@@ -1177,6 +1310,17 @@ impl DerivedAccessLifecycle {
     /// Quarantine-class and rebuild-class failures are reported as typed errors;
     /// the recovery classifier `status()` owns the rename.
     pub(crate) fn open_current(&self) -> Result<Option<CurrentGeneration>, LifecycleError> {
+        self.open_current_witnessed(&mut None)
+    }
+
+    /// `open_current` that also records, in `witness`, the publication whose
+    /// reader receipt and capability pair it validated, even when a later step
+    /// fails. The witness is request-scoped: pass it to
+    /// `status_read_only_witnessed` in the same request, never keep it.
+    pub(crate) fn open_current_witnessed(
+        &self,
+        witness: &mut Option<ReaderPublicationWitness>,
+    ) -> Result<Option<CurrentGeneration>, LifecycleError> {
         if self.profile == DerivedAccessProfile::Off {
             return Ok(None);
         }
@@ -1218,6 +1362,9 @@ impl DerivedAccessLifecycle {
                 LifecycleError::Validation(detail) => LifecycleError::Quarantined(detail),
                 error => error,
             })?;
+        *witness = Some(ReaderPublicationWitness {
+            publication: publication.clone(),
+        });
         let authority =
             self.observe_current_authority_snapshot(publication_snapshot.authority.clone())?;
         validate_published(
@@ -1679,7 +1826,7 @@ impl DerivedAccessLifecycle {
                 // lock is acquired. Never quarantine from that stale
                 // observation: re-run the complete classifier under the lock
                 // and rename only if it still reports invalid state.
-                let observed = self.status_with_quarantine(false)?;
+                let observed = self.status_with_quarantine(false, None)?;
                 if observed.availability != DerivedAccessAvailability::Quarantined {
                     return Ok(observed);
                 }
