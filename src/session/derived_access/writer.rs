@@ -2419,6 +2419,17 @@ mod tests {
 
     #[test]
     fn remembered_rebuild_required_yields_to_same_generation_settlement_with_an_unchanged_stamp() {
+        settle_after_remembered_rebuild_required(false);
+    }
+
+    /// The same settlement with a Ready generation already cached, so the
+    /// in-flight failure is remembered through the cached path.
+    #[test]
+    fn a_cached_rebuild_required_verdict_yields_to_same_generation_settlement() {
+        settle_after_remembered_rebuild_required(true);
+    }
+
+    fn settle_after_remembered_rebuild_required(warm: bool) {
         use crate::session::DerivedWriteAvailabilityV1::Current;
         let (root, _backend, lifecycle) = ready_change_lifecycle();
         let runtime =
@@ -2430,6 +2441,13 @@ mod tests {
             lifecycle.status_read_only().unwrap().availability,
             DerivedAccessAvailability::Current
         );
+        if warm {
+            assert_eq!(
+                runtime_availability(&runtime),
+                DerivedAccessAvailability::Current
+            );
+            assert!(runtime.cached_current().is_some());
+        }
         let generation = lifecycle
             .published_generation_identity_read_only()
             .unwrap()
@@ -2575,7 +2593,7 @@ mod tests {
     }
 
     #[test]
-    fn a_status_poll_remembers_the_verdict_for_a_process_with_a_cached_generation() {
+    fn a_cached_generation_remembers_its_own_rebuild_required_verdict() {
         let (root, _backend, lifecycle) = ready_change_lifecycle();
         let runtime =
             crate::session::derived_access::runtime::DerivedAccessRuntime::active_for_test(
@@ -2586,26 +2604,31 @@ mod tests {
             runtime_availability(&runtime),
             DerivedAccessAvailability::Current
         );
+        assert!(runtime.cached_current().is_some());
         EventStore::open(root.path())
             .record_event_once(&event(37))
             .unwrap();
-        // The cached generation answers from its own bounded revalidation and
-        // records nothing: that path also carries transient in-flight appends.
+        // The cached generation's own revalidation fails and remembers the
+        // definite verdict, with no status poll in between.
         assert_eq!(
             runtime_availability(&runtime),
-            DerivedAccessAvailability::RebuildRequired
-        );
-        assert_eq!(runtime.remembered_rebuild_required_key(), None);
-        let polled = runtime.lifecycle_status_read_only(&lifecycle).unwrap();
-        assert_eq!(
-            polled.availability,
             DerivedAccessAvailability::RebuildRequired
         );
         let key = runtime
             .remembered_rebuild_required_key()
-            .expect("the status poll proves and remembers the verdict");
+            .expect("the cached failure remembers its verdict");
+        assert!(journal_unchanged_since(root.path(), key.journal_stamp()));
+        // The cached generation is kept: the memo never answers Ready.
+        assert!(runtime.cached_current().is_some());
         assert_eq!(
             runtime_availability(&runtime),
+            DerivedAccessAvailability::RebuildRequired
+        );
+        assert_eq!(runtime.remembered_rebuild_required_key(), Some(key.clone()));
+        // A status poll shares the verdict rather than re-establishing it.
+        let polled = runtime.lifecycle_status_read_only(&lifecycle).unwrap();
+        assert_eq!(
+            polled.availability,
             DerivedAccessAvailability::RebuildRequired
         );
         assert_eq!(runtime.remembered_rebuild_required_key(), Some(key));

@@ -419,20 +419,11 @@ impl DerivedAccessLifecycle {
     /// publication, rebuild staging in progress, or any read failure), which
     /// never matches a remembered verdict.
     pub(crate) fn rebuild_required_key(&self) -> Option<RebuildRequiredKey> {
-        if self.profile != DerivedAccessProfile::SqliteWalBodylessV1 {
-            return None;
-        }
-        if !matches!(self.paths.staging_progress(), Ok(None)) {
+        if !self.rebuild_required_key_admitted() {
             return None;
         }
         let (paths, publication, _lease) = self.stable_current_publication().ok()??;
         let generation_root = paths.generation(&publication.generation_id);
-        let reader_receipt_sha256 =
-            match std::fs::read(generation_root.join(CHANGE_READER_PROFILE_RESOURCE_V3)) {
-                Ok(bytes) => Some(crate::canonical_hash::sha256_bytes_hex(&bytes)),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(_) => return None,
-            };
         let recorded = DerivedAccessService::open_at(
             &self.store_root,
             &generation_root,
@@ -441,6 +432,46 @@ impl DerivedAccessLifecycle {
         .ok()?
         .publication_validation_snapshot()
         .ok()?;
+        self.assemble_rebuild_required_key(&paths, publication, recorded)
+    }
+
+    /// `rebuild_required_key` observed through the generation this process
+    /// already holds: its read lease covers every read and its open service
+    /// supplies the recorded state, so observing takes no new lease and opens
+    /// no new connection. `None` unless that generation is still published.
+    pub(crate) fn rebuild_required_key_for_cached(
+        &self,
+        current: &CurrentGeneration,
+    ) -> Option<RebuildRequiredKey> {
+        if !self.rebuild_required_key_admitted() {
+            return None;
+        }
+        let paths = GenerationLayout::new(&self.store_root).ok()?;
+        if paths.current_publication().ok()?.as_ref() != Some(&current.publication_identity) {
+            return None;
+        }
+        let recorded = current.service.publication_validation_snapshot().ok()?;
+        self.assemble_rebuild_required_key(&paths, current.publication_identity.clone(), recorded)
+    }
+
+    fn rebuild_required_key_admitted(&self) -> bool {
+        self.profile == DerivedAccessProfile::SqliteWalBodylessV1
+            && matches!(self.paths.staging_progress(), Ok(None))
+    }
+
+    fn assemble_rebuild_required_key(
+        &self,
+        paths: &GenerationLayout,
+        publication: GenerationPublication,
+        recorded: PublicationValidationSnapshot,
+    ) -> Option<RebuildRequiredKey> {
+        let generation_root = paths.generation(&publication.generation_id);
+        let reader_receipt_sha256 =
+            match std::fs::read(generation_root.join(CHANGE_READER_PROFILE_RESOURCE_V3)) {
+                Ok(bytes) => Some(crate::canonical_hash::sha256_bytes_hex(&bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(_) => return None,
+            };
         let journal_stamp = QualificationLocalJournal::new(&self.store_root)
             .change_stamp()
             .ok()?;
@@ -461,12 +492,33 @@ impl DerivedAccessLifecycle {
     /// unchanged since the key's stamp with the same native interval check
     /// that authority freshness uses (on NTFS the volume cursor moves with
     /// unrelated activity, so stamp equality alone would never hold there).
-    pub(crate) fn rebuild_required_key_holds(&self, key: &RebuildRequiredKey) -> bool {
-        self.rebuild_required_key()
-            .is_some_and(|observed| observed.generation == key.generation)
+    /// With a cached generation the derived half is re-observed through it.
+    pub(crate) fn rebuild_required_key_holds(
+        &self,
+        key: &RebuildRequiredKey,
+        cached: Option<&CurrentGeneration>,
+    ) -> bool {
+        let observed = match cached {
+            Some(current) => self.rebuild_required_key_for_cached(current),
+            None => self.rebuild_required_key(),
+        };
+        observed.is_some_and(|observed| observed.generation == key.generation)
             && QualificationLocalJournal::new(&self.store_root)
                 .changes_since(&key.journal_stamp)
                 .is_ok_and(|check| check.verdict == JournalChangeVerdict::Stable)
+    }
+
+    /// The status a cached generation's `rebuild_required` revalidation
+    /// establishes for `key`: the same shape the read-only classifier reports.
+    pub(crate) fn rebuild_required_status(
+        key: &RebuildRequiredKey,
+        detail: String,
+    ) -> LifecycleStatus {
+        status(
+            DerivedAccessAvailability::RebuildRequired,
+            Some(key.generation.publication.generation_id.clone()),
+            Some(detail),
+        )
     }
 
     /// Record hook: whether the key's recorded authority is definitely

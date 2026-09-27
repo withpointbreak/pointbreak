@@ -818,16 +818,19 @@ impl DerivedAccessRuntime {
     }
 
     /// The remembered `rebuild_required` status while lifecycle proves the
-    /// key it was recorded under still holds. Any other observation discards
-    /// it. With nothing remembered this is one uncontended lock and no I/O.
+    /// key it was recorded under still holds, observed through `cached` when
+    /// this process holds a generation (no new lease). Any other observation
+    /// discards it. With nothing remembered this is one uncontended lock and
+    /// no I/O.
     fn remembered_rebuild_required(
         &self,
         lifecycle: &DerivedAccessLifecycle,
+        cached: Option<&CurrentGeneration>,
     ) -> Option<LifecycleStatus> {
         let remembered = lock(&self.rebuild_required_verdict)
             .as_ref()
             .map(|verdict| verdict.key.clone())?;
-        let holds = lifecycle.rebuild_required_key_holds(&remembered);
+        let holds = lifecycle.rebuild_required_key_holds(&remembered, cached);
         let mut verdict = lock(&self.rebuild_required_verdict);
         match verdict.as_ref() {
             Some(current) if current.key == remembered && holds => Some(current.status.clone()),
@@ -854,7 +857,7 @@ impl DerivedAccessRuntime {
         if let Some(before) = before
             && DerivedAccessLifecycle::rebuild_required_key_names(&before, &observed)
             && lifecycle.rebuild_required_is_definite(&before)
-            && lifecycle.rebuild_required_key_holds(&before)
+            && lifecycle.rebuild_required_key_holds(&before, None)
         {
             *lock(&self.rebuild_required_verdict) = Some(RebuildRequiredVerdict {
                 key: before,
@@ -865,6 +868,34 @@ impl DerivedAccessRuntime {
         Ok(observed)
     }
 
+    /// Remember the `rebuild_required` verdict a cached generation's own
+    /// revalidation just returned. The key is observed through that
+    /// generation, so this takes no new lease and runs no second classifier.
+    /// Recording needs the same proof as `classify_read_only_remembering`:
+    /// the key names the status, the recorded authority is definitely
+    /// superseded, and the key still holds after that check.
+    fn remember_cached_rebuild_required(
+        &self,
+        lifecycle: &DerivedAccessLifecycle,
+        cached: &CurrentGeneration,
+        detail: &str,
+    ) {
+        let Some(key) = lifecycle.rebuild_required_key_for_cached(cached) else {
+            return;
+        };
+        let status = DerivedAccessLifecycle::rebuild_required_status(&key, detail.to_owned());
+        if DerivedAccessLifecycle::rebuild_required_key_names(&key, &status)
+            && lifecycle.rebuild_required_is_definite(&key)
+            && lifecycle.rebuild_required_key_holds(&key, Some(cached))
+        {
+            *lock(&self.rebuild_required_verdict) = Some(RebuildRequiredVerdict {
+                key,
+                status,
+                control_capability: None,
+            });
+        }
+    }
+
     /// The read-only lifecycle classification that status observers use:
     /// served from a remembered `rebuild_required` verdict while its key holds,
     /// otherwise classified (and remembered when it proves one).
@@ -872,7 +903,8 @@ impl DerivedAccessRuntime {
         &self,
         lifecycle: &DerivedAccessLifecycle,
     ) -> Result<LifecycleStatus, LifecycleError> {
-        if let Some(remembered) = self.remembered_rebuild_required(lifecycle) {
+        let cached = self.cached_current();
+        if let Some(remembered) = self.remembered_rebuild_required(lifecycle, cached.as_deref()) {
             return Ok(remembered);
         }
         self.classify_read_only_remembering(lifecycle, None)
@@ -891,9 +923,11 @@ impl DerivedAccessRuntime {
         else {
             return inspect();
         };
+        let cached = self.cached_current();
         let holds = || {
-            self.discovery_lifecycle()
-                .is_some_and(|lifecycle| lifecycle.rebuild_required_key_holds(&key))
+            self.discovery_lifecycle().is_some_and(|lifecycle| {
+                lifecycle.rebuild_required_key_holds(&key, cached.as_deref())
+            })
         };
         if !holds() {
             let mut verdict = lock(&self.rebuild_required_verdict);
@@ -1010,14 +1044,6 @@ impl DerivedAccessRuntime {
                 )));
             }
         };
-        // A remembered verdict answers without opening the generation or
-        // re-validating the capability pair; the worker request is unchanged.
-        if let Some(remembered) = self.remembered_rebuild_required(lifecycle) {
-            self.request_background_rebuild();
-            return Ok(RuntimeCurrentRead::Unavailable(
-                unavailable_lifecycle_status(remembered, "derived generation requires a rebuild"),
-            ));
-        }
         let existing = {
             let mut guard = lock(current);
             match guard.as_ref() {
@@ -1033,10 +1059,23 @@ impl DerivedAccessRuntime {
                 None => None,
             }
         };
+        // A remembered verdict answers without opening or revalidating the
+        // generation and without re-validating the capability pair; the
+        // worker request is unchanged.
+        if let Some(remembered) = self.remembered_rebuild_required(lifecycle, existing.as_deref()) {
+            self.request_background_rebuild();
+            return Ok(RuntimeCurrentRead::Unavailable(
+                unavailable_lifecycle_status(remembered, "derived generation requires a rebuild"),
+            ));
+        }
         if let Some(existing) = existing {
             let validation = match lifecycle.validate_cached_current(&existing) {
                 Ok(validation) => validation,
                 Err(LifecycleError::RebuildRequired(detail)) => {
+                    // Keep the cached generation: an in-flight append settles
+                    // inside it, and the memo never answers Ready, so the
+                    // next miss revalidates it without reopening.
+                    self.remember_cached_rebuild_required(lifecycle, &existing, &detail);
                     self.request_background_rebuild();
                     return Ok(RuntimeCurrentRead::Unavailable(runtime_status(
                         DerivedAccessAvailability::RebuildRequired,
