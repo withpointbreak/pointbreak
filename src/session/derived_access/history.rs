@@ -4175,10 +4175,10 @@ mod tests {
 
         // A probe that fails or never queries the journal proves nothing, so
         // the stopped worker's reason stands, observation after observation.
-        for observation in ["queued inconclusive", "platform inconclusive"] {
-            if observation == "queued inconclusive" {
-                queue_status_probe(&store_root, JournalProbe::Inconclusive);
-            }
+        // Every outcome is queued: a real probe on an NTFS runner proves the
+        // journal active.
+        for observation in ["first inconclusive", "repeated inconclusive"] {
+            queue_status_probe(&store_root, JournalProbe::Inconclusive);
             let status = access.lifecycle_status();
             assert_eq!(
                 status.reason,
@@ -4201,8 +4201,11 @@ mod tests {
         // active, so the stopped worker's reason is retired rather than
         // repeated, and availability stays fail-closed until a generation is
         // proven. Later inconclusive probes do not bring the reason back.
-        queue_status_probe(&store_root, JournalProbe::Active);
-        for observation in ["active", "inconclusive afterward"] {
+        for (observation, probe) in [
+            ("active", JournalProbe::Active),
+            ("inconclusive afterward", JournalProbe::Inconclusive),
+        ] {
+            queue_status_probe(&store_root, probe);
             let status = access.lifecycle_status();
             assert_eq!(status.reason, None, "{observation}: {status:?}");
             assert!(
