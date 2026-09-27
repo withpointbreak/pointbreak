@@ -125,6 +125,21 @@ pub struct EventHistoryEntryV1 {
     pub revision_refs: Vec<RevisionRefV1>,
     pub unresolved_revision_ids: Vec<RevisionId>,
     pub summary: EventHistorySummaryV1,
+    /// Server-resolved navigation targets for the fact ids this entry's
+    /// relationship fields name. Each target is the Timeline event that
+    /// recorded the referenced fact against the same Revision as this entry's
+    /// review subject. A referenced id without a target here has no
+    /// resolvable recording event, and readers render it as plain text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relation_targets: Vec<EventHistoryRelationTargetV1>,
+}
+
+/// One referenced fact id and the Timeline event that recorded it.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventHistoryRelationTargetV1 {
+    pub fact_id: String,
+    pub event_id: EventId,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

@@ -86,8 +86,8 @@ pub use change_ordering::{
 pub(crate) use change_ordering::{apply_change_local_wait_keys, change_ordering_projection};
 pub use event_history::{
     EventHistoryCompletionV1, EventHistoryDocumentV1, EventHistoryEntryV1, EventHistoryFacadeV1,
-    EventHistoryOrderV1, EventHistorySubjectV1, EventHistorySummaryV1,
-    INSPECT_EVENT_HISTORY_SCHEMA,
+    EventHistoryOrderV1, EventHistoryRelationTargetV1, EventHistorySubjectV1,
+    EventHistorySummaryV1, INSPECT_EVENT_HISTORY_SCHEMA,
 };
 pub use history::{HistoryBody, derived_history_document, history_document};
 pub use identity::{

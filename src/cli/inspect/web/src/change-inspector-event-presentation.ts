@@ -18,6 +18,12 @@ import type {
 export interface EventPresentationField {
   label: string;
   value: string;
+  /**
+   * The fact ids a relationship field names, in order. Present only on
+   * relationship fields; the renderer activates an id only when the entry's
+   * server-supplied `relationTargets` resolves it.
+   */
+  factIds?: string[];
 }
 
 export interface EventPresentation {
@@ -141,6 +147,12 @@ function field(label: string, value: string | undefined | null) {
   return value ? { label, value } : null;
 }
 
+function relationField(label: string, factIds: string[] | undefined) {
+  return factIds?.length
+    ? { label, value: factIds.join("; "), factIds: [...factIds] }
+    : null;
+}
+
 function fields(
   ...values: Array<EventPresentationField | null>
 ): EventPresentationField[] {
@@ -190,8 +202,8 @@ export function presentEvent(entry: EventHistoryEntry): EventPresentation {
           field("target", eventTargetLabel(detail.target)),
           field("confidence", detail.confidence),
           field("tags", detail.tags?.join(", ")),
-          field("supersedes", detail.supersedesObservationIds?.join("; ")),
-          field("responds to", detail.respondsToObservationIds?.join("; ")),
+          relationField("supersedes", detail.supersedesObservationIds),
+          relationField("responds to", detail.respondsToObservationIds),
         ),
       };
     }
@@ -205,9 +217,9 @@ export function presentEvent(entry: EventHistoryEntry): EventPresentation {
         fields: fields(
           field("assessment", detail.assessmentId),
           field("target", eventTargetLabel(detail.target)),
-          field("replaces", detail.replacesAssessmentIds?.join("; ")),
-          field("observations", detail.relatedObservationIds?.join("; ")),
-          field("input requests", detail.relatedInputRequestIds?.join("; ")),
+          relationField("replaces", detail.replacesAssessmentIds),
+          relationField("observations", detail.relatedObservationIds),
+          relationField("input requests", detail.relatedInputRequestIds),
         ),
       };
     }
@@ -234,7 +246,7 @@ export function presentEvent(entry: EventHistoryEntry): EventPresentation {
         bodyContentType: detail.reasonContentType,
         fields: fields(
           field("response", detail.inputRequestResponseId),
-          field("input request", detail.inputRequestId),
+          relationField("input request", [detail.inputRequestId]),
           field("Revision", detail.revisionId),
         ),
       };

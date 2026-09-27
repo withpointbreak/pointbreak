@@ -2113,6 +2113,7 @@ mod tests {
             family_state: crate::documents::FactFamilyStateV1::Current,
             revision_currency: crate::documents::ChangeRevisionCurrencyV1::Current,
             availability: crate::session::ContentAvailabilityV1::Available,
+            recording_event_id: None,
         };
         let replacement = facade
             .contextual_revision_document(

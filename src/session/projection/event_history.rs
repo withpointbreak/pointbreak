@@ -6,13 +6,13 @@ use crate::canonical_hash::sha256_json_prefixed;
 use crate::crypto::EventVerificationStatus;
 use crate::documents::{
     EventHistoryCompletionV1, EventHistoryDocumentV1, EventHistoryEntryV1, EventHistoryFacadeV1,
-    EventHistoryOrderV1, EventHistorySubjectV1, EventHistorySummaryV1,
-    INSPECT_EVENT_HISTORY_SCHEMA,
+    EventHistoryOrderV1, EventHistoryRelationTargetV1, EventHistorySubjectV1,
+    EventHistorySummaryV1, INSPECT_EVENT_HISTORY_SCHEMA,
 };
 use crate::error::Result;
 use crate::model::{
     ChangeId, ChangeIdentityDescriptorV1, ChangeMembershipClaimId, ChangeRevisionRelationClaimId,
-    ReviewTargetRef, RevisionId, RevisionRefV1, ValidationTarget,
+    EventId, ReviewTargetRef, RevisionId, RevisionRefV1, ValidationTarget,
 };
 use crate::session::event::{
     ChangeDeclaredPayload, ChangeLinkAssertedPayload, ChangeMembershipAssertedPayload,
@@ -160,6 +160,8 @@ pub(crate) fn project_event_history(
         compare_event_instants(&left.occurred_at, &right.occurred_at)
             .then_with(|| left.event_id.cmp(&right.event_id))
     });
+    let relation_index = EventHistoryRelationIndexV1::from_entries(&entries);
+    attach_event_history_relation_targets(&mut entries, &relation_index);
 
     let mut facets = BTreeMap::new();
     let mut completion = EventHistoryCompletionV1::default();
@@ -659,7 +661,149 @@ fn project_event_without_trust(
         revision_refs: revision_refs.into_iter().collect(),
         unresolved_revision_ids: unresolved_revision_ids.into_iter().collect(),
         summary,
+        relation_targets: Vec::new(),
     }))
+}
+
+/// Recording events for review facts, keyed by the Revision each fact was
+/// recorded against. When one fact id has more than one recording event on the
+/// same Revision, the earliest in normalized Timeline order is the target.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct EventHistoryRelationIndexV1 {
+    recorded: BTreeMap<(RevisionId, String), (String, EventId)>,
+}
+
+impl EventHistoryRelationIndexV1 {
+    /// Index every fact-recording entry of a complete Timeline.
+    pub(crate) fn from_entries(entries: &[EventHistoryEntryV1]) -> Self {
+        let mut index = Self::default();
+        for entry in entries {
+            if let Some((revision_id, fact_id)) = event_history_recorded_fact(entry) {
+                index.insert(
+                    revision_id.clone(),
+                    fact_id.to_owned(),
+                    &entry.occurred_at,
+                    &entry.event_id,
+                );
+            }
+        }
+        index
+    }
+
+    pub(crate) fn insert(
+        &mut self,
+        revision_id: RevisionId,
+        fact_id: String,
+        occurred_at: &str,
+        event_id: &EventId,
+    ) {
+        let candidate = (occurred_at.to_owned(), event_id.clone());
+        match self.recorded.entry((revision_id, fact_id)) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(candidate);
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                let (current_at, current_id) = slot.get();
+                if compare_event_instants(occurred_at, current_at)
+                    .then_with(|| event_id.cmp(current_id))
+                    .is_lt()
+                {
+                    slot.insert(candidate);
+                }
+            }
+        }
+    }
+
+    fn resolve(&self, revision_id: &RevisionId, fact_id: &str) -> Option<&EventId> {
+        self.recorded
+            .get(&(revision_id.clone(), fact_id.to_owned()))
+            .map(|(_, event_id)| event_id)
+    }
+}
+
+/// Event types whose Timeline entry records a review fact that relationship
+/// fields can reference.
+pub(crate) const EVENT_HISTORY_RECORDING_EVENT_TYPES: [EventType; 3] = [
+    EventType::ReviewObservationRecorded,
+    EventType::ReviewAssessmentRecorded,
+    EventType::InputRequestOpened,
+];
+
+/// The Revision and fact id one Timeline entry records, if it records a fact
+/// that relationship fields can reference.
+fn event_history_recorded_fact(entry: &EventHistoryEntryV1) -> Option<(&RevisionId, &str)> {
+    let EventHistorySubjectV1::Review { target } = &entry.subject else {
+        return None;
+    };
+    let fact_id = match &entry.summary {
+        EventHistorySummaryV1::ReviewObservationRecorded(payload) => {
+            payload.observation_id.as_str()
+        }
+        EventHistorySummaryV1::ReviewAssessmentRecorded(payload) => payload.assessment_id.as_str(),
+        EventHistorySummaryV1::InputRequestOpened(payload) => payload.input_request_id.as_str(),
+        _ => return None,
+    };
+    Some((revision_id_of(target), fact_id))
+}
+
+/// The Revision an entry's relationship fields are resolved against and the
+/// fact ids those fields name.
+pub(crate) fn event_history_relation_references(
+    entry: &EventHistoryEntryV1,
+) -> Option<(&RevisionId, BTreeSet<&str>)> {
+    let EventHistorySubjectV1::Review { target } = &entry.subject else {
+        return None;
+    };
+    let references = match &entry.summary {
+        EventHistorySummaryV1::ReviewObservationRecorded(payload) => payload
+            .supersedes_observation_ids
+            .iter()
+            .chain(&payload.responds_to_observation_ids)
+            .map(|id| id.as_str())
+            .collect(),
+        EventHistorySummaryV1::ReviewAssessmentRecorded(payload) => payload
+            .replaces_assessment_ids
+            .iter()
+            .map(|id| id.as_str())
+            .chain(payload.related_observation_ids.iter().map(|id| id.as_str()))
+            .chain(
+                payload
+                    .related_input_request_ids
+                    .iter()
+                    .map(|id| id.as_str()),
+            )
+            .collect(),
+        EventHistorySummaryV1::InputRequestResponded(payload) => {
+            BTreeSet::from([payload.input_request_id.as_str()])
+        }
+        _ => return None,
+    };
+    (!references.is_empty()).then(|| (revision_id_of(target), references))
+}
+
+/// Attach the server-resolved recording event for every relationship id the
+/// index can resolve. Unresolvable ids receive no target.
+pub(crate) fn attach_event_history_relation_targets(
+    entries: &mut [EventHistoryEntryV1],
+    index: &EventHistoryRelationIndexV1,
+) {
+    for entry in entries {
+        let Some((revision_id, references)) = event_history_relation_references(entry) else {
+            continue;
+        };
+        let targets = references
+            .into_iter()
+            .filter_map(|fact_id| {
+                index
+                    .resolve(revision_id, fact_id)
+                    .map(|event_id| EventHistoryRelationTargetV1 {
+                        fact_id: fact_id.to_owned(),
+                        event_id: event_id.clone(),
+                    })
+            })
+            .collect();
+        entry.relation_targets = targets;
+    }
 }
 
 fn decode<T: DeserializeOwned>(event: &ShoreEvent) -> Result<T> {
@@ -1269,6 +1413,105 @@ mod tests {
         assert_eq!(
             by_id(&ambiguous).unresolved_revision_ids,
             vec![RevisionId::new("rev:sha256:ambiguous")]
+        );
+    }
+
+    fn responding_observation(
+        key: &str,
+        revision_id: &str,
+        occurred_at: &str,
+        responds_to: &[&str],
+    ) -> ShoreEvent {
+        let mut payload: ReviewObservationRecordedPayload =
+            serde_json::from_value(observation(key, revision_id, occurred_at).payload).unwrap();
+        payload.responds_to_observation_ids = responds_to
+            .iter()
+            .map(|id| ObservationId::new(*id))
+            .collect();
+        event(
+            EventType::ReviewObservationRecorded,
+            key,
+            payload,
+            occurred_at,
+        )
+    }
+
+    #[test]
+    fn relation_targets_name_the_earliest_same_revision_recording_event() {
+        let root = observation("root", "rev:sha256:r", "unix-ms:2");
+        let duplicate = event(
+            EventType::ReviewObservationRecorded,
+            "root-duplicate",
+            serde_json::from_value::<ReviewObservationRecordedPayload>(root.payload.clone())
+                .unwrap(),
+            "unix-ms:3",
+        );
+        let other = observation("other", "rev:sha256:other", "unix-ms:1");
+        let reply = responding_observation(
+            "reply",
+            "rev:sha256:r",
+            "unix-ms:4",
+            &[
+                "observation:sha256:root",
+                "observation:sha256:other",
+                "observation:sha256:absent",
+            ],
+        );
+        let cross = responding_observation(
+            "cross",
+            "rev:sha256:other",
+            "unix-ms:5",
+            &["observation:sha256:root"],
+        );
+        let events = vec![reply.clone(), cross.clone(), duplicate, other, root.clone()];
+        let history = project_event_history(
+            &events,
+            &ChangeDocumentProjectionV1::default(),
+            cursor(&events),
+            "change-stamp".into(),
+            &TrustSet::default(),
+        )
+        .unwrap();
+        let entry = |event: &ShoreEvent| {
+            history
+                .entries()
+                .iter()
+                .find(|entry| entry.event_id == event.event_id)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(
+            entry(&reply).relation_targets,
+            vec![EventHistoryRelationTargetV1 {
+                fact_id: "observation:sha256:root".to_owned(),
+                event_id: root.event_id.clone(),
+            }],
+            "only the same-Revision parent resolves, to its earliest recording event"
+        );
+        assert!(
+            entry(&cross).relation_targets.is_empty(),
+            "a parent recorded on another Revision has no target"
+        );
+        assert!(entry(&root).relation_targets.is_empty());
+        let json = serde_json::to_value(entry(&reply)).unwrap();
+        assert_eq!(
+            json["relationTargets"],
+            serde_json::json!([{
+                "factId": "observation:sha256:root",
+                "eventId": root.event_id.as_str(),
+            }])
+        );
+        assert!(
+            serde_json::to_value(entry(&cross))
+                .unwrap()
+                .get("relationTargets")
+                .is_none(),
+            "an entry without targets omits the field"
+        );
+        let search = crate::session::event_history_search_record(&entry(&reply));
+        assert!(
+            !search.text.contains(root.event_id.as_str()),
+            "free text never matches through a resolved target"
         );
     }
 

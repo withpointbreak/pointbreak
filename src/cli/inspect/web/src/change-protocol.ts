@@ -454,6 +454,19 @@ export interface EventHistoryEntry {
   revisionRefs: EventHistoryRevisionRef[];
   unresolvedRevisionIds: string[];
   summary: EventHistorySummary;
+  /**
+   * Server-resolved Timeline targets for the fact ids this entry's
+   * relationship fields name: the event that recorded each fact. An id
+   * without a target has no resolvable recording event and reads as plain
+   * text; the reader never derives one.
+   */
+  relationTargets?: EventHistoryRelationTarget[];
+}
+
+/** One referenced fact id and the Timeline event that recorded it. */
+export interface EventHistoryRelationTarget {
+  factId: string;
+  eventId: string;
 }
 
 export interface EventHistoryDocument {
@@ -853,6 +866,11 @@ export interface ChangeRevisionDetail {
     revisionCurrency: string;
     familyState: string;
     availability: string;
+    /**
+     * The Timeline event that recorded this fact, supplied by the server. A
+     * bare reference to this fact navigates there; absent means plain text.
+     */
+    recordingEventId?: string;
   }>;
   factContentPresentations?: Record<
     string,
@@ -1794,8 +1812,62 @@ function isEventHistoryEntry(value: unknown): value is EventHistoryEntry {
     Array.isArray(value.revisionRefs) &&
     value.revisionRefs.every(isEventHistoryRevisionRef) &&
     isStringArray(value.unresolvedRevisionIds) &&
-    isEventHistorySummary(value.summary, value.eventType)
+    isEventHistorySummary(value.summary, value.eventType) &&
+    (value.relationTargets === undefined ||
+      isEventHistoryRelationTargets(
+        value.relationTargets,
+        eventHistoryRelationFactIds(value as unknown as EventHistoryEntry),
+      ))
   );
+}
+
+/**
+ * The fact ids an entry's relationship fields name. These are the only ids a
+ * server-supplied relation target may resolve.
+ */
+export function eventHistoryRelationFactIds(
+  entry: Pick<EventHistoryEntry, "summary">,
+): string[] {
+  const summary = entry.summary;
+  switch (summary.kind) {
+    case "review_observation_recorded":
+      return [
+        ...(summary.details.supersedesObservationIds ?? []),
+        ...(summary.details.respondsToObservationIds ?? []),
+      ];
+    case "review_assessment_recorded":
+      return [
+        ...(summary.details.replacesAssessmentIds ?? []),
+        ...(summary.details.relatedObservationIds ?? []),
+        ...(summary.details.relatedInputRequestIds ?? []),
+      ];
+    case "input_request_responded":
+      return [summary.details.inputRequestId];
+    default:
+      return [];
+  }
+}
+
+function isEventHistoryRelationTargets(
+  value: unknown,
+  referenced: readonly string[],
+): value is EventHistoryRelationTarget[] {
+  if (!Array.isArray(value)) return false;
+  const named = new Set(referenced);
+  const seen = new Set<string>();
+  return value.every((target) => {
+    if (
+      !isRecord(target) ||
+      !nonEmptyString(target.factId) ||
+      !nonEmptyString(target.eventId) ||
+      !named.has(target.factId) ||
+      seen.has(target.factId)
+    ) {
+      return false;
+    }
+    seen.add(target.factId);
+    return true;
+  });
 }
 
 /** Validate the fully server-owned, paged Change-aware Timeline projection. */
@@ -2933,7 +3005,9 @@ function isFactPresentation(
     (value.trackId === undefined || nonEmptyString(value.trackId)) &&
     isOneOf(value.revisionCurrency, REVISION_CURRENCY_VALUES) &&
     isOneOf(value.familyState, FACT_FAMILY_STATE_VALUES) &&
-    isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES)
+    isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES) &&
+    (value.recordingEventId === undefined ||
+      nonEmptyString(value.recordingEventId))
   );
 }
 

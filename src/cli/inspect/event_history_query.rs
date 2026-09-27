@@ -360,6 +360,7 @@ mod tests {
                     .into_iter()
                     .collect(),
                 summary: EventHistorySummaryV1::ReviewInitialized,
+                relation_targets: Vec::new(),
             })
             .collect::<Vec<_>>();
         EventHistoryDocumentV1 {

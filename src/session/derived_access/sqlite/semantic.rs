@@ -750,6 +750,85 @@ fn exact_revision_event_ids_statement(
     ))
 }
 
+/// One Timeline-member fact recorded against a Revision: its semantic fact id,
+/// recording event, occurrence, and event type.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TimelineRevisionFactRow {
+    pub(crate) fact_id: String,
+    pub(crate) event_id: String,
+    pub(crate) occurred_at: String,
+    pub(crate) event_type: String,
+}
+
+/// Select the Timeline-member facts recorded against one Revision at or before
+/// `observed`. The read is bounded by that Revision's fact count through the
+/// `semantic_event_fact_revision` index, never by store size.
+pub(crate) fn timeline_revision_fact_rows(
+    connection: &rusqlite::Connection,
+    revision_id: &RevisionId,
+    observed: TruthCursor,
+) -> Result<Vec<TimelineRevisionFactRow>, SqliteSemanticError> {
+    let epoch = to_i64(observed.epoch, "Timeline relation epoch")?;
+    let sequence = to_i64(observed.sequence, "Timeline relation cursor")?;
+    let (predicate, mut parameters): (&str, Vec<rusqlite::types::Value>) =
+        if let Some((prefix, digest)) = split_canonical_digest(revision_id.as_str()) {
+            (
+                "physical.revision_prefix_id = (
+                     SELECT id FROM semantic_identity_prefix WHERE value = ?1
+                 )
+                 AND physical.revision_digest = ?2
+                 AND physical.revision_raw IS NULL",
+                vec![prefix.to_owned().into(), digest.to_vec().into()],
+            )
+        } else {
+            (
+                "physical.revision_prefix_id IS NULL
+                 AND physical.revision_digest IS NULL
+                 AND physical.revision_raw = ?1",
+                vec![revision_id.as_str().to_owned().into()],
+            )
+        };
+    parameters.push(epoch.into());
+    parameters.push(sequence.into());
+    let epoch_parameter = parameters.len() - 1;
+    let sequence_parameter = parameters.len();
+    let sql = format!(
+        "SELECT coalesce(
+                    physical.semantic_raw,
+                    semantic_prefix.value || lower(hex(physical.semantic_digest))
+                ),
+                locator.event_id,
+                physical.occurred_at,
+                locator.event_type
+         FROM semantic_event_fact AS physical
+           INDEXED BY semantic_event_fact_revision
+         CROSS JOIN locator_event_text AS locator
+         JOIN product_history_event AS history ON history.sequence = physical.sequence
+         LEFT JOIN semantic_identity_prefix AS semantic_prefix
+           ON semantic_prefix.id = physical.semantic_prefix_id
+         WHERE {predicate}
+           AND locator.sequence = physical.sequence
+           AND locator.epoch = ?{epoch_parameter}
+           AND physical.sequence <= ?{sequence_parameter}
+         ORDER BY physical.sequence"
+    );
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| sqlite_error("prepare Timeline relation selection", error))?;
+    let rows = statement
+        .query_map(rusqlite::params_from_iter(parameters), |row| {
+            Ok(TimelineRevisionFactRow {
+                fact_id: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                event_id: row.get(1)?,
+                occurred_at: row.get(2)?,
+                event_type: row.get(3)?,
+            })
+        })
+        .map_err(|error| sqlite_error("query Timeline relation selection", error))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| sqlite_error("read Timeline relation selection", error))
+}
+
 fn exact_revision_event_ids_query(
     identity_predicate: &str,
     epoch_parameter: usize,
