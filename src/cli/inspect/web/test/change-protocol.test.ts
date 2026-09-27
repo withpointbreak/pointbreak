@@ -141,6 +141,7 @@ function validEventHistoryValue() {
       changeIds: ["change:sha256:one"],
       revisionRefs: [],
       unresolvedRevisionIds: [],
+      actorIds: ["actor:author"],
     },
     diagnostics: [],
     queryNotices: [],
@@ -305,6 +306,31 @@ describe("bounded Change protocol", () => {
     for (const corrupt of malformed) {
       const value = structuredClone(validEventHistoryValue());
       corrupt(value);
+      expect(() => decodeEventHistory(value)).toThrow(
+        "invalid event history DTO",
+      );
+    }
+  });
+
+  it("decodes page-scoped actor completion and rejects a missing or duplicated set", () => {
+    expect(
+      decodeEventHistory(structuredClone(validEventHistoryValue())).completion
+        .actorIds,
+    ).toEqual(["actor:author"]);
+
+    const missing: Record<string, unknown> = structuredClone(
+      validEventHistoryValue(),
+    );
+    delete (missing.completion as Record<string, unknown>).actorIds;
+    const duplicated = structuredClone(validEventHistoryValue());
+    duplicated.completion.actorIds = ["actor:author", "actor:author"];
+    const malformed = structuredClone(validEventHistoryValue()) as Record<
+      string,
+      unknown
+    >;
+    (malformed.completion as Record<string, unknown>).actorIds = [7];
+
+    for (const value of [missing, duplicated, malformed]) {
       expect(() => decodeEventHistory(value)).toThrow(
         "invalid event history DTO",
       );

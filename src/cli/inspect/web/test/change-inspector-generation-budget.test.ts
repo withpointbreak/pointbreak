@@ -67,6 +67,7 @@ function historyPage(projectionStamp = "sha256:generation") {
       changeIds: [],
       revisionRefs: [],
       unresolvedRevisionIds: [],
+      actorIds: [],
     },
     diagnostics: [],
     queryNotices: [],

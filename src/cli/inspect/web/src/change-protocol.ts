@@ -474,6 +474,8 @@ export interface EventHistoryDocument {
     changeIds: string[];
     revisionRefs: EventHistoryRevisionRef[];
     unresolvedRevisionIds: string[];
+    /** Writer actor ids of this page's entries only, sorted and unique. */
+    actorIds: string[];
   };
   diagnostics: string[];
   queryNotices: string[];
@@ -1836,6 +1838,8 @@ export function decodeEventHistory(value: unknown): EventHistoryDocument {
     !Array.isArray(completion.revisionRefs) ||
     !completion.revisionRefs.every(isEventHistoryRevisionRef) ||
     !isStringArray(completion.unresolvedRevisionIds) ||
+    !isStringArray(completion.actorIds) ||
+    new Set(completion.actorIds).size !== completion.actorIds.length ||
     !isStringArray(document.diagnostics) ||
     !isStringArray(document.queryNotices) ||
     !Array.isArray(document.entries) ||
