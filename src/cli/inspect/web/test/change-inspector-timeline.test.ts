@@ -901,8 +901,14 @@ describe("Change-aware Timeline renderer", () => {
       expect(group?.classList.contains("timeline-group")).toBe(true);
       expect(group?.getAttribute("role")).toBe("option");
       expect(group?.tabIndex).toBe(-1);
-      expect(group?.hasAttribute("aria-expanded")).toBe(false);
+      expect(group?.getAttribute("aria-expanded")).toBe("false");
       expect(group?.querySelector(".type-count")?.textContent).toBe("3");
+      expect(group?.querySelector(".timeline-group-tally")?.textContent).toBe(
+        "3 passed",
+      );
+      expect(
+        group?.querySelector<HTMLElement>(".timeline-group-range")?.title,
+      ).toBe("2026-08-08T00:00:00Z to 2026-08-08T00:00:00Z");
       expect(group?.querySelector(".type")?.textContent).toBe("validation");
       expect(
         group?.querySelector<HTMLElement>(".rail")?.style.background,
@@ -912,8 +918,15 @@ describe("Change-aware Timeline renderer", () => {
       ).toBeNull();
     });
 
-    it("registers the one new class it adds", () => {
-      expect(ALL_EMITTABLE_CLASSES).toContain("timeline-group");
+    it("registers every class the grouped rows add", () => {
+      for (const name of [
+        "timeline-group",
+        "timeline-group-member",
+        "timeline-group-tally",
+        "timeline-group-range",
+      ]) {
+        expect(ALL_EMITTABLE_CLASSES).toContain(name);
+      }
     });
 
     it("discloses the page-scoped collapse in the lens metadata line", () => {
@@ -1018,6 +1031,38 @@ describe("Change-aware Timeline renderer", () => {
       expect(renderedEventIds()).toEqual(["ev:a1", "ev:b2", "ev:e5"]);
     });
 
+    it("discards expansion when search, filters, order, or page change", () => {
+      const variants: Record<string, string>[] = [
+        { q: "check" },
+        { track: "track:main" },
+        { order: "asc" },
+        { after: "cursor:next" },
+      ];
+      for (const historyQuery of variants) {
+        const timeline = groupedDocument();
+        renderGroupedTimeline(timeline);
+        setChangeInspectorTimelineGroupExpanded("ev:b2", true);
+        expect(
+          document.querySelector("#timeline [data-timeline-group-member]"),
+        ).not.toBeNull();
+
+        const master = document.querySelector<HTMLElement>("#master");
+        if (!master) throw new Error("missing master");
+        renderChangeInspectorTimeline(
+          master,
+          timeline,
+          { navigate: vi.fn() },
+          { kind: "timeline", historyQuery },
+        );
+
+        expect(
+          document.querySelector("#timeline [data-timeline-group-member]"),
+          JSON.stringify(historyQuery),
+        ).toBeNull();
+        expect(renderedEventIds()).toEqual(["ev:a1", "ev:b2", "ev:e5"]);
+      }
+    });
+
     it("reports raw entry order for a document the renderer has not painted", () => {
       const other = groupedDocument();
       other.timelineProjectionStamp = "sha256:elsewhere";
@@ -1033,9 +1078,7 @@ describe("Change-aware Timeline renderer", () => {
   });
 
   describe("group accessibility", () => {
-    it("names a collapsed group by its count, type label, and state", () => {
-      // aria-expanded is NOT supported on role=option (WAI-ARIA 1.2), so the
-      // state lives in the accessible NAME.
+    it("names a collapsed group by its server-supplied summary and state", () => {
       renderGroupedTimeline();
 
       const group = document.querySelector<HTMLElement>(
@@ -1043,32 +1086,109 @@ describe("Change-aware Timeline renderer", () => {
       );
       expect(group?.getAttribute("role")).toBe("option");
       expect(group?.getAttribute("aria-label")).toBe(
-        "Validations, 3 events, collapsed",
+        "Validations, 3 events, 3 passed, 2026-08-08T00:00:00Z to 2026-08-08T00:00:00Z",
       );
-      expect(group?.hasAttribute("aria-expanded")).toBe(false);
+      expect(group?.getAttribute("aria-expanded")).toBe("false");
       expect(group?.querySelector(".title")?.textContent).toBe("Validations");
     });
 
-    it("replaces the group row with a labelled role=group on expand", () => {
-      // Expanding REPLACES the group row with its member rows; the container
-      // carries the group's identity and there is no surviving controller row.
+    it("tallies each recorded validation status in the fixed status order", () => {
+      const [first, second, third] = [
+        historyEntry("ev:b2", "validation_check_recorded"),
+        historyEntry("ev:c3", "validation_check_recorded"),
+        historyEntry("ev:d4", "validation_check_recorded"),
+      ];
+      if (!first || !second || !third) throw new Error("missing entries");
+      const withStatus = (
+        entry: EventHistoryEntry,
+        status: "passed" | "failed",
+        occurredAt: string,
+      ): EventHistoryEntry => {
+        if (entry.summary.kind !== "validation_check_recorded") {
+          throw new Error("expected a validation entry");
+        }
+        return {
+          ...entry,
+          occurredAt,
+          summary: {
+            ...entry.summary,
+            details: { ...entry.summary.details, status },
+          },
+        };
+      };
+      renderGroupedTimeline(
+        timelineDocument([
+          withStatus(first, "failed", "2026-08-08T00:00:03Z"),
+          withStatus(second, "passed", "2026-08-08T00:00:02Z"),
+          withStatus(third, "passed", "2026-08-08T00:00:01Z"),
+        ]),
+      );
+
+      const group = document.querySelector<HTMLElement>(
+        '#timeline [data-event-id="ev:b2"]',
+      );
+      expect(group?.querySelector(".timeline-group-tally")?.textContent).toBe(
+        "2 passed · 1 failed",
+      );
+      expect(
+        group?.querySelector<HTMLElement>(".timeline-group-range")?.title,
+      ).toBe("2026-08-08T00:00:03Z to 2026-08-08T00:00:01Z");
+    });
+
+    it("splices member rows flat into the listbox on expand", () => {
+      // Expanding REPLACES the group row with its member rows, one <li> per
+      // visual row directly under the listbox; there is no container row.
       renderGroupedTimeline();
       setChangeInspectorTimelineGroupExpanded("ev:b2", true);
 
+      const list = document.querySelector<HTMLOListElement>("#timeline");
       expect(
         document.querySelector('[data-event-id="ev:b2"][role="option"]'),
       ).not.toBeNull();
       expect(
         document.querySelector("#timeline [data-timeline-group]"),
       ).toBeNull();
-      const group = document.querySelector("#timeline [role='group']");
-      expect(group?.getAttribute("aria-label")).toBe("Validations, 3 events");
-      expect(group?.querySelectorAll('[role="option"]').length).toBe(3);
+      expect(document.querySelector("#timeline [role='group']")).toBeNull();
+      const members = Array.from(
+        list?.querySelectorAll<HTMLElement>(
+          ":scope > [data-timeline-group-member]",
+        ) ?? [],
+      );
+      expect(members.map((row) => row.dataset.eventId)).toEqual([
+        "ev:b2",
+        "ev:c3",
+        "ev:d4",
+      ]);
+      for (const member of members) {
+        expect(member.dataset.timelineGroupMember).toBe("ev:b2");
+        expect(member.classList.contains("timeline-group-member")).toBe(true);
+        expect(member.getAttribute("role")).toBe("option");
+      }
       expect(
-        Array.from(
-          group?.querySelectorAll<HTMLElement>("[data-event-id]") ?? [],
-        ).map((row) => row.dataset.eventId),
-      ).toEqual(["ev:b2", "ev:c3", "ev:d4"]);
+        Array.from(list?.children ?? []).every(
+          (child) => child.tagName === "LI",
+        ),
+      ).toBe(true);
+      expect(list?.querySelectorAll("li li")).toHaveLength(0);
+    });
+
+    it("remeasures from member rows after expansion", () => {
+      renderGroupedTimeline();
+      setChangeInspectorTimelineGroupExpanded("ev:b2", true);
+      const list = document.querySelector<HTMLOListElement>("#timeline");
+      if (!list) throw new Error("missing Timeline list");
+      const rows = list.querySelectorAll<HTMLElement>("li.event");
+      expect(rows).toHaveLength(5);
+      for (const row of rows) {
+        Object.defineProperty(row, "getBoundingClientRect", {
+          configurable: true,
+          value: () => rect(0, 90),
+        });
+      }
+
+      expect(remeasureChangeInspectorTimelineRows()).toBe(true);
+      expect(list.querySelectorAll("li.event")).toHaveLength(5);
+      expect(remeasureChangeInspectorTimelineRows()).toBe(false);
     });
 
     it("keeps members individually labelled and free of aria-expanded", () => {
@@ -1085,8 +1205,8 @@ describe("Change-aware Timeline renderer", () => {
       renderGroupedTimeline();
       setChangeInspectorTimelineGroupExpanded("ev:b2", true);
 
-      // role=group IS permitted inside a listbox; details/summary and a
-      // tabbable button are not, and no option carries aria-expanded.
+      // details/summary and a tabbable button are not permitted inside a
+      // listbox; once expanded, no row carries aria-expanded.
       expect(document.querySelector("#timeline details")).toBeNull();
       expect(document.querySelector("#timeline button")).toBeNull();
       expect(document.querySelector("#timeline [aria-expanded]")).toBeNull();
@@ -1108,7 +1228,7 @@ describe("Change-aware Timeline renderer", () => {
         '#timeline [data-event-id="ev:a1"]',
       );
       expect(group?.getAttribute("aria-label")).toBe(
-        "Change declared, 3 events, collapsed",
+        "Change declared, 3 events, 2026-08-08T00:00:01Z to 2026-08-08T00:00:01Z",
       );
       expect(group?.querySelector(".title")?.textContent).toBe(
         "Change declared",

@@ -33,6 +33,51 @@ export type TimelineRow =
     }
   | TimelineGroup;
 
+/**
+ * What a group heading may say, composed only from server-supplied member
+ * fields: the member count, the first and last `occurredAt` in display order,
+ * and, for validation runs, the count of each recorded check status in the
+ * fixed status order. Nothing is invented or reordered.
+ */
+export type TimelineGroupSummary = {
+  count: number;
+  firstOccurredAt: string;
+  lastOccurredAt: string;
+  statusTally: readonly { status: string; count: number }[];
+};
+
+const VALIDATION_STATUS_ORDER = [
+  "passed",
+  "failed",
+  "errored",
+  "skipped",
+] as const;
+
+export function summarizeTimelineGroup(
+  group: TimelineGroup,
+): TimelineGroupSummary {
+  const first = group.members[0];
+  const last = group.members[group.members.length - 1];
+  if (first === undefined || last === undefined) {
+    throw new Error("Timeline group has no members");
+  }
+  const counts = new Map<string, number>();
+  for (const member of group.members) {
+    if (member.summary?.kind !== "validation_check_recorded") continue;
+    const status = member.summary.details.status;
+    counts.set(status, (counts.get(status) ?? 0) + 1);
+  }
+  return {
+    count: group.members.length,
+    firstOccurredAt: first.occurredAt,
+    lastOccurredAt: last.occurredAt,
+    statusTally: VALIDATION_STATUS_ORDER.flatMap((status) => {
+      const count = counts.get(status) ?? 0;
+      return count > 0 ? [{ status, count }] : [];
+    }),
+  };
+}
+
 /** Adjacent same-type runs shorter than this stay flat. */
 export const GROUP_MIN_RUN = 3;
 

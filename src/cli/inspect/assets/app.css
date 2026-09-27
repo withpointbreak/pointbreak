@@ -955,13 +955,15 @@ main {
   color: var(--fg-dim);
   font-variant-numeric: tabular-nums;
 }
-/* An expanded group is a labelled container whose children are ordinary
-   option rows; it adds no box of its own so each member stays one row tall. */
-.timeline-group-members,
-.timeline-group-members > ol {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+.timeline-group-tally,
+.timeline-group-range {
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+/* An expanded group splices its members flat into the listbox, one row each.
+   A tinted left edge marks the run without adding a box or changing height. */
+.timeline-group-member {
+  box-shadow: inset 3px 0 0 var(--border);
 }
 .event-summary,
 .event-context {
