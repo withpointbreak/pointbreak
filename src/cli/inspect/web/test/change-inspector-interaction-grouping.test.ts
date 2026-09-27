@@ -140,11 +140,19 @@ function selectGroupByKeyboard(): void {
   expect(selectedTimelineEventId()).toBe("ev:b2");
 }
 
-function selectedRowExpanded(): string | null {
+/**
+ * Whether the selected row is a collapsed group row. The state is in the
+ * accessible name: WAI-ARIA 1.2 does not support aria-expanded on option.
+ */
+function selectedRowCollapsed(): boolean {
+  const row = document.querySelector<HTMLElement>(
+    '#timeline [aria-selected="true"]',
+  );
+  expect(row?.hasAttribute("aria-expanded")).toBe(false);
   return (
-    document
-      .querySelector<HTMLElement>('#timeline [aria-selected="true"]')
-      ?.getAttribute("aria-expanded") ?? null
+    row
+      ?.getAttribute("aria-label")
+      ?.endsWith(", collapsed run, press Enter to expand") ?? false
   );
 }
 
@@ -342,7 +350,7 @@ describe("grouped Timeline navigation", () => {
       document.querySelector("#timeline [data-timeline-group-member]"),
     ).toBeNull();
     expect(selectedTimelineEventId()).toBe("ev:b2");
-    expect(selectedRowExpanded()).toBe("false");
+    expect(selectedRowCollapsed()).toBe(true);
   });
 
   it("walks the keyboard cursor in exactly DOM order, collapsed and expanded", () => {
@@ -415,7 +423,7 @@ describe("grouped Timeline navigation", () => {
       document.querySelector("#timeline [data-timeline-group-member]"),
     ).not.toBeNull();
     expect(selectedTimelineEventId()).toBe("ev:b2");
-    expect(selectedRowExpanded()).toBeNull();
+    expect(selectedRowCollapsed()).toBe(false);
     pressKey("j");
     expect(selectedTimelineEventId()).toBe("ev:c3");
   });
@@ -445,7 +453,7 @@ describe("grouped Timeline navigation", () => {
     expect(
       document.querySelector("#timeline [data-timeline-group-member]"),
     ).toBeNull();
-    expect(selectedRowExpanded()).toBe("false");
+    expect(selectedRowCollapsed()).toBe(true);
   });
 
   it("lands a deep link on the FIRST member as an event row, not the summary", () => {
@@ -494,6 +502,6 @@ describe("grouped Timeline navigation", () => {
     expect(
       document.querySelector("#timeline [data-timeline-group-member]"),
     ).not.toBeNull();
-    expect(selectedRowExpanded()).toBeNull();
+    expect(selectedRowCollapsed()).toBe(false);
   });
 });

@@ -3996,6 +3996,7 @@
     row.append(rail);
   }
   __name(appendRail, "appendRail");
+  var GROUP_COLLAPSED_HINT = "collapsed run, press Enter to expand";
   function groupName(group) {
     const first = group.members[0];
     if (first === void 0) throw new Error("Timeline group has no members");
@@ -4029,8 +4030,10 @@
     row.classList.add(CLASS.timelineGroup);
     row.dataset.timelineGroup = group.eventType;
     row.dataset.timelineGroupSize = String(group.members.length);
-    row.setAttribute("aria-expanded", "false");
-    row.setAttribute("aria-label", groupName(group));
+    row.setAttribute(
+      "aria-label",
+      `${groupName(group)}, ${GROUP_COLLAPSED_HINT}`
+    );
     appendOccurredAt(row, first.occurredAt);
     appendRail(row, group.eventType);
     const body = document.createElement("div");

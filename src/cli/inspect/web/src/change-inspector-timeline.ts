@@ -220,7 +220,10 @@ function appendRail(
   row.append(rail);
 }
 
-/** The accessible name of a group's collapsed row. */
+/** Appended to a collapsed group row's accessible name. */
+const GROUP_COLLAPSED_HINT = "collapsed run, press Enter to expand";
+
+/** The summary part of a collapsed group row's accessible name. */
 function groupName(group: TimelineGroup): string {
   const first = group.members[0];
   if (first === undefined) throw new Error("Timeline group has no members");
@@ -249,9 +252,11 @@ function clockText(occurredAt: string): string {
 
 /**
  * One collapsed same-type run as a single option row inside the flat listbox.
- * It is addressed by its first member's id, carries no links, and reports
- * `aria-expanded="false"`; activating it (pointer, Enter, or Space) splices
- * the member rows in its place, so an expanded group has no heading row.
+ * It is addressed by its first member's id and carries no links. WAI-ARIA 1.2
+ * does not support `aria-expanded` on `role="option"`, so the collapsed state
+ * and how to expand it live in the accessible name. Activating the row
+ * (pointer, Enter, or Space) splices the member rows in its place, so an
+ * expanded group has no heading row.
  */
 function groupRow(
   group: TimelineGroup,
@@ -265,8 +270,10 @@ function groupRow(
   row.classList.add(CLASS.timelineGroup);
   row.dataset.timelineGroup = group.eventType;
   row.dataset.timelineGroupSize = String(group.members.length);
-  row.setAttribute("aria-expanded", "false");
-  row.setAttribute("aria-label", groupName(group));
+  row.setAttribute(
+    "aria-label",
+    `${groupName(group)}, ${GROUP_COLLAPSED_HINT}`,
+  );
   appendOccurredAt(row, first.occurredAt);
   appendRail(row, group.eventType);
   const body = document.createElement("div");

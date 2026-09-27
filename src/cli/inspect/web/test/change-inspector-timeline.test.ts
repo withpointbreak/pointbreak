@@ -901,7 +901,7 @@ describe("Change-aware Timeline renderer", () => {
       expect(group?.classList.contains("timeline-group")).toBe(true);
       expect(group?.getAttribute("role")).toBe("option");
       expect(group?.tabIndex).toBe(-1);
-      expect(group?.getAttribute("aria-expanded")).toBe("false");
+      expect(group?.hasAttribute("aria-expanded")).toBe(false);
       expect(group?.querySelector(".type-count")?.textContent).toBe("3");
       expect(group?.querySelector(".timeline-group-tally")?.textContent).toBe(
         "3 passed",
@@ -1086,9 +1086,11 @@ describe("Change-aware Timeline renderer", () => {
       );
       expect(group?.getAttribute("role")).toBe("option");
       expect(group?.getAttribute("aria-label")).toBe(
-        "Validations, 3 events, 3 passed, 2026-08-08T00:00:00Z to 2026-08-08T00:00:00Z",
+        "Validations, 3 events, 3 passed, 2026-08-08T00:00:00Z to 2026-08-08T00:00:00Z, collapsed run, press Enter to expand",
       );
-      expect(group?.getAttribute("aria-expanded")).toBe("false");
+      // WAI-ARIA 1.2 does not support aria-expanded on role=option; the
+      // collapsed state and the way to expand it live in the name instead.
+      expect(group?.hasAttribute("aria-expanded")).toBe(false);
       expect(group?.querySelector(".title")?.textContent).toBe("Validations");
     });
 
@@ -1206,7 +1208,7 @@ describe("Change-aware Timeline renderer", () => {
       setChangeInspectorTimelineGroupExpanded("ev:b2", true);
 
       // details/summary and a tabbable button are not permitted inside a
-      // listbox; once expanded, no row carries aria-expanded.
+      // listbox, and aria-expanded is unsupported on role=option.
       expect(document.querySelector("#timeline details")).toBeNull();
       expect(document.querySelector("#timeline button")).toBeNull();
       expect(document.querySelector("#timeline [aria-expanded]")).toBeNull();
@@ -1228,7 +1230,7 @@ describe("Change-aware Timeline renderer", () => {
         '#timeline [data-event-id="ev:a1"]',
       );
       expect(group?.getAttribute("aria-label")).toBe(
-        "Change declared, 3 events, 2026-08-08T00:00:01Z to 2026-08-08T00:00:01Z",
+        "Change declared, 3 events, 2026-08-08T00:00:01Z to 2026-08-08T00:00:01Z, collapsed run, press Enter to expand",
       );
       expect(group?.querySelector(".title")?.textContent).toBe(
         "Change declared",
