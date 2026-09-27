@@ -155,7 +155,8 @@ expect "timestamps, not payload order, decide which label is newer" guard \
   "$(guard_input labeled priority:P1-1.0-candidate alice User admin \
     '["priority:P1-1.0-candidate", "priority:P2-backlog", "effort:low"]' \
     '[{"event":"labeled","label":"priority:P1-1.0-candidate","actor":"alice","at":"2026-09-02T00:00:00Z","id":2},
-      {"event":"labeled","label":"priority:P2-backlog","actor":"bob","at":"2026-09-01T00:00:00Z","id":1}]')" \
+      {"event":"labeled","label":"priority:P2-backlog","actor":"bob","at":"2026-09-01T00:00:00Z","id":1}]' \
+    2026-09-02T00:00:00Z)" \
   '.remove == ["priority:P2-backlog"]'
 
 expect "history that lags behind the event still lets the event label win" guard \
@@ -164,6 +165,56 @@ expect "history that lags behind the event still lets the event label win" guard
     '[{"event":"labeled","label":"priority:P2-backlog","actor":"bob","at":"2026-09-02T00:00:00Z","id":1}]' \
     2026-09-03T00:00:00Z)" \
   '.stale == false and .remove == ["priority:P2-backlog"]'
+
+# Same-second ties: GitHub timestamps have one-second precision, so event ids
+# order events within a second, and an order that cannot be established is a no-op.
+
+expect "same-second tie, id-ordered: an older event keeps the newer label" guard \
+  "$(guard_input labeled priority:P1-1.0-candidate alice User admin \
+    '["priority:P1-1.0-candidate", "priority:P2-backlog", "effort:low"]' \
+    '[{"event":"labeled","label":"priority:P1-1.0-candidate","actor":"alice","at":"2026-09-27T20:00:00Z","id":100},
+      {"event":"labeled","label":"priority:P2-backlog","actor":"alice","at":"2026-09-27T20:00:00Z","id":101}]' \
+    2026-09-27T20:00:00Z)" \
+  '.stale == false and .remove == [] and (.notes | any(test("priority:P2-backlog was labeled after")))'
+
+expect "same-second tie, id-ordered: the newer event removes the older label" guard \
+  "$(guard_input labeled priority:P2-backlog alice User admin \
+    '["priority:P1-1.0-candidate", "priority:P2-backlog", "effort:low"]' \
+    '[{"event":"labeled","label":"priority:P1-1.0-candidate","actor":"alice","at":"2026-09-27T20:00:00Z","id":100},
+      {"event":"labeled","label":"priority:P2-backlog","actor":"alice","at":"2026-09-27T20:00:00Z","id":101}]' \
+    2026-09-27T20:00:00Z)" \
+  '.stale == false and .remove == ["priority:P1-1.0-candidate"]'
+
+expect "same-second tie, ambiguous: no label is removed" guard \
+  "$(guard_input labeled priority:P1-1.0-candidate alice User admin \
+    '["priority:P1-1.0-candidate", "priority:P2-backlog", "effort:low"]' \
+    '[{"event":"labeled","label":"priority:P2-backlog","actor":"bob","at":"2026-09-27T20:00:00Z","id":101}]' \
+    2026-09-27T20:00:00Z)" \
+  '.stale == false and .remove == [] and (.notes | any(test("same second")))'
+
+expect "same-second tie, id-ordered: a later same-label event makes the event stale" guard \
+  "$(guard_input labeled priority:P1-1.0-candidate mallory User none \
+    '["priority:P1-1.0-candidate", "effort:low"]' \
+    '[{"event":"labeled","label":"priority:P1-1.0-candidate","actor":"mallory","at":"2026-09-27T20:00:00Z","id":100},
+      {"event":"unlabeled","label":"priority:P1-1.0-candidate","actor":"alice","at":"2026-09-27T20:00:00Z","id":101},
+      {"event":"labeled","label":"priority:P1-1.0-candidate","actor":"alice","at":"2026-09-27T20:00:00Z","id":102}]' \
+    2026-09-27T20:00:00Z)" \
+  '.stale == true and .revert == null and .remove == []'
+
+expect "same-second tie, id-ordered: an earlier same-label event does not make it stale" guard \
+  "$(guard_input labeled priority:P1-1.0-candidate mallory User none \
+    '["priority:P1-1.0-candidate", "effort:low"]' \
+    '[{"event":"unlabeled","label":"priority:P1-1.0-candidate","actor":"alice","at":"2026-09-27T20:00:00Z","id":100},
+      {"event":"labeled","label":"priority:P1-1.0-candidate","actor":"mallory","at":"2026-09-27T20:00:00Z","id":101}]' \
+    2026-09-27T20:00:00Z)" \
+  '.stale == false and .revert == "remove"'
+
+expect "same-second tie, ambiguous: a same-label event of unknown order is stale" guard \
+  "$(guard_input labeled priority:P1-1.0-candidate mallory User none \
+    '["priority:P1-1.0-candidate", "effort:low"]' \
+    '[{"event":"unlabeled","label":"priority:P1-1.0-candidate","actor":"alice","at":"2026-09-27T20:00:00Z","id":100}]' \
+    2026-09-27T20:00:00Z)" \
+  '.stale == true and .revert == null and .remove == [] and .comment == null'
 
 expect "removing the only priority label says so on the issue" guard \
   "$(guard_input unlabeled priority:P2-backlog alice User maintain \

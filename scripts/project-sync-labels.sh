@@ -14,7 +14,14 @@
 #                   "actorType": "User"|"Bot"|..., "role", "labels": [current names],
 #                   "history": [{"event": "labeled"|"unlabeled", "label", "actor", "at", "id"}]}
 #           `at` is when the event happened (ISO 8601 UTC, as GitHub prints it); the
-#           history may lag behind the event and need not contain it.
+#           history may lag behind the event and need not contain it. GitHub timestamps
+#           have one-second precision, so history is ordered by (at, id): event ids
+#           increase over time. The triggering event is located in the history by
+#           (label, event, actor, at); when exactly one entry matches, its id orders it
+#           against same-second events. When a same-second tie cannot be ordered, the
+#           guard does nothing destructive: a tie on the same label counts as stale,
+#           and a tie in the namespace removes no label (reconciliation then flags the
+#           conflict on the board).
 #           stdout: {"planning", "stale", "revert": "remove"|"restore"|null,
 #                    "remove": [labels], "comment": string|null, "notes": [strings]}
 #           `labels` and `history` are read back from the issue when the run starts, so
@@ -82,21 +89,39 @@ case "$1" in
       def planning: test("^(priority|effort|status):") or . == "research" or . == "tracking";
       def namespace: if test("^(priority|effort):") then sub(":.*$"; ":") else null end;
       . as $in
-      | ($in.history // []) as $history
+      | ($in.history // [] | sort_by([.at // "", .id // 0])) as $history
       | ($in.labels | index($in.label) != null) as $present
       | ($in.at // "") as $at
-      # Label events after this one that this run did not cause: a different
-      # action or actor on the same label.
-      | [$history[] | select(.label == $in.label and (.at // "") > $at
-          and (.event != $in.action or .actor != $in.actor))] as $later
+      # Where the triggering event sits in the history: its own entry when exactly
+      # one matches, else only its timestamp (`id` null), else nowhere.
+      | ([$history[] | select(.label == $in.label and .event == $in.action
+          and .actor == $in.actor and (.at // "") == $at and $at != "")]) as $self
+      | (if ($self | length) == 1 then {at: $at, id: $self[0].id}
+         elif $at != "" then {at: $at, id: null}
+         else null
+         end) as $point
+      # after: definitely later than the triggering event; tie: same second and
+      # the order cannot be established.
+      | def after($e): $point != null and (
+          if $point.id != null then [($e.at // ""), ($e.id // 0)] > [$point.at, $point.id]
+          else ($e.at // "") > $point.at
+          end);
+        def tie($e): $point != null and $point.id == null and ($e.at // "") == $point.at;
+      # Label events on the same label that this run did not cause (a different
+      # action or actor), after the triggering event or tied with it.
+        [$history[] | select(.label == $in.label
+          and (.event != $in.action or .actor != $in.actor))] as $others_on_label
+      | [$others_on_label[] | select(after(.))] as $later
+      | [$others_on_label[] | select(tie(.))] as $tied
       | {planning: ($in.label | planning), stale: false, revert: null, remove: [], comment: null, notes: []}
       | if .planning | not then .notes += ["not a planning label: \($in.label)"]
         # A stale event: the label set already moved on (the label is gone again,
         # or back again), or a later labeled/unlabeled event for the same label
-        # exists. The run for that later event owns the decision.
+        # exists, or one in the same second that cannot be ordered against it.
+        # The run for that other event owns the decision.
         elif ($in.action == "labeled" and ($present | not))
           or ($in.action == "unlabeled" and $present)
-          or ($at != "" and ($later | length) > 0) then
+          or ($later | length) > 0 or ($tied | length) > 0 then
           .stale = true
           | .notes += ["stale \($in.action) event for \($in.label): the current label set no longer reflects it; nothing to do"]
         # Planning labels are maintainer-owned. Bots (templates, apps) skip the
@@ -108,14 +133,18 @@ case "$1" in
         elif $in.action == "labeled" then
           ($in.label | namespace) as $ns
           | [$in.labels[] | select(startswith($ns) and . != $in.label)] as $others
-          # Keep the label added last. The event label wins only when no other
-          # present label in its namespace was labeled after it.
-          | def last_labeled($l): [$history[] | select(.label == $l and .event == "labeled") | .at // ""] | max // "";
-            ([last_labeled($in.label), $at] | max) as $mine
-          | [$others[] | select(last_labeled(.) > $mine)] as $newer
+          # Keep the label added last. The event label wins only when every other
+          # present label in its namespace was last labeled before it; a label
+          # labeled after it, or in the same second without an order, removes
+          # nothing.
+          | def last_labeled($l): [$history[] | select(.label == $l and .event == "labeled")] | last;
+            [$others[] | last_labeled(.) as $e | select($e != null and after($e))] as $newer
+          | [$others[] | last_labeled(.) as $e | select($e != null and tie($e))] as $undecided
           | if ($others | length) == 0 then .
             elif ($newer | length) > 0 then
               .notes += ["\($newer | join(", ")) was labeled after \($in.label); that event keeps its namespace"]
+            elif ($undecided | length) > 0 then
+              .notes += ["\($undecided | join(", ")) was labeled in the same second as \($in.label) and the order is unknown; no label removed"]
             else .remove = $others
             end
         else
