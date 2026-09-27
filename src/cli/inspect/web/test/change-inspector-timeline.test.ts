@@ -501,6 +501,46 @@ describe("Change-aware Timeline renderer", () => {
     );
   });
 
+  it("renders a writer the search grammar cannot express as plain text with a reason", () => {
+    mountInspectorDom();
+    const master = document.querySelector<HTMLElement>("#master");
+    if (!master) throw new Error("missing master");
+    const timeline = documentValue();
+    const [first] = timeline.entries;
+    if (!first) throw new Error("missing fixture entry");
+    const quoted = 'actor:git-name:Kevin "KS" Swiber';
+    timeline.entries = [
+      { ...first, writer: { ...first.writer, actorId: quoted } },
+    ];
+    const navigate = vi.fn();
+    renderChangeInspectorTimeline(
+      master,
+      timeline,
+      { navigate },
+      {
+        kind: "timeline",
+        historyQuery: { q: "type:observation", after: "page-2" },
+      },
+    );
+
+    const row = document.querySelector<HTMLElement>("li.event");
+    expect(
+      row?.querySelector('a[data-timeline-context-kind="actor"]'),
+    ).toBeNull();
+    const writer = row?.querySelector<HTMLElement>(
+      "[data-timeline-unfilterable-writer]",
+    );
+    expect(writer?.tagName).toBe("SPAN");
+    expect(writer?.textContent).toBe(quoted);
+    expect(writer?.dataset.timelineUnfilterableWriter).toBe(quoted);
+    expect(writer?.title).toBe(
+      `writer ${quoted} · no filter link: Timeline search cannot express an id containing a double quote (")`,
+    );
+    expect(writer?.hasAttribute("href")).toBe(false);
+    expect(writer?.hasAttribute("tabindex")).toBe(false);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
   it("filters the Timeline to a row's track through the structured param", () => {
     mountInspectorDom();
     const master = document.querySelector<HTMLElement>("#master");

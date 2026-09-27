@@ -3613,10 +3613,10 @@
   function appendActorFilterClause(filterText, actorId, surface) {
     const current = filterText.trim();
     const short = actorId.replace(/^actor:/, "");
-    if (!short || short.includes('"')) return current;
+    if (!short || short.includes('"')) return null;
     const clause = /\s/.test(short) ? `actor:"${short}"` : `actor:${short}`;
     const minted = parseSearchQueryFor(clause, surface).clauses[0];
-    if (minted?.kind !== "field" || minted.field !== "actor") return current;
+    if (minted?.kind !== "field" || minted.field !== "actor") return null;
     const already = parseSearchQueryFor(current, surface).clauses.some(
       (existing) => existing.kind === "field" && existing.field === "actor" && !existing.negate && existing.value === minted.value
     );
@@ -4030,6 +4030,14 @@
       actorId,
       "change-timeline"
     );
+    if (q === null) {
+      const writer = document.createElement("span");
+      writer.dataset.timelineUnfilterableWriter = actorId;
+      writer.textContent = actorId;
+      writer.title = `writer ${actorId} · no filter link: Timeline search cannot express an id containing a double quote (")`;
+      parent.append(writer);
+      return;
+    }
     const link = appendTimelineLink(
       parent,
       actorId,
