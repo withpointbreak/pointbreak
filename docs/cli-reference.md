@@ -227,17 +227,21 @@ revision recorded; its subject is always the captured snapshot, never the live w
   colorizes only when stdout is a TTY, honoring `NO_COLOR` and `CLICOLOR_FORCE` (precedence: `--color`
   > `NO_COLOR` > `CLICOLOR_FORCE` > isatty); piped or redirected output stays plain. Color is pure
   presentation — stripping the ANSI reproduces the plain diff exactly.
-- `--theme <theme>` picks the truecolor palette: `auto` (the default) detects the terminal
+- `--theme <theme>` picks the themed palette: `auto` (the default) detects the terminal
   background — light or dark — and selects the matching built-in palette; `light` / `dark` force a
   built-in; any other value names a bundled syntax theme, matched case-insensitively (bat's
   vocabulary, e.g. `"Monokai Extended"`, `"onehalflight"`, `"nord"`). Environment fallbacks: `POINTBREAK_THEME`, then
   bat's `BAT_THEME` (precedence: `--theme` > `POINTBREAK_THEME` > `BAT_THEME` > detection > dark). An
   unknown name from `--theme`/`POINTBREAK_THEME` is an error listing the valid vocabulary; an unknown
   inherited `BAT_THEME` warns on stderr and falls back. The terminal is queried only when colors
-  are on, stdout is a direct truecolor TTY, and the preference is `auto` — piped output never
-  probes and stays deterministic. Themes apply on truecolor terminals (`COLORTERM=truecolor`); the
-  16-color palette always follows the terminal's own theme. Intraline (changed sub-word) emphasis
-  renders as an add/del background tint on truecolor and as an underline on 16-color terminals.
+  are on, stdout is a direct truecolor or 256-color TTY, and the preference is `auto` — piped output
+  never probes and stays deterministic. Themes apply on truecolor terminals
+  (`COLORTERM=truecolor` or `24bit`) and, downsampled to the nearest xterm-256 color, on 256-color
+  terminals (`TERM=*-256color`, when `COLORTERM` does not advertise truecolor). Palette-index
+  themes such as `ansi` and `base16` keep their terminal palette indices on both lanes. Otherwise
+  the 16-color palette follows the terminal's own theme. Intraline (changed sub-word) emphasis
+  renders as an add/del background tint on truecolor and 256-color terminals (hand-picked 256-color
+  tints per light and dark mode, as delta uses) and as an underline on 16-color terminals.
 - `pointbreak diff` is a **filter, not a pager**: it writes plain git-diff to any pipe or redirect and
   colorizes only when writing directly to a terminal, so it composes with the tools you already use —
   `pointbreak diff | less -R` to page, `pointbreak diff | delta` (or another diff renderer) to reformat,
