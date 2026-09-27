@@ -119,6 +119,20 @@ impl From<HistoryRefByArg> for RefFilterMode {
     }
 }
 
+impl HistoryArgs {
+    /// Whether this invocation is the bounded derived page shape. The CLI
+    /// capability fence reads this so its admission probe matches the route.
+    /// An abbreviated `--revision` resolves through the identifier index,
+    /// which reads the whole Journal, so only a full revision id qualifies.
+    pub(super) fn bounded_derived_read_v1(&self) -> bool {
+        eligible_for_derived_history(self)
+            && self
+                .revision
+                .as_deref()
+                .is_none_or(crate::cli::id_resolver::is_index_free_full_revision_id_v1)
+    }
+}
+
 pub(super) fn run(
     args: HistoryArgs,
     stdout: &mut dyn Write,

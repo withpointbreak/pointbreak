@@ -152,7 +152,7 @@ impl RoutedRevisionPage {
     }
 }
 
-fn eligible_for_bounded_route(args: &RevisionListArgs) -> bool {
+pub(super) fn eligible_for_bounded_route(args: &RevisionListArgs) -> bool {
     args.limit.is_some()
         && args.object.is_none()
         && args.ref_name.is_none()

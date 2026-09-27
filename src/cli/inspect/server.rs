@@ -1394,7 +1394,10 @@ fn legacy_semantic_gate(
         LegacyAdmissionSurfaceV1, LegacyAdmissionVerdictV1, legacy_admission_v1,
     };
 
-    match legacy_admission_v1(LegacyAdmissionSurfaceV1::InspectorLegacyRoute, capability) {
+    match legacy_admission_v1(
+        LegacyAdmissionSurfaceV1::InspectorLegacyRoute,
+        capability.map(|inspection| &inspection.status),
+    ) {
         LegacyAdmissionVerdictV1::Serve => None,
         LegacyAdmissionVerdictV1::RefuseReaderUpgrade => {
             let document = ReaderUpgradeRequiredDocumentV1::new(
