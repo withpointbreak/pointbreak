@@ -39,6 +39,7 @@ import type {
   EventHistoryEntry,
   EventHistoryQuery,
   FactContent,
+  FactRelation,
   FactRelationshipEdge,
   FactRelationshipGraphPresentation,
   FactTarget,
@@ -1273,19 +1274,22 @@ function factTargetLine(
 }
 
 /**
- * Inline relation lines for one fact, read only from the fact graph this exact
- * response carries. An identity absent from this response is named but never
- * activated.
+ * Inline relation lines for one fact, read only from the fact graph and the
+ * recorded relation edges this exact response carries. An identity absent
+ * from this response is named but never activated.
  */
 function factRelationLines(
   factId: string,
   graph: FactRelationshipGraphPresentation | undefined,
+  relations: readonly FactRelation[],
   present: ReadonlySet<string>,
   activate: (factId: string) => void,
 ): HTMLParagraphElement[] {
-  if (!graph) return [];
   const lines: HTMLParagraphElement[] = [];
-  const relate = (label: string, edges: FactRelationshipEdge[]): void => {
+  const relate = (
+    label: string,
+    edges: ReadonlyArray<Pick<FactRelationshipEdge, "fromFactId" | "toFactId">>,
+  ): void => {
     for (const edge of edges) {
       if (edge.fromFactId !== factId) continue;
       const line = detailLine(`${label} `, "fact-rel");
@@ -1306,8 +1310,18 @@ function factRelationLines(
       lines.push(line);
     }
   };
-  relate("supersedes", graph.observationSupersedes);
-  relate("replaces", graph.assessmentReplaces);
+  if (graph) {
+    relate("supersedes", graph.observationSupersedes);
+    relate("replaces", graph.assessmentReplaces);
+  }
+  relate(
+    "responds to",
+    relations.filter((edge) => edge.kind === "responds_to"),
+  );
+  relate(
+    "relates to",
+    relations.filter((edge) => edge.kind === "relates"),
+  );
   return lines;
 }
 
@@ -1412,6 +1426,7 @@ function renderFacts(
         ...factRelationLines(
           fact.factId,
           reading.document.inspectorPresentation?.factGraph,
+          fact.relations ?? [],
           presentFactIds,
           focusFact,
         ),

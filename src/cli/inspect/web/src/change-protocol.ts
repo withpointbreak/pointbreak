@@ -826,6 +826,16 @@ export interface FactTarget {
   eventId?: string;
 }
 
+/**
+ * One recorded fact relationship on the exact-Revision document: an
+ * observation's `responds_to` edge or an assessment's `relates` edge.
+ */
+export interface FactRelation {
+  kind: "responds_to" | "relates";
+  fromFactId: string;
+  toFactId: string;
+}
+
 export interface ChangeRevisionDetail {
   schema: "pointbreak.review-change-revision";
   version: 1;
@@ -853,6 +863,11 @@ export interface ChangeRevisionDetail {
     revisionCurrency: string;
     familyState: string;
     availability: string;
+    /**
+     * Relationship edges the recorded fact carries, both endpoints named by
+     * fact id. Absent means the fact records none; the reader never infers one.
+     */
+    relations?: FactRelation[];
   }>;
   factContentPresentations?: Record<
     string,
@@ -2933,8 +2948,44 @@ function isFactPresentation(
     (value.trackId === undefined || nonEmptyString(value.trackId)) &&
     isOneOf(value.revisionCurrency, REVISION_CURRENCY_VALUES) &&
     isOneOf(value.familyState, FACT_FAMILY_STATE_VALUES) &&
-    isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES)
+    isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES) &&
+    (value.relations === undefined ||
+      isFactRelations(value.relations, value.factId, value.family))
   );
+}
+
+/**
+ * The edges one fact carries: each starts at that fact, uses the one relation
+ * kind its family records, and names a distinct other fact.
+ */
+function isFactRelations(
+  value: unknown,
+  factId: string,
+  family: string,
+): value is FactRelation[] {
+  const kind =
+    family === "observation"
+      ? "responds_to"
+      : family === "assessment"
+        ? "relates"
+        : null;
+  if (!Array.isArray(value) || value.length === 0 || kind === null)
+    return false;
+  const seen = new Set<string>();
+  return value.every((edge) => {
+    if (
+      !isRecord(edge) ||
+      edge.kind !== kind ||
+      edge.fromFactId !== factId ||
+      !nonEmptyString(edge.toFactId) ||
+      edge.toFactId === factId ||
+      seen.has(edge.toFactId)
+    ) {
+      return false;
+    }
+    seen.add(edge.toFactId);
+    return true;
+  });
 }
 
 function isFactTarget(value: unknown): value is FactTarget {

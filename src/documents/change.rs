@@ -129,12 +129,37 @@ pub struct FactPresentationV1 {
     pub presented_in_revision: Option<RevisionRefV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port_relation: Option<FactPortRelationV1>,
+    /// Relationship edges recorded with this fact, each naming both endpoints
+    /// by fact id: an observation's `responds_to` edges and an assessment's
+    /// `relates` edges. Only what the recorded fact carries is listed; the
+    /// other endpoint may be absent from this exact response.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relations: Vec<FactRelationV1>,
     pub actor_id: ActorId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub track_id: Option<TrackId>,
     pub family_state: FactFamilyStateV1,
     pub revision_currency: ChangeRevisionCurrencyV1,
     pub availability: ContentAvailabilityV1,
+}
+
+/// The kind of one recorded fact-to-fact relationship.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FactRelationKindV1 {
+    /// An observation recorded as a response to another observation.
+    RespondsTo,
+    /// An assessment recorded as related to an observation or input request.
+    Relates,
+}
+
+/// One recorded relationship edge; both endpoints are fact ids.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FactRelationV1 {
+    pub kind: FactRelationKindV1,
+    pub from_fact_id: String,
+    pub to_fact_id: String,
 }
 
 /// Whether one recorded fact-port carrier can contribute continuity in the
@@ -2127,8 +2152,57 @@ pub fn normalize_fact_presentations(
             ),
         ));
     }
+    let mut relations = recorded_fact_relations(result);
+    for fact in &mut facts {
+        if let Some(edges) = relations.remove(&fact.fact_id) {
+            fact.relations = edges;
+        }
+    }
     facts.sort_by(|left, right| left.fact_id.cmp(&right.fact_id));
     (facts, content)
+}
+
+/// The relationship edges each recorded fact carries: an observation's
+/// `responds_to` ids and an assessment's related observation and input
+/// request ids, keyed by the carrying fact's id.
+fn recorded_fact_relations(
+    result: &crate::session::RevisionShowResult,
+) -> BTreeMap<String, Vec<FactRelationV1>> {
+    let edges = |from: &str, kind: FactRelationKindV1, to: Vec<&str>| {
+        let mut edges = to
+            .into_iter()
+            .map(|to| FactRelationV1 {
+                kind,
+                from_fact_id: from.to_owned(),
+                to_fact_id: to.to_owned(),
+            })
+            .collect::<Vec<_>>();
+        edges.sort();
+        edges.dedup();
+        edges
+    };
+    let mut relations = BTreeMap::new();
+    for view in &result.observations {
+        let to = view.responds_to.iter().map(|id| id.as_str()).collect();
+        relations.insert(
+            view.id.as_str().to_owned(),
+            edges(view.id.as_str(), FactRelationKindV1::RespondsTo, to),
+        );
+    }
+    for view in &result.assessments {
+        let to = view
+            .related_observations
+            .iter()
+            .map(|id| id.as_str())
+            .chain(view.related_input_requests.iter().map(|id| id.as_str()))
+            .collect();
+        relations.insert(
+            view.id.as_str().to_owned(),
+            edges(view.id.as_str(), FactRelationKindV1::Relates, to),
+        );
+    }
+    relations.retain(|_, edges: &mut Vec<FactRelationV1>| !edges.is_empty());
+    relations
 }
 
 /// Bind every explicit fact-port carrier to the same validated event generation
@@ -2344,6 +2418,7 @@ fn normalized_fact(
         context_change_id: None,
         presented_in_revision: None,
         port_relation: None,
+        relations: Vec::new(),
         actor_id: actor_id.clone(),
         track_id,
         family_state,
@@ -2656,6 +2731,7 @@ mod tests {
             context_change_id: None,
             presented_in_revision: None,
             port_relation: None,
+            relations: Vec::new(),
             actor_id: ActorId::new("actor:author"),
             track_id: None,
             family_state: FactFamilyStateV1::Current,
@@ -3715,6 +3791,7 @@ mod tests {
             context_change_id: Some(change_id.clone()),
             presented_in_revision: None,
             port_relation: None,
+            relations: Vec::new(),
             actor_id: ActorId::new("actor:author"),
             track_id: None,
             family_state: FactFamilyStateV1::Current,

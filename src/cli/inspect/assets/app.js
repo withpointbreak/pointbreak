@@ -1813,9 +1813,23 @@
   }
   __name(isRelationClaim, "isRelationClaim");
   function isFactPresentation(value) {
-    return isRecord(value) && nonEmptyString2(value.factId) && nonEmptyString2(value.family) && isRevisionRef(value.originRevision) && (value.target === void 0 || isFactTarget(value.target)) && (value.contextChangeId === void 0 || nonEmptyString2(value.contextChangeId)) && (value.presentedInRevision === void 0 || isRevisionRef(value.presentedInRevision)) && (value.portRelation === void 0 || value.portRelation === "context_only" || value.portRelation === "reanchored_as" || value.portRelation === "carried_open_as" || value.portRelation === "resolved_by") && nonEmptyString2(value.actorId) && (value.trackId === void 0 || nonEmptyString2(value.trackId)) && isOneOf(value.revisionCurrency, REVISION_CURRENCY_VALUES) && isOneOf(value.familyState, FACT_FAMILY_STATE_VALUES) && isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES);
+    return isRecord(value) && nonEmptyString2(value.factId) && nonEmptyString2(value.family) && isRevisionRef(value.originRevision) && (value.target === void 0 || isFactTarget(value.target)) && (value.contextChangeId === void 0 || nonEmptyString2(value.contextChangeId)) && (value.presentedInRevision === void 0 || isRevisionRef(value.presentedInRevision)) && (value.portRelation === void 0 || value.portRelation === "context_only" || value.portRelation === "reanchored_as" || value.portRelation === "carried_open_as" || value.portRelation === "resolved_by") && nonEmptyString2(value.actorId) && (value.trackId === void 0 || nonEmptyString2(value.trackId)) && isOneOf(value.revisionCurrency, REVISION_CURRENCY_VALUES) && isOneOf(value.familyState, FACT_FAMILY_STATE_VALUES) && isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES) && (value.relations === void 0 || isFactRelations(value.relations, value.factId, value.family));
   }
   __name(isFactPresentation, "isFactPresentation");
+  function isFactRelations(value, factId, family) {
+    const kind = family === "observation" ? "responds_to" : family === "assessment" ? "relates" : null;
+    if (!Array.isArray(value) || value.length === 0 || kind === null)
+      return false;
+    const seen = /* @__PURE__ */ new Set();
+    return value.every((edge) => {
+      if (!isRecord(edge) || edge.kind !== kind || edge.fromFactId !== factId || !nonEmptyString2(edge.toFactId) || edge.toFactId === factId || seen.has(edge.toFactId)) {
+        return false;
+      }
+      seen.add(edge.toFactId);
+      return true;
+    });
+  }
+  __name(isFactRelations, "isFactRelations");
   function isFactTarget(value) {
     if (!isRecord(value) || !nonEmptyString2(value.revisionId)) return false;
     if (value.kind === "revision") return true;
@@ -9233,8 +9247,7 @@
     return line;
   }
   __name(factTargetLine, "factTargetLine");
-  function factRelationLines(factId, graph, present, activate) {
-    if (!graph) return [];
+  function factRelationLines(factId, graph, relations, present, activate) {
     const lines = [];
     const relate = /* @__PURE__ */ __name((label2, edges) => {
       for (const edge of edges) {
@@ -9257,8 +9270,18 @@
         lines.push(line);
       }
     }, "relate");
-    relate("supersedes", graph.observationSupersedes);
-    relate("replaces", graph.assessmentReplaces);
+    if (graph) {
+      relate("supersedes", graph.observationSupersedes);
+      relate("replaces", graph.assessmentReplaces);
+    }
+    relate(
+      "responds to",
+      relations.filter((edge) => edge.kind === "responds_to")
+    );
+    relate(
+      "relates to",
+      relations.filter((edge) => edge.kind === "relates")
+    );
     return lines;
   }
   __name(factRelationLines, "factRelationLines");
@@ -9339,6 +9362,7 @@
           ...factRelationLines(
             fact2.factId,
             reading.document.inspectorPresentation?.factGraph,
+            fact2.relations ?? [],
             presentFactIds,
             focusFact2
           )
