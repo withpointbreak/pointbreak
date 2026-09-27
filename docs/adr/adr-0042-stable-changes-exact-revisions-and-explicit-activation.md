@@ -233,17 +233,18 @@ reader rollout, one-time migration ceremony, and temporary migrator maintenance.
 - A post-1.0 compatibility promise requires a versioned transition different from this explicit pre-1.0
   minimum-reader break.
 
-## Proposed Amendment: Caller-Bound Rewrite Base for Unchanged Scoped Deltas (2026-09-27)
+## Amendment: Caller-Bound Rewrite Base for Unchanged Scoped Deltas (2026-09-27)
 
-**Status: Proposed. Not accepted.** Owner review of the
-[#747 contract](https://github.com/withpointbreak/pointbreak/issues/747) is pending. Until this amendment
-is accepted, D3 and D4 above describe the as-built system. This amendment implements the owner decision
-recorded on #747 (2026-09-25) and does not reopen it.
+**Status: Accepted 2026-09-27 in [#747](https://github.com/withpointbreak/pointbreak/issues/747#issuecomment-5860668352). Not yet implemented.** Until the implementation lands and its
+admission, drift, compatibility, readback and failure tests pass, D3 and D4 above still describe the as-built
+system. Acceptance is not evidence of implementation. This amendment implements the owner decision recorded
+on #747 (2026-09-25) and does not reopen it.
 
 **D3, extended.** Two cases keep the same Revision: an unchanged state becoming a commit on its captured
 base A, and a delta with identical canonical raw entries replayed onto an explicitly bound descendant base
-B. In both cases the Revision gains a commit association only after D4's proof succeeds. A rebase that
-leaves every canonical entry unchanged is not a content change and does not advance the Revision. A rebase
+B. In both cases the Revision gains a commit association only after D4's proof succeeds. A rebase whose
+net scoped B..C′ delta leaves every canonical entry unchanged does not advance the Revision; that equality
+does not show that the range has no reverted intermediate commits, or that A..B was reviewed. A rebase
 that changes any entry does advance it: a different blob, mode, path, status, content kind, rename pairing,
 capture mode or included scope. This covers conflict resolution and same-file upstream context changes.
 The author then captures a replacement Revision.

@@ -156,11 +156,12 @@ The unchanged `.v1` manifests use their as-built canonical members. `RelationPro
 `revision: RevisionRefV1`, `retentionPolicy`, `entries`, `childContentHashes`, `retainedDecodedBytes`, and
 `manifestSha256`. These lists supersede the earlier split generation-id/artifact fields.
 
-## Proposed Amendment: Caller-Bound Candidate Base (2026-09-27)
+## Amendment: Caller-Bound Candidate Base (2026-09-27)
 
-**Status: Proposed. Not accepted.** This amendment accompanies the proposed ADR-0042 amendment of the same
-date for [#747](https://github.com/withpointbreak/pointbreak/issues/747). Until it is accepted, D1's as-built
-paragraph stands.
+**Status: Accepted 2026-09-27 in [#747](https://github.com/withpointbreak/pointbreak/issues/747#issuecomment-5860668352). Not yet implemented.** This amendment accompanies the ADR-0042
+amendment of the same date. Until the implementation lands and its admission, drift, compatibility, readback
+and failure tests pass, D1's as-built paragraph still describes the as-built system. Acceptance is not
+evidence of implementation.
 
 In `RelationProofManifestV1`, `candidate.baseOrParent` becomes the caller-bound comparison base B of a
 first-parent-linear range B..C′. It is no longer only the candidate's sole parent. `source` still retains

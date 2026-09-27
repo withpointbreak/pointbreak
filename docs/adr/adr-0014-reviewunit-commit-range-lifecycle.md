@@ -537,15 +537,16 @@ post-assessment commit alone may accrete arbitrary changed content onto one Revi
 2026-07-19 instruction to choose proposal-borne `supersedes`, `continues`, or independence: current writers
 advance an exact Change cursor as replacement or parallel work.
 
-## Proposed Amendment: Proof-Equivalent Landing Claims Are Rewrites, Not Divergence (2026-09-27)
+## Amendment: Proof-Equivalent Landing Claims Are Rewrites, Not Divergence (2026-09-27)
 
-**Status: Proposed. Not accepted.** This amendment accompanies the proposed ADR-0042 amendment of the same
-date for [#747](https://github.com/withpointbreak/pointbreak/issues/747). Until it is accepted, the
-2026-07-09 divergence rule stands unchanged.
+**Status: Accepted 2026-09-27 in [#747](https://github.com/withpointbreak/pointbreak/issues/747#issuecomment-5860668352). Not yet implemented.** This amendment accompanies the ADR-0042
+amendment of the same date. Until the implementation lands and its admission, drift, compatibility, readback
+and failure tests pass, the 2026-07-09 divergence rule still describes the as-built system. Acceptance is
+not evidence of implementation.
 
 The 2026-07-09 rule treats same-tree claims as rewrites. A rebase onto an advanced base changes the tree,
 so the original and rebased commits read as `divergent_commit_association` while both remain reachable,
-for example while an old PR branch still exists. The proposed rule is narrow. Consider two or more
+for example while an old PR branch still exists. The amended rule is narrow. Consider two or more
 maximal, incomparable, live-or-merged association claims with distinct trees. They are rewrites of one
 another only if every claim meets both conditions:
 
