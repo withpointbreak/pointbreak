@@ -2506,6 +2506,9 @@ mod tests {
     fn remembered_rebuild_required_is_discarded_by_store_replacement() {
         let (root, _backend, _lifecycle) = ready_change_lifecycle();
         let runtime = remembered_rebuild_required(root.path(), 33);
+        // Join the maintenance worker the failed read requested: Windows
+        // refuses to rename a directory while a file inside it is open.
+        runtime.cancel_background_rebuild().unwrap();
         // Replace the whole store at the same path with a fresh, current one.
         let retired = TempDir::new().unwrap();
         std::fs::rename(root.path(), retired.path().join("store")).unwrap();
