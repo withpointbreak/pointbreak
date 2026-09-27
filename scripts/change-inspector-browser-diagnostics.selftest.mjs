@@ -3886,7 +3886,7 @@ test("D73 base shakedown repeats its exact-detail open without widening the harn
 	);
 	assert.equal(
 		createHash("sha256").update(readme).digest("hex"),
-		"70ef6a287e051755f3c5653c79560b67583d2ff09419a5c3a4fe34bca5fd5182",
+		"c087ad9bc6c57e2be714384255d8b4a592a8eaad68fb5c75b240b7177e86a2d5",
 		"the current shakedown contract documentation must remain byte-pinned",
 	);
 
