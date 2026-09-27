@@ -3687,9 +3687,45 @@ mod counted {
         }
     }
 
-    /// Post-Green end-to-end verification of the exact derived HTTP dispatch.
+    /// Bounded current-Revision presentation hydration (#755, #856): a derived
+    /// Change detail opens, validates and decodes exactly the selected
+    /// proposal carriers and does no other authoritative work.
+    fn assert_bounded_proposal_hydration(counters: &Value, label: &str, expected: u64) {
+        assert!(
+            expected > 0,
+            "{label}: the fixture selects proposal carriers"
+        );
+        for pin in [
+            "changeProposalCarriersOpened",
+            "changeProposalCarriersValidated",
+            "eventDecodes",
+        ] {
+            assert_eq!(
+                counter(counters, pin),
+                expected,
+                "{label}: {pin} equals the selected proposal-carrier count"
+            );
+        }
+        for pin in [
+            "directoryEntriesWalked",
+            "projectionRebuilds",
+            "stateRebuilds",
+            "authoritativeFallbacks",
+            "fullHistoryFallbacks",
+            "eventFolds",
+            "bodyArtifactReads",
+            "bodyBytesRead",
+            "changeSupportCarriersOpened",
+        ] {
+            assert_eq!(counter(counters, pin), 0, "{label}: {pin} stays zero");
+        }
+    }
+
+    /// Post-Green end-to-end verification of the exact derived HTTP dispatch:
+    /// the detail opens only its current Revisions' proposal carriers (#755);
+    /// the interdiff opens no authoritative carrier.
     #[test]
-    fn exact_inspector_derived_routes_open_no_authoritative_carriers() {
+    fn exact_inspector_derived_routes_open_only_selected_proposal_carriers() {
         let fixture = change_reads_fixture();
         fixture.build_derived();
         let baseline_inspector = Inspector::spawn_current(fixture.repo.path());
@@ -3724,15 +3760,23 @@ mod counted {
             ),
         );
 
-        for (ordinal, (label, path)) in [
-            ("detail", detail_path.as_str()),
-            ("interdiff", interdiff_path.as_str()),
-        ]
-        .into_iter()
-        .enumerate()
+        let detail_carriers = crate::support::proposal_carrier_count(
+            fixture.repo.path(),
+            &baseline_inspector.get_json(&detail_path)["currentRevisionRefs"],
+        );
+        let (_, receipt) = counted_http_get(&inspector, &baseline_inspector, &detail_path, 100);
+        assert_bounded_proposal_hydration(
+            &serde_json::to_value(&receipt.counters).expect("counters JSON"),
+            "detail",
+            detail_carriers,
+        );
+
+        for (ordinal, (label, path)) in [("interdiff", interdiff_path.as_str())]
+            .into_iter()
+            .enumerate()
         {
             let (_, receipt) =
-                counted_http_get(&inspector, &baseline_inspector, path, 100 + ordinal as u64);
+                counted_http_get(&inspector, &baseline_inspector, path, 101 + ordinal as u64);
             assert_eq!(
                 receipt.counters.event_decodes, 0,
                 "{label} decodes no event"
@@ -3892,15 +3936,87 @@ mod counted {
         }
     }
 
+    /// #755: the derived Inspector detail and the CLI seek detail hydrate the
+    /// shown Change's current Revisions' proposal carriers and nothing else, so
+    /// their counts are priced by that Change, not by repository history.
+    /// Unrelated review events and whole unrelated Changes leave both routes'
+    /// hydration counts unchanged.
+    #[test]
+    fn derived_detail_proposal_hydration_is_invariant_under_unrelated_history() {
+        let fixture = change_reads_fixture();
+        fixture.build_derived();
+        let receipt_dir = tempfile::tempdir().expect("receipt directory");
+        let detail_path = format!("/api/v2/changes/{}", urlencode(&fixture.parallel_change_id));
+
+        let measure = |ordinal: u64| {
+            let baseline_inspector = Inspector::spawn_current(fixture.repo.path());
+            let inspector = Inspector::spawn_current(fixture.repo.path());
+            let expected = crate::support::proposal_carrier_count(
+                fixture.repo.path(),
+                &baseline_inspector.get_json(&detail_path)["currentRevisionRefs"],
+            );
+            let (_, receipt) =
+                counted_http_get(&inspector, &baseline_inspector, &detail_path, ordinal);
+            let http = serde_json::to_value(&receipt.counters).expect("counters JSON");
+            let show = counted_counters_for(
+                &fixture,
+                &["show", &fixture.parallel_change_id],
+                receipt_dir.path(),
+                ordinal,
+            );
+            assert_bounded_proposal_hydration(&http, "Inspector detail", expected);
+            assert_bounded_proposal_hydration(&show, "change show", expected);
+            (expected, http, show)
+        };
+
+        let (expected_before, http_before, show_before) = measure(300);
+
+        // Unrelated growth: later review events on another Change's member
+        // plus two whole unrelated Changes with their own captures.
+        fixture.grow_unrelated_history(UNRELATED_EVENTS);
+        for ordinal in 0..2 {
+            fixture.repo.write(
+                "src/lib.rs",
+                format!("pub fn value() -> u32 {{ {} }}\n", 60 + ordinal),
+            );
+            let unrelated = pointbreak_env(["capture", "--repo", fixture.repo_arg()], super::OFF);
+            super::assert_success(&unrelated);
+        }
+        fixture.build_derived();
+
+        let (expected_after, http_after, show_after) = measure(310);
+        assert_eq!(
+            expected_after, expected_before,
+            "unrelated growth adds no proposal carrier to the shown Change"
+        );
+        for pin in [
+            "changeProposalCarriersOpened",
+            "changeProposalCarriersValidated",
+            "eventDecodes",
+        ] {
+            assert_eq!(
+                counter(&http_after, pin),
+                counter(&http_before, pin),
+                "Inspector detail: {pin} is invariant under unrelated history"
+            );
+            assert_eq!(
+                counter(&show_after, pin),
+                counter(&show_before, pin),
+                "change show: {pin} is invariant under unrelated history"
+            );
+        }
+    }
+
     /// The R05 seek falsifier: with unrelated history and unrelated Changes
-    /// present, show/interdiff open no authoritative material, while bound
-    /// select reads exactly its planned provisional Revision through the
-    /// Task 3.3 exact-session seam. Both the Change seek rows and select's
-    /// component work stay invariant as unrelated Changes and history grow.
-    /// Zero-construction assertions are deliberately absent because the
+    /// present, interdiff opens no authoritative material and show opens only
+    /// its current Revisions' proposal carriers (#755), while bound select
+    /// reads exactly its planned provisional Revision through the Task 3.3
+    /// exact-session seam. The Change seek rows, show's proposal hydration and
+    /// select's component work stay invariant as unrelated Changes and history
+    /// grow. Zero-construction assertions are deliberately absent because the
     /// narrowed fold still constructs.
     #[test]
-    fn change_seek_reads_active_current_stay_zero_pin_and_row_invariant() {
+    fn change_seek_reads_active_current_stay_bounded_and_row_invariant() {
         let fixture = change_reads_fixture();
         fixture.build_derived();
         let receipt_dir = tempfile::tempdir().expect("receipt directory");
@@ -3944,6 +4060,26 @@ mod counted {
             ("interdiff", &interdiff),
         ];
 
+        let show_carriers = |fixture: &ChangeReadsFixture| {
+            let detail = super::parse_json(
+                &pointbreak_env(
+                    [
+                        "change",
+                        "show",
+                        &fixture.accepted_change_id,
+                        "--repo",
+                        fixture.repo_arg(),
+                    ],
+                    super::OFF,
+                )
+                .stdout,
+            );
+            crate::support::proposal_carrier_count(
+                fixture.repo.path(),
+                &detail["currentRevisionRefs"],
+            )
+        };
+        let show_carriers_before = show_carriers(&fixture);
         let assert_seek_pins = |counters: &Value, label: &str| {
             for pin in [
                 "changeProposalCarriersOpened",
@@ -3952,9 +4088,19 @@ mod counted {
                 "bodyArtifactReads",
                 "strictJournalInspections",
             ] {
+                if label == "show" && pin.starts_with("changeProposalCarriers") {
+                    continue;
+                }
                 assert_eq!(counter(counters, pin), 0, "{label}: {pin} stays zero");
             }
-            if label == "select" {
+            if label == "show" {
+                // #755: show hydrates exactly its current Revisions' proposal
+                // carriers for the detail presentation entries.
+                assert_bounded_proposal_hydration(counters, label, show_carriers_before);
+                for pin in ["factSqliteRowsSelected", "objectArtifactReads"] {
+                    assert_eq!(counter(counters, pin), 0, "{label}: {pin} stays zero");
+                }
+            } else if label == "select" {
                 assert_eq!(
                     counter(counters, "objectArtifactReads"),
                     1,
@@ -4019,7 +4165,25 @@ mod counted {
                 counter(&before[ordinal], "changeSeekFactRowsSelected"),
                 "{label}: Change seek rows are invariant under unrelated Change-fact growth"
             );
+            if *label == "show" {
+                for pin in [
+                    "changeProposalCarriersOpened",
+                    "changeProposalCarriersValidated",
+                    "eventDecodes",
+                ] {
+                    assert_eq!(
+                        counter(&counters, pin),
+                        counter(&before[ordinal], pin),
+                        "{label}: {pin} is invariant under unrelated Change and history growth"
+                    );
+                }
+            }
         }
+        assert_eq!(
+            show_carriers(&fixture),
+            show_carriers_before,
+            "unrelated growth adds no proposal carrier to the shown Change"
+        );
     }
 
     /// The S7 exact-read falsifier: the target Change has one applicable

@@ -12,6 +12,10 @@ use std::collections::BTreeSet;
 use super::cursor::TruthCursor;
 use super::locator::LocatorRead;
 use super::service::DerivedAccessService;
+#[cfg(any(test, feature = "longitudinal-counting"))]
+use crate::bench_support::longitudinal::{
+    record_change_proposal_carriers_opened, record_change_proposal_carriers_validated,
+};
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::model::RevisionRefV1;
 use crate::session::event::ShoreEvent;
@@ -72,6 +76,8 @@ pub(super) fn hydrate_current_revision_proposals(
             ));
         }
     };
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    record_change_proposal_carriers_opened(event_ids.len());
     if hydrated.len() != located.len() {
         return Err(DetailProposalHydrationError::Invalid(
             "authoritative proposal hydration returned the wrong carrier count".to_owned(),
@@ -109,6 +115,8 @@ pub(super) fn hydrate_current_revision_proposals(
                 locator.event_id.as_str()
             )));
         }
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        record_change_proposal_carriers_validated(1);
         events.push(hydrated.event);
     }
     Ok(events)
