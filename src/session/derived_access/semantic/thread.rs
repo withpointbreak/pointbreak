@@ -9,11 +9,23 @@ use crate::error::Result as ProductResult;
 use crate::model::{EngagementId, RevisionId};
 use crate::session::event::ShoreEvent;
 use crate::session::projection::{
-    EngagementGrouping, EngagementLifecycle, EngagementView, SupersessionView,
+    ChangeProjection, EngagementGrouping, EngagementLifecycle, EngagementView, SupersessionView,
 };
 use crate::session::state::ProjectionDiagnostic;
 
-pub(crate) fn thread_documents(events: &[ShoreEvent]) -> ProductResult<serde_json::Value> {
+/// Thread documents over `events` through the Change-scoped replacement graph.
+///
+/// `changes` is the store-wide Change projection: replacement authority is
+/// per store, so a caller that selected only part of the store still decides
+/// it over every Change. With `scope`, `events` must hold the scope's
+/// dependency closure (thread heads are component-wide and a Change relation
+/// crosses engagements), and only the threads containing a scope Revision are
+/// kept.
+pub(crate) fn thread_documents(
+    events: &[ShoreEvent],
+    changes: &ChangeProjection,
+    scope: Option<&BTreeSet<RevisionId>>,
+) -> ProductResult<serde_json::Value> {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct ThreadDocuments<'a> {
@@ -21,16 +33,20 @@ pub(crate) fn thread_documents(events: &[ShoreEvent]) -> ProductResult<serde_jso
         engagements: &'a EngagementGrouping,
     }
 
-    let supersession = SupersessionView::from_events(events)?;
-    let engagements = EngagementGrouping::from_events(events)?;
+    let supersession = thread_supersession(SupersessionView::from_events(events)?, changes, scope);
+    let engagements = EngagementGrouping::from_view(events, &supersession)?;
     Ok(serde_json::to_value(ThreadDocuments {
         supersession: &supersession,
         engagements: &engagements,
     })?)
 }
 
+/// [`thread_documents`] over compact facts; `facts`, `changes` and `scope`
+/// follow the same contract.
 pub(crate) fn thread_documents_from_facts(
     facts: &[SemanticFact],
+    changes: &ChangeProjection,
+    scope: Option<&BTreeSet<RevisionId>>,
 ) -> std::result::Result<serde_json::Value, SemanticModelError> {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -51,7 +67,7 @@ pub(crate) fn thread_documents_from_facts(
         );
         captures.insert(id.clone(), revision);
     }
-    let supersession = supersession_from_facts(facts)?;
+    let supersession = thread_supersession(supersession_from_facts(facts)?, changes, scope);
     let current_assessments = current_assessments(facts)?;
     let mut diagnostics = supersession.diagnostics.clone();
     let mut engagements = Vec::new();
@@ -113,6 +129,27 @@ pub(crate) fn thread_documents_from_facts(
     })?)
 }
 
+/// The replacement view thread documents read: `legacy` re-read through the
+/// store-wide `changes`, narrowed to the threads of `scope` when one is given.
+/// A store without Change claims reads its proposal-borne view unchanged and is
+/// never narrowed (its selection already is the scope).
+fn thread_supersession(
+    legacy: SupersessionView,
+    changes: &ChangeProjection,
+    scope: Option<&BTreeSet<RevisionId>>,
+) -> SupersessionView {
+    if changes.changes.is_empty() {
+        return legacy;
+    }
+    let replacement = legacy.change_aware(changes);
+    match scope {
+        Some(scope) => replacement.threads_containing(scope),
+        None => replacement,
+    }
+}
+
+/// The proposal-borne supersession view over compact Revision facts: the
+/// historical migration input every Change-aware reader starts from.
 pub(crate) fn supersession_from_facts(
     facts: &[SemanticFact],
 ) -> std::result::Result<SupersessionView, SemanticModelError> {
