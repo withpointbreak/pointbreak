@@ -138,11 +138,11 @@ except Theme.
 | `status:` | `needs-decision`, `demand-gated`, `needs-triage` | Zero or more. `needs-decision`: an owner must choose among enumerated options before work starts. `demand-gated`: a named trigger has to fire first, and the issue says which. `needs-triage`: no maintainer has set planning labels yet. |
 | kinds | `research`, `tracking` | `research` issues deliver a recommendation or design, not code. `tracking` issues are umbrellas for sub-issues and carry no priority or effort of their own. |
 
-An issue with none of `status:needs-decision`, `status:demand-gated`, `research`, or `tracking` is
-ready to be picked up:
+An issue with none of `status:needs-triage`, `status:needs-decision`, `status:demand-gated`,
+`research`, or `tracking` is ready to be picked up:
 
 ```text
-is:open -label:status:needs-decision -label:status:demand-gated -label:research -label:tracking
+is:open -label:status:needs-triage -label:status:needs-decision -label:status:demand-gated -label:research -label:tracking
 ```
 
 Planning labels are set by maintainers with write access. Issue templates apply only `bug`,
