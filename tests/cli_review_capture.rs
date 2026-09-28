@@ -1912,3 +1912,166 @@ fn review_capture_path_composes_with_base_and_target() {
     assert_eq!(json["revision"]["base"]["kind"], "git_commit");
     assert_eq!(json["revision"]["target"]["kind"], "git_commit");
 }
+
+const MISSING_SUMMARY_NOTICE: &str = "notice: no --summary supplied; Inspector cards and receipts will show only the exact Revision id";
+
+fn assert_one_missing_summary_notice(output: &std::process::Output) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches(MISSING_SUMMARY_NOTICE).count(),
+        1,
+        "exactly one missing-summary notice on stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.lines().any(|line| line == MISSING_SUMMARY_NOTICE),
+        "the notice is one whole line:\n{stderr}"
+    );
+}
+
+fn assert_no_missing_summary_notice(output: &std::process::Output) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("no --summary supplied"),
+        "no missing-summary notice when a summary is supplied:\n{stderr}"
+    );
+}
+
+fn change_capture(repo: &GitRepo, extra: &[&str]) -> std::process::Output {
+    let mut args = vec![
+        "change",
+        "capture",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--operation-id",
+        "change-operation:missing-summary",
+        "--initial-nonce",
+        "5555555555555555555555555555555555555555555555555555555555555555",
+    ];
+    args.extend_from_slice(extra);
+    pointbreak(args)
+}
+
+#[test]
+fn capture_without_summary_warns_and_receipt_carries_explicit_null_summary() {
+    let repo = modified_repo();
+    let output = pointbreak(["capture", "--repo", repo.path().to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_one_missing_summary_notice(&output);
+    let json = parse_json(&output.stdout);
+    let revision = json["revision"].as_object().expect("revision object");
+    assert!(
+        revision.contains_key("summary"),
+        "summary is present, not omitted: {json}"
+    );
+    assert!(revision["summary"].is_null(), "summary is null: {json}");
+}
+
+#[test]
+fn capture_without_summary_text_receipt_names_the_absence() {
+    let repo = modified_repo();
+    let output = pointbreak([
+        "capture",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--format",
+        "text",
+    ]);
+    assert!(output.status.success());
+    assert_one_missing_summary_notice(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.lines().any(|line| line == "summary: none supplied"),
+        "stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn capture_with_summary_does_not_warn() {
+    let repo = modified_repo();
+    for format in ["json", "text"] {
+        let output = pointbreak([
+            "capture",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "--summary",
+            "Readable capture label",
+            "--format",
+            format,
+        ]);
+        assert!(output.status.success());
+        assert_no_missing_summary_notice(&output);
+        if format == "json" {
+            let json = parse_json(&output.stdout);
+            assert_eq!(json["revision"]["summary"], "Readable capture label");
+        }
+    }
+}
+
+#[test]
+fn change_capture_without_summary_warns_and_receipt_carries_explicit_null_summary() {
+    let repo = modified_repo();
+    let output = change_capture(&repo, &[]);
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_one_missing_summary_notice(&output);
+    let json = parse_json(&output.stdout);
+    let revision = json["revision"].as_object().expect("revision object");
+    assert!(
+        revision.contains_key("summary"),
+        "summary is present, not omitted: {json}"
+    );
+    assert!(revision["summary"].is_null(), "summary is null: {json}");
+
+    // The text lane of `change capture` renders the receipt document itself, so
+    // the absence stays explicit there too. The retry is idempotent.
+    let text = change_capture(&repo, &["--format", "text"]);
+    assert!(text.status.success());
+    assert_one_missing_summary_notice(&text);
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    assert!(stdout.contains("\"summary\": null"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn change_capture_with_summary_does_not_warn() {
+    let repo = modified_repo();
+    let output = change_capture(&repo, &["--summary", "Labelled change capture"]);
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_no_missing_summary_notice(&output);
+    let json = parse_json(&output.stdout);
+    assert_eq!(json["revision"]["summary"], "Labelled change capture");
+
+    let text = change_capture(
+        &repo,
+        &["--summary", "Labelled change capture", "--format", "text"],
+    );
+    assert!(text.status.success());
+    assert_no_missing_summary_notice(&text);
+    assert!(String::from_utf8_lossy(&text.stdout).contains("Labelled change capture"));
+}
+
+#[test]
+fn capture_help_names_summary_as_the_inspector_card_label() {
+    for args in [
+        vec!["capture", "--help"],
+        vec!["change", "capture", "--help"],
+    ] {
+        let output = pointbreak(&args);
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("shown on Inspector Change cards"),
+            "{args:?}:\n{stdout}"
+        );
+    }
+}

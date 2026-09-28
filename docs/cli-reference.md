@@ -348,7 +348,9 @@ with `migration_required`, and an admitted but incomplete transition fails with
 `--operation-id`. Retrying the same operation with the same inputs is idempotent; reusing the id with
 different inputs is refused. `create`, `join`, and the membership/relation/link commands expose the
 low-level append-only claim vocabulary. `change capture` is the higher-level workflow for initial,
-replacement, parallel, and multi-predecessor consolidation captures. Every Change mutation participates
+replacement, parallel, and multi-predecessor consolidation captures. Its `--summary <text>` is the
+label shown on Inspector Change cards; when it is omitted, the command prints the same one-line stderr
+notice as `pointbreak capture` and the receipt carries `revision.summary: null`. Every Change mutation participates
 in the same optional signing-key resolution as the review-writing commands.
 
 `migrate-dry-run` is read-only. It inventories one or more legacy roots, reports anomalies and retained
@@ -516,10 +518,14 @@ likely source flags such as `--include-untracked`, `--staged`, or `--unstaged` w
 explain the empty result. Use `--allow-empty` to intentionally record an empty revision.
 
 `--summary <text>` attaches an optional human-readable discovery label to the immutable capture
-event. It is projected into `revision list`, `history`, the Inspector, and the VS Code extension so
-people and agents can select the intended revision without interpreting opaque IDs. The summary is
-descriptive metadata and does not affect revision or object identity. An omitted
-summary stays absent from the event and read documents for backward compatibility. Because the
+event. It is the label shown on Inspector Change cards, and it is projected into `revision list`,
+`history`, the Inspector, and the VS Code extension so people and agents can select the intended
+revision without interpreting opaque IDs. The summary is descriptive metadata and does not affect
+revision or object identity. An omitted summary stays absent from the event and read documents for
+backward compatibility. The capture still succeeds without one, but it prints a one-line stderr
+notice (`notice: no --summary supplied; Inspector cards and receipts will show only the exact Revision
+id`), the JSON receipt carries `revision.summary: null` explicitly, and the text receipt reads
+`summary: none supplied`. `change capture` behaves the same way. Because the
 capture event is immutable, rerunning the same content with a different summary is a conflicting
 proposal rather than an edit; choose the label on the initial capture.
 
