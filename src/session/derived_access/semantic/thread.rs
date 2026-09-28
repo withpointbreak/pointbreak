@@ -133,7 +133,7 @@ pub(crate) fn thread_documents_from_facts(
 /// store-wide `changes`, narrowed to the threads of `scope` when one is given.
 /// A store without Change claims reads its proposal-borne view unchanged and is
 /// never narrowed (its selection already is the scope).
-fn thread_supersession(
+pub(super) fn thread_supersession(
     legacy: SupersessionView,
     changes: &ChangeProjection,
     scope: Option<&BTreeSet<RevisionId>>,

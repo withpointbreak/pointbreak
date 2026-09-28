@@ -17,7 +17,13 @@ use crate::session::projection::{
 };
 use crate::session::state::ProjectionDiagnostic;
 
-pub(crate) fn revision_documents(events: &[ShoreEvent]) -> ProductResult<serde_json::Value> {
+/// Revision documents over `events`. `supersession` is the Change-scoped
+/// replacement view the thread documents read (`thread::thread_supersession`),
+/// so the revision family classifies Revisions exactly as the thread family.
+pub(crate) fn revision_documents(
+    events: &[ShoreEvent],
+    supersession: &SupersessionView,
+) -> ProductResult<serde_json::Value> {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct RevisionDocuments<'a> {
@@ -26,18 +32,20 @@ pub(crate) fn revision_documents(events: &[ShoreEvent]) -> ProductResult<serde_j
         commit_ranges: &'a RevisionCommitRangeProjection,
     }
 
-    let supersession = SupersessionView::from_events(events)?;
     let revisions_by_base = RevisionsByBase::from_events(events)?;
     let commit_ranges = RevisionCommitRangeProjection::from_events(events)?;
     Ok(serde_json::to_value(RevisionDocuments {
-        supersession: &supersession,
+        supersession,
         revisions_by_base: &revisions_by_base,
         commit_ranges: &commit_ranges,
     })?)
 }
 
+/// [`revision_documents`] over compact facts, with the same `supersession`
+/// contract.
 pub(crate) fn revision_documents_from_facts(
     facts: &[SemanticFact],
+    supersession: &SupersessionView,
 ) -> std::result::Result<serde_json::Value, SemanticModelError> {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -51,20 +59,10 @@ pub(crate) fn revision_documents_from_facts(
         SemanticFactKind::Revision(revision) => Some((fact, revision)),
         _ => None,
     });
-    let mut edges = Vec::new();
     let mut base_buckets = BTreeMap::<String, BTreeSet<RevisionId>>::new();
     let mut builders = BTreeMap::<RevisionId, CommitRangeBuilder>::new();
     for (fact, revision) in revision_facts {
         let id = revision_id(fact)?;
-        edges.push((
-            id.clone(),
-            revision
-                .supersedes
-                .iter()
-                .cloned()
-                .map(RevisionId::new)
-                .collect(),
-        ));
         if let Some(base) = &revision.base_commit_oid {
             base_buckets
                 .entry(base.clone())
@@ -126,7 +124,6 @@ pub(crate) fn revision_documents_from_facts(
         }
     }
 
-    let supersession = SupersessionView::from_edges(edges);
     let revisions_by_base = RevisionsByBase {
         buckets: base_buckets,
     };
@@ -137,7 +134,7 @@ pub(crate) fn revision_documents_from_facts(
             .collect(),
     };
     Ok(serde_json::to_value(RevisionDocuments {
-        supersession: &supersession,
+        supersession,
         revisions_by_base: &revisions_by_base,
         commit_ranges: &commit_ranges,
     })?)
