@@ -5657,11 +5657,53 @@ mod tests {
             Some("moving detail state"),
         ]]);
         let change_id = fixture.changes[0].change_id.clone();
+        // The movement must come from this test's append alone. Let any worker
+        // the fixture already started finish, then park later ones at the test
+        // gate: a worker holding the derived writer lock during the hook would
+        // turn the append's acknowledgement Busy (seen on Windows CI) and leave
+        // the writer degraded for the stable reread.
+        let started = std::time::Instant::now();
+        let deadline = started + std::time::Duration::from_secs(30);
+        while fixture.runtime.maintenance_in_flight() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        fixture
+            .runtime
+            .assert_background_worker_before_deadline_with(
+                "post-hydration drift fixture",
+                started,
+                deadline,
+                String::new,
+            );
+        fixture.runtime.pause_background_worker_for_test();
         let mut appended = false;
         let outcome = fixture
             .access
             .review_generation_detail_document_with_hook(&change_id, || {
-                fixture.append_unrelated("review-detail-post-hydration-movement");
+                let journal_id =
+                    JournalId::new("journal:change-endpoint:review-detail-post-hydration");
+                let acknowledgement = fixture
+                    .store
+                    .record_event_once_acknowledged(
+                        &ShoreEvent::new(
+                            EventType::ReviewInitialized,
+                            ReviewInitializedPayload::idempotency_key(&journal_id),
+                            EventTarget::for_journal(journal_id),
+                            Writer::shore_local("change-endpoint-test"),
+                            ReviewInitializedPayload {},
+                            "2026-08-10T02:00:00Z",
+                        )
+                        .expect("build post-hydration movement"),
+                    )
+                    .expect("record post-hydration movement");
+                assert_eq!(acknowledgement.outcome, EventWriteOutcome::Created);
+                assert_eq!(
+                    acknowledgement.derived.availability,
+                    DerivedWriteAvailabilityV1::Current,
+                    "the post-hydration movement must be applied by the derived writer; \
+                     diagnostics {:?}",
+                    acknowledgement.diagnostics,
+                );
                 appended = true;
             })
             .expect("read the detail across post-hydration movement");
