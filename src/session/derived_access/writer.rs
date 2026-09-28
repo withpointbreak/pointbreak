@@ -2437,6 +2437,11 @@ mod tests {
                 DerivedAccessProfile::SqliteWalBodylessV1,
                 root.path(),
             );
+        // Hold this reader's maintenance worker at its gate: a worker started
+        // by the warm read could take the writer lock as the append begins
+        // and degrade its publication (the #769 race), which is not what this
+        // test measures. The append settles the generation itself.
+        runtime.pause_background_worker_for_test();
         assert_eq!(
             lifecycle.status_read_only().unwrap().availability,
             DerivedAccessAvailability::Current
