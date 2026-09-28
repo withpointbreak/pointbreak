@@ -9,8 +9,10 @@ use pointbreak::session::event::AssertionMode;
 use pointbreak::session::{
     CurrentAssessmentStatus, EventVerificationPolicy, EventVerificationStatus, InputRequestStatus,
     InputRequestView, PublicReadCommandContextV1, PublicReadRevisionShowRouteV1, RemovalPolicy,
-    RevisionShowOptions, RevisionShowResult, diagnose_ref_continuity, effective_integration_ref,
-    enrich_liveness, show_revision, show_revision_with_public_read_context,
+    RevisionShowOptions, RevisionShowResult, StoreCapabilityStatus,
+    bounded_store_capability_status_for_repo, change_replacement_redirect_diagnostic,
+    diagnose_ref_continuity, effective_integration_ref, enrich_liveness, show_revision,
+    show_revision_with_public_read_context,
 };
 
 use crate::cli::common::{count_label, endpoint_label};
@@ -169,6 +171,11 @@ fn run_with(
     // the same result, so clone it only when the text lane will actually render
     // (the machine lanes never pay for the clone — this is the #96 heavy command).
     let digest_source = matches!(format.format, output::OutputFormat::Text).then(|| result.clone());
+    // On a store that holds Change authority the supersession facets above are
+    // proposal-borne only; redirect to the Change surfaces rather than learn a
+    // second replacement model (#790). The capability answer is a point read of
+    // the activation carriers, identical on both routed arms.
+    let change_redirect = redirects_to_change_surfaces(&args.repo);
     let mut value = match routed {
         RoutedRevisionShow::Authoritative { result } => {
             serde_json::to_value(revision_show_document(result))?
@@ -198,13 +205,38 @@ fn run_with(
             }
         }
     }
+    if change_redirect
+        && let Some(diagnostics) = value.get_mut("diagnostics").and_then(|d| d.as_array_mut())
+    {
+        diagnostics.push(serde_json::to_value(
+            change_replacement_redirect_diagnostic(),
+        )?);
+    }
     output::write_document(stdout, format, &value, || {
-        render_revision_digest(
+        let mut digest = render_revision_digest(
             digest_source
                 .as_ref()
                 .expect("text lane resolves the digest source"),
-        )
+        );
+        if change_redirect {
+            digest.push_str(
+                "\nsupersession here is proposal-borne only; for Change replacement read \
+                 `pointbreak change show <change-id>`",
+            );
+        }
+        digest
     })
+}
+
+/// Whether the store holds Change authority, answered by the bounded
+/// activation point read (it never enumerates or decodes the Journal). A store
+/// whose capability cannot be read gets no redirect: the command has already
+/// served its read, and the diagnostic is advisory.
+fn redirects_to_change_surfaces(repo: &std::path::Path) -> bool {
+    matches!(
+        bounded_store_capability_status_for_repo(repo),
+        Ok(StoreCapabilityStatus::Ready { .. })
+    )
 }
 
 /// The #96 text digest for `revision show`: a bounded per-track summary mirroring
