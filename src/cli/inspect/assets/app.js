@@ -1572,7 +1572,9 @@
   function isPresentationRevision(value) {
     return isRecord(value) && isRevisionRef(value.revision) && // Server-owned display string (D7): optional for an older server, but a
     // non-empty string when present. summarySource validation is unchanged.
-    (value.label === void 0 || nonEmptyString2(value.label)) && (value.summarySource === "revision_proposal_summary" && nonEmptyString2(value.revisionProposalSummary) || value.summarySource === "absent" && value.revisionProposalSummary === void 0);
+    (value.label === void 0 || nonEmptyString2(value.label)) && // Server-owned absent-summary cue (#752): only on an absent summary, and a
+    // non-empty string when present.
+    (value.absentSummaryCue === void 0 || value.summarySource === "absent" && nonEmptyString2(value.absentSummaryCue)) && (value.summarySource === "revision_proposal_summary" && nonEmptyString2(value.revisionProposalSummary) || value.summarySource === "absent" && value.revisionProposalSummary === void 0);
   }
   __name(isPresentationRevision, "isPresentationRevision");
   function isRevisionRef(value) {
@@ -6489,21 +6491,23 @@
       );
       const summaryLabel = entry?.summarySource === "revision_proposal_summary" ? entry.revisionProposalSummary : void 0;
       const identity = exactRevisionAccessibleIdentity(revision2);
-      const visibleLabel = entry?.label ?? (summaryLabel || "Current Revision");
+      const visibleLabel = summaryLabel === void 0 ? void 0 : entry?.label ?? summaryLabel;
+      const absentSummaryCue = entry?.summarySource === "absent" ? entry.absentSummaryCue : void 0;
       return {
         revision: revision2,
-        label: visibleLabel,
+        ...visibleLabel === void 0 ? {} : { label: visibleLabel },
+        ...absentSummaryCue === void 0 ? {} : { absentSummaryCue },
         visibleIdentity: shortExactRevision(revision2),
         // The accessible name leads with the same visible label the card shows
         // (never a raw summary that could drift from it), and stays identity-led
         // for an absent summary so it never claims a summary that was not given.
-        accessibleName: entry?.summarySource === "revision_proposal_summary" ? `Current Revision — ${visibleLabel}; ${identity}` : `Current Revision — ${identity}`,
+        accessibleName: visibleLabel !== void 0 ? `Current Revision — ${visibleLabel}; ${identity}` : absentSummaryCue !== void 0 ? `Current Revision — ${identity}; ${absentSummaryCue}` : `Current Revision — ${identity}`,
         title: identity,
         copyText: exactRevisionCopyText([revision2])
       };
     });
     const onlyPeer = peers.length === 1 ? peers[0] : void 0;
-    const headline = onlyPeer === void 0 ? peers.length === 0 ? "Current Revision unavailable" : "Multiple current Revisions need selection" : onlyPeer.label;
+    const headline = onlyPeer === void 0 ? peers.length === 0 ? "Current Revision unavailable" : "Multiple current Revisions need selection" : onlyPeer.label ?? onlyPeer.visibleIdentity;
     const currentRevisionName = peers.length === 0 ? "Current Revision unavailable" : peers.length === 1 ? peers[0].accessibleName : `Current Revisions — ${peers.map(
       (peer) => peer.accessibleName.replace(/^Current Revision — /, "")
     ).join("; ")}`;
@@ -6515,6 +6519,7 @@
       title: `Change ${summary.changeId}`,
       copyText: summary.changeId,
       headline,
+      ...onlyPeer?.absentSummaryCue === void 0 ? {} : { absentSummaryCue: onlyPeer.absentSummaryCue },
       stateAxes: [
         { label: "Topology", value: words2(summary.topology) },
         { label: "Lifecycle", value: words2(summary.lifecycle) },
@@ -10279,6 +10284,12 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         cardHeading.className = "change-card-heading";
         cardHeading.append(primary);
         element.append(cardHeading);
+        if (card.absentSummaryCue !== void 0) {
+          const cue = document.createElement("p");
+          cue.className = "change-card-summary-absent";
+          cue.textContent = card.absentSummaryCue;
+          element.append(cue);
+        }
         if (card.attention) {
           const attention = document.createElement("section");
           attention.className = "change-card-attention";
@@ -10382,7 +10393,13 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
             const choose = document.createElement("button");
             choose.type = "button";
             choose.className = "ghost change-card-peer-open";
-            choose.textContent = `Open · ${peer.label} · ${peer.visibleIdentity}`;
+            choose.textContent = peer.label === void 0 ? `Open · ${peer.visibleIdentity}` : `Open · ${peer.label} · ${peer.visibleIdentity}`;
+            if (peer.absentSummaryCue !== void 0) {
+              const cue = document.createElement("span");
+              cue.className = "change-card-summary-absent";
+              cue.textContent = ` · ${peer.absentSummaryCue}`;
+              choose.append(cue);
+            }
             choose.title = peer.title;
             choose.setAttribute(
               "aria-label",

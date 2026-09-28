@@ -1767,6 +1767,50 @@ describe("Change inspector render", () => {
     expect(card?.querySelectorAll("button")).toHaveLength(1);
   });
 
+  it("renders an absent-summary card with the exact id headline and a muted server cue", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const absentChanges: ChangesPage = {
+      ...changes,
+      presentations: {
+        "change:sha256:one": {
+          currentRevisions: [
+            {
+              revision,
+              summarySource: "absent",
+              absentSummaryCue: "No summary supplied",
+            },
+          ],
+        },
+      },
+    };
+    const state = createChangeInspectorState({
+      kind: "lens",
+      lens: "changes",
+      query: {},
+    });
+    state.publish(stageGeneration(profile, absentChanges, attention, profile));
+    renderChangeInspector(state.snapshot(), { navigate });
+
+    const card = document.querySelector<HTMLElement>(
+      '.unit-card[data-change-id="change:sha256:one"]',
+    );
+    expect(card?.querySelector("h3 .change-card-headline")?.textContent).toBe(
+      "revision:sha256:one · sha256:artifact",
+    );
+    const cue = card?.querySelector(":scope > p.change-card-summary-absent");
+    expect(cue?.textContent).toBe("No summary supplied");
+    // The cue sits directly under the heading, outside the primary control.
+    expect(
+      cue?.previousElementSibling?.classList.contains("change-card-heading"),
+    ).toBe(true);
+    expect(card?.textContent).not.toContain("Current Revision ·  ");
+    expect(
+      card?.querySelector(".change-card-primary")?.getAttribute("aria-label"),
+    ).toContain("No summary supplied");
+    expect(card?.querySelectorAll("button")).toHaveLength(1);
+  });
+
   it("renders one exact current Revision as a native secondary anchor without changing the card primary", () => {
     const navigate = vi.fn();
     prepareChangeInspectorShell({ navigate });
@@ -1823,7 +1867,7 @@ describe("Change inspector render", () => {
             {
               revision,
               summarySource: "absent",
-              label: "No summary at capture",
+              absentSummaryCue: "No summary supplied",
             },
             {
               revision: secondRevision,
@@ -1853,9 +1897,20 @@ describe("Change inspector render", () => {
     const firstPeer = peerActions.find(
       (action) => action.dataset.revisionId === revision.revisionId,
     );
+    // #752: an absent-summary peer is named by its short exact id once, with
+    // the server cue as a muted suffix; a supplied summary leads its peer.
     expect(firstPeer?.textContent).toBe(
-      "Open · No summary at capture · revision:sha256:one · sha256:artifact",
+      "Open · revision:sha256:one · sha256:artifact · No summary supplied",
     );
+    expect(
+      firstPeer?.querySelector(".change-card-summary-absent")?.textContent,
+    ).toBe(" · No summary supplied");
+    expect(firstPeer?.getAttribute("aria-label")).toContain(
+      "No summary supplied",
+    );
+    expect(
+      document.querySelector(".unit-card > .change-card-summary-absent"),
+    ).toBeNull();
     expect(firstPeer?.getAttribute("aria-label")).toContain(
       revision.revisionId,
     );

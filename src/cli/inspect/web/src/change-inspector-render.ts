@@ -2512,6 +2512,12 @@ export function renderChangeInspector(
       cardHeading.className = "change-card-heading";
       cardHeading.append(primary);
       element.append(cardHeading);
+      if (card.absentSummaryCue !== undefined) {
+        const cue = document.createElement("p");
+        cue.className = "change-card-summary-absent";
+        cue.textContent = card.absentSummaryCue;
+        element.append(cue);
+      }
 
       if (card.attention) {
         const attention = document.createElement("section");
@@ -2623,7 +2629,18 @@ export function renderChangeInspector(
           const choose = document.createElement("button");
           choose.type = "button";
           choose.className = "ghost change-card-peer-open";
-          choose.textContent = `Open · ${peer.label} · ${peer.visibleIdentity}`;
+          // Each peer is named once: its label and short exact id, or the id
+          // alone with the server's muted absent-summary cue.
+          choose.textContent =
+            peer.label === undefined
+              ? `Open · ${peer.visibleIdentity}`
+              : `Open · ${peer.label} · ${peer.visibleIdentity}`;
+          if (peer.absentSummaryCue !== undefined) {
+            const cue = document.createElement("span");
+            cue.className = "change-card-summary-absent";
+            cue.textContent = ` · ${peer.absentSummaryCue}`;
+            choose.append(cue);
+          }
           choose.title = peer.title;
           choose.setAttribute(
             "aria-label",

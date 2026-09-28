@@ -48,8 +48,13 @@ export interface ChangeCardAttention {
 
 export interface ChangeCardPeer {
   revision: RevisionRef;
-  /** Server-owned visible label: the proposal summary, else the absent-summary copy. */
-  label: string;
+  /**
+   * Server-owned visible label for a supplied proposal summary. Absent when no
+   * summary was supplied: the exact identity then names the peer.
+   */
+  label?: string;
+  /** Server-owned absent-summary state line, rendered muted. */
+  absentSummaryCue?: string;
   /** Short exact identity for visual presentation. */
   visibleIdentity: string;
   accessibleName: string;
@@ -68,8 +73,13 @@ export interface ChangeCardPresentation {
   accessibleName: string;
   title: string;
   copyText: string;
-  /** Meaning leads identity: a proposal summary when exactly one is current. */
+  /**
+   * Meaning leads identity: a proposal summary when exactly one is current.
+   * Without a supplied summary the short exact Revision id is the headline.
+   */
   headline: string;
+  /** Server-owned muted state line under a one-current headline with no summary. */
+  absentSummaryCue?: string;
   stateAxes: ChangeCardStateAxis[];
   peers: ChangeCardPeer[];
   /** Explicitly explains why an exact Revision cannot be opened. */
@@ -148,21 +158,28 @@ export function changeCardPresentation(
         ? entry.revisionProposalSummary
         : undefined;
     const identity = exactRevisionAccessibleIdentity(revision);
-    // Server-owned when supplied (a proposal summary or the absent-summary
-    // label). The generic string remains only for an older server that sends
-    // no `label`, which is shipped behavior, not client-minted meaning.
-    const visibleLabel = entry?.label ?? (summaryLabel || "Current Revision");
+    // Only a supplied summary yields a label: the server's finished string, or
+    // the summary itself from an older server that sends no `label`. Without
+    // one the exact identity names the peer; the client never invents a
+    // headline (#752).
+    const visibleLabel =
+      summaryLabel === undefined ? undefined : (entry?.label ?? summaryLabel);
+    const absentSummaryCue =
+      entry?.summarySource === "absent" ? entry.absentSummaryCue : undefined;
     return {
       revision,
-      label: visibleLabel,
+      ...(visibleLabel === undefined ? {} : { label: visibleLabel }),
+      ...(absentSummaryCue === undefined ? {} : { absentSummaryCue }),
       visibleIdentity: shortExactRevision(revision),
       // The accessible name leads with the same visible label the card shows
       // (never a raw summary that could drift from it), and stays identity-led
       // for an absent summary so it never claims a summary that was not given.
       accessibleName:
-        entry?.summarySource === "revision_proposal_summary"
+        visibleLabel !== undefined
           ? `Current Revision — ${visibleLabel}; ${identity}`
-          : `Current Revision — ${identity}`,
+          : absentSummaryCue !== undefined
+            ? `Current Revision — ${identity}; ${absentSummaryCue}`
+            : `Current Revision — ${identity}`,
       title: identity,
       copyText: exactRevisionCopyText([revision]),
     };
@@ -173,7 +190,7 @@ export function changeCardPresentation(
       ? peers.length === 0
         ? "Current Revision unavailable"
         : "Multiple current Revisions need selection"
-      : onlyPeer.label;
+      : (onlyPeer.label ?? onlyPeer.visibleIdentity);
   const currentRevisionName =
     peers.length === 0
       ? "Current Revision unavailable"
@@ -195,6 +212,9 @@ export function changeCardPresentation(
     title: `Change ${summary.changeId}`,
     copyText: summary.changeId,
     headline,
+    ...(onlyPeer?.absentSummaryCue === undefined
+      ? {}
+      : { absentSummaryCue: onlyPeer.absentSummaryCue }),
     stateAxes: [
       { label: "Topology", value: words(summary.topology) },
       { label: "Lifecycle", value: words(summary.lifecycle) },

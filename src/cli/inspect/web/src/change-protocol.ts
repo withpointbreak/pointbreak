@@ -606,8 +606,16 @@ export interface ChangePresentation {
     revision: RevisionRef;
     revisionProposalSummary?: string;
     summarySource: "revision_proposal_summary" | "absent";
-    /** Server-owned finished display string. Absent only from an older server. */
+    /**
+     * Server-owned finished display string for a supplied proposal summary.
+     * Absent when no summary was supplied, and from an older server.
+     */
     label?: string;
+    /**
+     * Server-owned absent-summary state line (#752), present only when
+     * `summarySource` is `absent`. Absent from an older server.
+     */
+    absentSummaryCue?: string;
   }>;
   /** Inspector-only and present exclusively on the Attention lens. */
   attention?: ChangeAttentionPresentation;
@@ -665,6 +673,9 @@ export interface ChangesPage extends ChangePageBase {
   schema: "pointbreak.inspect-changes-page";
   // Version stays 1: the current-Revision presentation `label` (D7) is an
   // additive optional member, so an older server without it still parses.
+  // #752 keeps version 1: `absentSummaryCue` is another additive optional
+  // member, and `label` is now sent only for a supplied summary. An absent
+  // summary keeps the exact Revision id as the headline on every server.
   version: 1;
 }
 
@@ -2411,6 +2422,11 @@ function isPresentationRevision(value: unknown): boolean {
     // Server-owned display string (D7): optional for an older server, but a
     // non-empty string when present. summarySource validation is unchanged.
     (value.label === undefined || nonEmptyString(value.label)) &&
+    // Server-owned absent-summary cue (#752): only on an absent summary, and a
+    // non-empty string when present.
+    (value.absentSummaryCue === undefined ||
+      (value.summarySource === "absent" &&
+        nonEmptyString(value.absentSummaryCue))) &&
     ((value.summarySource === "revision_proposal_summary" &&
       nonEmptyString(value.revisionProposalSummary)) ||
       (value.summarySource === "absent" &&
