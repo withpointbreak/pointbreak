@@ -110,6 +110,10 @@ After capture:
 
 The prior assessment remains attached to the prior Revision. Do not replace or port it.
 
+Do not re-open a request that is still open on the prior Revision. It stays answerable whether or not
+its anchor is current, and attention already marks it `superseded`, so a duplicate on the new Revision
+only leaves the original dangling. Point the reviewer at the original request id instead.
+
 ## Explicit context continuity
 
 Facts do not automatically move. Port an observation or input request only when its continuity is
@@ -140,6 +144,7 @@ equivalence. Acceptance and proof do not authorize publication or merge by thems
 - Never assess from the author role.
 - Never record post-edit facts or checks on the pre-edit Revision.
 - Never port validation or assessments.
+- Never re-open a still-open input request on a recapture.
 - Never infer a new current Revision or choose among multiple currents by time or lexical order.
 - Never treat operation-recovery files as semantic authority.
 - Never let landing create a new Revision when the reviewed content is proved unchanged.

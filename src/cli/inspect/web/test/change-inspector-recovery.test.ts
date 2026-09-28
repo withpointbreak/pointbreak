@@ -57,6 +57,7 @@ function historyPage(eventId: string) {
       changeIds: [],
       revisionRefs: [],
       unresolvedRevisionIds: [],
+      actorIds: [],
     },
     diagnostics: [],
     queryNotices: [],

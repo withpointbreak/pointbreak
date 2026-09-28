@@ -857,6 +857,8 @@ fn commit_check_workflow_reports_shore_examples() {
 #[test]
 fn project_sync_workflow_mirrors_labels_and_is_dispatchable() {
     let sync = read_workflow("project-sync.yml");
+    let decide = std::fs::read_to_string("scripts/project-sync-labels.sh")
+        .expect("read the project-sync decision script");
     assert!(sync.contains("issues:"));
     assert!(sync.contains("types: [opened, reopened, labeled, unlabeled]"));
     assert!(sync.contains("schedule:"));
@@ -878,6 +880,10 @@ fn project_sync_workflow_mirrors_labels_and_is_dispatchable() {
         "the sync uses only gh and jq from the runner image; a third-party action here \
          would need SHA pinning and adds nothing"
     );
+    assert!(
+        sync.contains("convenience mirror"),
+        "the workflow must describe itself as a convenience mirror, not an enforcement point"
+    );
     for label in [
         "priority:P0-release-blocker",
         "priority:P1-1.0-candidate",
@@ -888,14 +894,41 @@ fn project_sync_workflow_mirrors_labels_and_is_dispatchable() {
         "effort:high",
         "status:needs-decision",
         "status:demand-gated",
+        "status:needs-triage",
     ] {
         assert!(
-            sync.contains(label),
+            decide.contains(label),
             "planning label {label} must map to a board field"
         );
     }
     assert!(
         sync.contains("clearProjectV2ItemFieldValue"),
         "an issue that loses a planning label must clear the board field, not keep a stale value"
+    );
+}
+
+#[test]
+fn project_sync_decides_from_the_current_labels_through_the_tested_script() {
+    let sync = read_workflow("project-sync.yml");
+    // Both steps take their decisions from the script the selftest exercises,
+    // not from inline shell that no test runs.
+    assert!(sync.contains("scripts/project-sync-labels.sh"));
+    assert!(sync.contains("project-sync-labels.sh\" guard"));
+    assert!(sync.contains("project-sync-labels.sh\" fields"));
+    // The guard re-reads the label set and history instead of trusting the
+    // event payload alone, so stale events do nothing.
+    assert!(sync.contains("repos/${REPO}/issues/${ISSUE}/labels?per_page=100"));
+    assert!(sync.contains("repos/${REPO}/issues/${ISSUE}/events?per_page=100"));
+    // Bot events are normalized: no step or job exits early on a bot actor.
+    assert!(!sync.contains("github-actions[bot]"));
+    assert!(!sync.contains("guard skipped"));
+    // Reconciliation reports conflicts instead of resolving them by code order.
+    assert!(sync.contains("::warning::"));
+    assert!(!sync.contains("has \"priority:"));
+
+    let justfile = std::fs::read_to_string("Justfile").expect("read Justfile");
+    assert!(
+        justfile.contains("./scripts/project-sync-labels-selftest.sh"),
+        "the behavioral tests for the mirror's decisions run under just workflow-lint"
     );
 }

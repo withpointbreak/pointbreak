@@ -658,3 +658,179 @@ fn inspector_stderr_is_readable_while_the_server_runs() {
     let status = child.wait().expect("wait for the child");
     assert!(status.success(), "stderr drain child failed: {status}");
 }
+
+fn record(repo: &GitRepo, args: &[&str]) -> serde_json::Value {
+    let mut full = args.to_vec();
+    full.extend(["--repo", repo.path().to_str().unwrap(), "--format", "json"]);
+    let output = support::pointbreak(full);
+    assert!(
+        output.status.success(),
+        "{args:?} stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("write receipt json")
+}
+
+fn timeline_entry<'a>(
+    page: &'a serde_json::Value,
+    fact_key: &str,
+    id: &str,
+) -> &'a serde_json::Value {
+    page["entries"]
+        .as_array()
+        .expect("Timeline entries")
+        .iter()
+        .find(|entry| entry["summary"]["details"][fact_key] == id)
+        .unwrap_or_else(|| panic!("Timeline entry recording {id}: {page}"))
+}
+
+#[test]
+fn relation_targets_resolve_recording_events_identically_in_both_lanes() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    let revision = capture(repo.path());
+    let root = record(
+        &repo,
+        &[
+            "observation",
+            "add",
+            "--exact-revision",
+            &revision,
+            "--track",
+            "agent:review",
+            "--title",
+            "root finding",
+        ],
+    )["observationId"]
+        .as_str()
+        .expect("root observation id")
+        .to_owned();
+    let reply = record(
+        &repo,
+        &[
+            "observation",
+            "add",
+            "--exact-revision",
+            &revision,
+            "--track",
+            "agent:review",
+            "--title",
+            "reply finding",
+            "--responds-to",
+            &root,
+        ],
+    )["observationId"]
+        .as_str()
+        .expect("reply observation id")
+        .to_owned();
+    let assessment = record(
+        &repo,
+        &[
+            "assessment",
+            "add",
+            "--exact-revision",
+            &revision,
+            "--track",
+            "agent:review",
+            "--assessment",
+            "accepted",
+            "--related-observation",
+            &root,
+        ],
+    )["assessmentId"]
+        .as_str()
+        .expect("assessment id")
+        .to_owned();
+    let build = support::pointbreak([
+        "store",
+        "derived",
+        "build",
+        "--repo",
+        repo.path().to_str().unwrap(),
+    ]);
+    assert!(
+        build.status.success(),
+        "derived build stderr: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let inspector = Inspector::spawn_current(repo.path());
+    for query in ["limit=100&order=asc", "limit=100&order=asc&q=finding"] {
+        let (head, _) = inspector.raw_get(&format!("/api/v2/history?{query}"));
+        assert!(
+            head.starts_with("HTTP/1.1 200") && !head.contains("authoritative-fallback"),
+            "{query}: the default lane serves the derived Timeline: {head}"
+        );
+        let derived = page(&inspector, &format!("/api/v2/history?{query}"));
+        let strict = page(
+            &inspector,
+            &format!("/api/v2/history?{query}&access=authoritative"),
+        );
+        assert_eq!(
+            derived["entries"], strict["entries"],
+            "{query}: both lanes carry the same relation targets"
+        );
+        let root_event = timeline_entry(&derived, "observationId", &root)["eventId"].clone();
+        let expected = serde_json::json!([{ "factId": root, "eventId": root_event }]);
+        assert_eq!(
+            timeline_entry(&derived, "observationId", &reply)["relationTargets"],
+            expected,
+            "{query}: a response names the event that recorded its parent"
+        );
+        assert!(
+            timeline_entry(&derived, "observationId", &root)
+                .get("relationTargets")
+                .is_none(),
+            "{query}: an entry without relationship ids carries no targets"
+        );
+        if query.contains("q=") {
+            continue;
+        }
+        assert_eq!(
+            timeline_entry(&derived, "assessmentId", &assessment)["relationTargets"],
+            expected,
+            "an assessment names the event that recorded its related observation"
+        );
+    }
+
+    let all = page(&inspector, "/api/v2/history?limit=100&order=asc");
+    let proposal = all["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["eventType"] == "work_object_proposed")
+        .expect("proposal entry");
+    let change_id = proposal["changeIds"][0].as_str().expect("Change id");
+    let artifact_hash = proposal["revisionRefs"][0]["objectArtifactContentHash"]
+        .as_str()
+        .expect("artifact hash");
+    let detail = page(
+        &inspector,
+        &format!(
+            "/api/v2/changes/{}/revisions/{}?artifactHash={}",
+            urlencode(change_id),
+            urlencode(&revision),
+            urlencode(artifact_hash)
+        ),
+    );
+    let facts = detail["factPresentations"]
+        .as_array()
+        .unwrap_or_else(|| panic!("exact Revision facts: {detail}"));
+    for (fact_id, fact_key) in [
+        (&root, "observationId"),
+        (&reply, "observationId"),
+        (&assessment, "assessmentId"),
+    ] {
+        let fact = facts
+            .iter()
+            .find(|fact| fact["factId"] == fact_id.as_str())
+            .unwrap_or_else(|| panic!("fact {fact_id}: {detail}"));
+        assert_eq!(
+            fact["recordingEventId"],
+            timeline_entry(&all, fact_key, fact_id)["eventId"],
+            "the exact Revision names the Timeline event that recorded {fact_id}"
+        );
+    }
+}

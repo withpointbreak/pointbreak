@@ -72,7 +72,8 @@ pub(super) struct CaptureArgs {
     #[arg(long = "supersedes")]
     supersedes: Vec<String>,
 
-    /// Short human-readable label shown by revision discovery surfaces.
+    /// Short human-readable label shown on Inspector Change cards and by revision discovery
+    /// surfaces. Optional; without it, cards and receipts show only the exact Revision id.
     #[arg(long)]
     summary: Option<String>,
 
@@ -156,6 +157,7 @@ pub(super) fn run(
     let capture = capture_change_revision(change_options)?;
     debug_assert_eq!(capture.schema, CHANGE_CAPTURE_RECEIPT_SCHEMA);
     crate::cli::common::surface_best_effort_skip(&skip, stderr);
+    crate::cli::common::surface_missing_summary(capture.revision.summary.as_deref(), stderr);
     // Best-effort: if this worktree is splitting off from a family store a sibling
     // worktree is linked to, say so on stderr. Never fails the capture.
     if let Ok(Some(advisory)) = pointbreak::session::family_link_advisory(&args.repo) {
@@ -178,8 +180,9 @@ fn render_change_capture_text(capture: &pointbreak::session::ChangeCaptureReceip
         output::short_ref(capture.change_id.as_str()),
         capture.operation_id,
     )];
-    if let Some(summary) = &capture.revision.summary {
-        lines.push(format!("summary: {summary}"));
+    match &capture.revision.summary {
+        Some(summary) => lines.push(format!("summary: {summary}")),
+        None => lines.push("summary: none supplied".to_owned()),
     }
     lines.push(format!(
         "{} {file_word} · +{}/−{}",

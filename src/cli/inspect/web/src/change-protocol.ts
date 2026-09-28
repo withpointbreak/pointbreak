@@ -454,6 +454,19 @@ export interface EventHistoryEntry {
   revisionRefs: EventHistoryRevisionRef[];
   unresolvedRevisionIds: string[];
   summary: EventHistorySummary;
+  /**
+   * Server-resolved Timeline targets for the fact ids this entry's
+   * relationship fields name: the event that recorded each fact. An id
+   * without a target has no resolvable recording event and reads as plain
+   * text; the reader never derives one.
+   */
+  relationTargets?: EventHistoryRelationTarget[];
+}
+
+/** One referenced fact id and the Timeline event that recorded it. */
+export interface EventHistoryRelationTarget {
+  factId: string;
+  eventId: string;
 }
 
 export interface EventHistoryDocument {
@@ -474,6 +487,8 @@ export interface EventHistoryDocument {
     changeIds: string[];
     revisionRefs: EventHistoryRevisionRef[];
     unresolvedRevisionIds: string[];
+    /** Writer actor ids of this page's entries only, sorted and unique. */
+    actorIds: string[];
   };
   diagnostics: string[];
   queryNotices: string[];
@@ -604,8 +619,16 @@ export interface ChangePresentation {
     revision: RevisionRef;
     revisionProposalSummary?: string;
     summarySource: "revision_proposal_summary" | "absent";
-    /** Server-owned finished display string. Absent only from an older server. */
+    /**
+     * Server-owned finished display string for a supplied proposal summary.
+     * Absent when no summary was supplied, and from an older server.
+     */
     label?: string;
+    /**
+     * Server-owned absent-summary state line (#752), present only when
+     * `summarySource` is `absent`. Absent from an older server.
+     */
+    absentSummaryCue?: string;
   }>;
   /** Inspector-only and present exclusively on the Attention lens. */
   attention?: ChangeAttentionPresentation;
@@ -663,6 +686,9 @@ export interface ChangesPage extends ChangePageBase {
   schema: "pointbreak.inspect-changes-page";
   // Version stays 1: the current-Revision presentation `label` (D7) is an
   // additive optional member, so an older server without it still parses.
+  // #752 keeps version 1: `absentSummaryCue` is another additive optional
+  // member, and `label` is now sent only for a supplied summary. An absent
+  // summary keeps the exact Revision id as the headline on every server.
   version: 1;
 }
 
@@ -863,6 +889,11 @@ export interface ChangeRevisionDetail {
     revisionCurrency: string;
     familyState: string;
     availability: string;
+    /**
+     * The Timeline event that recorded this fact, supplied by the server. A
+     * bare reference to this fact navigates there; absent means plain text.
+     */
+    recordingEventId?: string;
     /**
      * Relationship edges the recorded fact carries, both endpoints named by
      * fact id. Absent means the fact records none; the reader never infers one.
@@ -1809,8 +1840,62 @@ function isEventHistoryEntry(value: unknown): value is EventHistoryEntry {
     Array.isArray(value.revisionRefs) &&
     value.revisionRefs.every(isEventHistoryRevisionRef) &&
     isStringArray(value.unresolvedRevisionIds) &&
-    isEventHistorySummary(value.summary, value.eventType)
+    isEventHistorySummary(value.summary, value.eventType) &&
+    (value.relationTargets === undefined ||
+      isEventHistoryRelationTargets(
+        value.relationTargets,
+        eventHistoryRelationFactIds(value as unknown as EventHistoryEntry),
+      ))
   );
+}
+
+/**
+ * The fact ids an entry's relationship fields name. These are the only ids a
+ * server-supplied relation target may resolve.
+ */
+export function eventHistoryRelationFactIds(
+  entry: Pick<EventHistoryEntry, "summary">,
+): string[] {
+  const summary = entry.summary;
+  switch (summary.kind) {
+    case "review_observation_recorded":
+      return [
+        ...(summary.details.supersedesObservationIds ?? []),
+        ...(summary.details.respondsToObservationIds ?? []),
+      ];
+    case "review_assessment_recorded":
+      return [
+        ...(summary.details.replacesAssessmentIds ?? []),
+        ...(summary.details.relatedObservationIds ?? []),
+        ...(summary.details.relatedInputRequestIds ?? []),
+      ];
+    case "input_request_responded":
+      return [summary.details.inputRequestId];
+    default:
+      return [];
+  }
+}
+
+function isEventHistoryRelationTargets(
+  value: unknown,
+  referenced: readonly string[],
+): value is EventHistoryRelationTarget[] {
+  if (!Array.isArray(value)) return false;
+  const named = new Set(referenced);
+  const seen = new Set<string>();
+  return value.every((target) => {
+    if (
+      !isRecord(target) ||
+      !nonEmptyString(target.factId) ||
+      !nonEmptyString(target.eventId) ||
+      !named.has(target.factId) ||
+      seen.has(target.factId)
+    ) {
+      return false;
+    }
+    seen.add(target.factId);
+    return true;
+  });
 }
 
 /** Validate the fully server-owned, paged Change-aware Timeline projection. */
@@ -1851,6 +1936,8 @@ export function decodeEventHistory(value: unknown): EventHistoryDocument {
     !Array.isArray(completion.revisionRefs) ||
     !completion.revisionRefs.every(isEventHistoryRevisionRef) ||
     !isStringArray(completion.unresolvedRevisionIds) ||
+    !isStringArray(completion.actorIds) ||
+    new Set(completion.actorIds).size !== completion.actorIds.length ||
     !isStringArray(document.diagnostics) ||
     !isStringArray(document.queryNotices) ||
     !Array.isArray(document.entries) ||
@@ -2422,6 +2509,11 @@ function isPresentationRevision(value: unknown): boolean {
     // Server-owned display string (D7): optional for an older server, but a
     // non-empty string when present. summarySource validation is unchanged.
     (value.label === undefined || nonEmptyString(value.label)) &&
+    // Server-owned absent-summary cue (#752): only on an absent summary, and a
+    // non-empty string when present.
+    (value.absentSummaryCue === undefined ||
+      (value.summarySource === "absent" &&
+        nonEmptyString(value.absentSummaryCue))) &&
     ((value.summarySource === "revision_proposal_summary" &&
       nonEmptyString(value.revisionProposalSummary)) ||
       (value.summarySource === "absent" &&
@@ -2949,6 +3041,8 @@ function isFactPresentation(
     isOneOf(value.revisionCurrency, REVISION_CURRENCY_VALUES) &&
     isOneOf(value.familyState, FACT_FAMILY_STATE_VALUES) &&
     isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES) &&
+    (value.recordingEventId === undefined ||
+      nonEmptyString(value.recordingEventId)) &&
     (value.relations === undefined ||
       isFactRelations(value.relations, value.factId, value.family))
   );

@@ -76,22 +76,30 @@ impl DerivedHistoryAccess {
             state,
             as_of,
         } = context;
-        let outcome = materialized_supersession(&connection, as_of).and_then(|supersession| {
-            let mut diagnostics = supersession.diagnostics.clone();
-            diagnostics.extend(state_diagnostics(&state)?);
-            Ok(DerivedThreads {
-                projection_stamp: projection_stamp(store_identity, as_of)?,
-                event_count: state.event_count,
-                supersession,
-                diagnostics,
-            })
-        });
-        let route = legacy_terminal(
-            service,
-            as_of,
-            outcome.map(DerivedThreadsRoute::Ready),
-            || DerivedThreadsRoute::Unavailable(catching_up_status()),
-        )?;
+        // Replacement authority is the store-wide Change projection the
+        // generation already publishes, read at the same checkpoint through the
+        // existing reader; `legacy_terminal` re-checks that checkpoint after.
+        let outcome = service
+            .semantic_materialized_change_projection_at(as_of)
+            .map_err(|error| error.to_string())
+            .and_then(|changes| {
+                let LocatorRead::Ready(changes) = changes else {
+                    return Ok(DerivedThreadsRoute::Unavailable(catching_up_status()));
+                };
+                let supersession = materialized_supersession(&connection, as_of)?
+                    .change_aware(&changes.projection);
+                let mut diagnostics = supersession.diagnostics.clone();
+                diagnostics.extend(state_diagnostics(&state)?);
+                Ok(DerivedThreadsRoute::Ready(DerivedThreads {
+                    projection_stamp: projection_stamp(store_identity, as_of)?,
+                    event_count: state.event_count,
+                    supersession,
+                    diagnostics,
+                }))
+            });
+        let route = legacy_terminal(service, as_of, outcome, || {
+            DerivedThreadsRoute::Unavailable(catching_up_status())
+        })?;
         if matches!(route, DerivedThreadsRoute::Ready(_)) {
             record_active_ownership();
         }
@@ -497,9 +505,82 @@ mod tests {
         diagnostics.extend(store_diagnostics);
 
         assert_eq!(derived.supersession, authoritative);
+        // A store without Change claims reads its proposal-borne edges as before.
+        assert_eq!(
+            SupersessionView::replacement_from_events(&events).unwrap(),
+            authoritative
+        );
         assert_eq!(derived.event_count, events.len());
         assert_eq!(derived.diagnostics, diagnostics);
         assert!(!derived.projection_stamp.is_empty());
+    }
+
+    /// Publish a generation over `events` and read threads from it.
+    fn derived_threads_over(events: &[ShoreEvent]) -> DerivedThreads {
+        let root = TempDir::new().expect("create Change fixture root");
+        let store = EventStore::open(root.path());
+        for event in events {
+            assert_eq!(
+                store
+                    .record_event_once(event)
+                    .expect("record fixture event"),
+                EventWriteOutcome::Created
+            );
+        }
+        let lifecycle = DerivedAccessLifecycle::new(
+            DerivedAccessProfile::SqliteWalBodylessV1,
+            root.path(),
+            "store:test",
+        )
+        .expect("create Change fixture lifecycle");
+        lifecycle
+            .rebuild(|_| LifecycleControl::Continue)
+            .expect("publish Change fixture generation");
+        let access = DerivedHistoryAccess::from_mode(DerivedHistoryMode::Active {
+            lifecycle,
+            current: Mutex::new(None),
+            store_identity: "store:test".to_owned(),
+            backend: StoreBackend::Local(root.path().to_path_buf()),
+        });
+        let DerivedThreadsRoute::Ready(derived) = access.threads().expect("read derived threads")
+        else {
+            panic!("published generation should serve derived threads");
+        };
+        derived
+    }
+
+    #[test]
+    fn active_threads_follow_change_scoped_replacement_like_the_strict_route() {
+        use crate::session::projection::test_support::ChangeStoreEvents;
+
+        let mut store = ChangeStoreEvents::default();
+        let a = store.revision("a", "one");
+        let b = store.revision("b", "one");
+        let c = store.revision("c", "two");
+        let x = store.change(&[&a, &b]);
+        store.replace(&x, &b, &a);
+        let y = store.change(&[&c, &a]);
+
+        // Still current in y: A is its own current thread on both lanes.
+        let derived = derived_threads_over(&store.events);
+        let strict = SupersessionView::replacement_from_events(&store.events).unwrap();
+        assert_eq!(derived.supersession, strict);
+        assert!(derived.supersession.heads.contains(&a.revision_id));
+        assert!(!derived.supersession.superseded.contains(&a.revision_id));
+
+        // Replaced in every Change that holds it: superseded on both lanes.
+        store.replace(&y, &c, &a);
+        let derived = derived_threads_over(&store.events);
+        let strict = SupersessionView::replacement_from_events(&store.events).unwrap();
+        assert_eq!(derived.supersession, strict);
+        assert_eq!(
+            derived.supersession.heads_for(&a.revision_id),
+            [b.revision_id.clone(), c.revision_id.clone()]
+                .into_iter()
+                .collect()
+        );
+        assert!(derived.supersession.superseded.contains(&a.revision_id));
+        assert_eq!(derived.diagnostics, strict.diagnostics);
     }
 
     #[test]

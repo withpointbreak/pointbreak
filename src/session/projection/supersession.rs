@@ -86,6 +86,31 @@ pub fn revision_supersession_classification(
     map
 }
 
+/// Classify every captured revision the way `revision list --filter` reads it:
+/// through Change-scoped replacement (ADR-0042), with the same authority rule
+/// as [`SupersessionView::replacement_from_events`].
+///
+/// `state` comes from the replacement view. `competing` comes from the
+/// competition graph attention reads (`change_aware_supersession`): once the
+/// store holds any Change claim it carries no edges, because divergence inside
+/// a Change surfaces through the Change lifecycle and two Changes that each
+/// replace a shared Revision do not compete. A store without Change claims
+/// classifies exactly as [`revision_supersession_classification`] over its
+/// proposal-borne view.
+pub fn revision_replacement_classification(
+    events: &[ShoreEvent],
+) -> Result<BTreeMap<RevisionId, RevisionClassificationFacet>> {
+    let legacy = SupersessionView::from_events(events)?;
+    let changes = crate::session::projection::change::project_changes(events)?;
+    let views = crate::session::workflow::attention::change_aware_supersession(&legacy, &changes);
+    let contested = revision_supersession_classification(&views.competition);
+    let mut classification = revision_supersession_classification(&views.replacement);
+    for (revision, facet) in &mut classification {
+        facet.competing = contested.get(revision).is_some_and(|facet| facet.competing);
+    }
+    Ok(classification)
+}
+
 impl SupersessionView {
     /// Builds the view from synthetic `revision -> supersedes` edges.
     ///
@@ -185,6 +210,66 @@ impl SupersessionView {
             }
         }
         Ok(Self::from_edges(edges))
+    }
+
+    /// Replacement as thread readers see it: the proposal-borne view re-read
+    /// through effective Change relation claims (ADR-0042). Once the store holds
+    /// any Change claim, proposal-borne edges carry no authority and a relation
+    /// supersedes its predecessor only when the predecessor is non-current in
+    /// every Change that holds it; a store without Change claims reads exactly
+    /// as [`Self::from_events`]. See [`Self::change_aware`].
+    pub fn replacement_from_events(events: &[ShoreEvent]) -> Result<Self> {
+        let legacy = Self::from_events(events)?;
+        let changes = crate::session::projection::change::project_changes(events)?;
+        Ok(legacy.change_aware(&changes))
+    }
+
+    /// This proposal-borne view re-read through `changes`, the store-wide
+    /// Change projection (the `change_aware_supersession` authority rule shared
+    /// with attention and the `--revision` writer refusal). The known-Revision
+    /// set is this view's; a relation whose endpoints are not both known here
+    /// contributes nothing, so a scoped caller builds this view over the
+    /// dependency closure of its scope, not the scope alone.
+    pub fn change_aware(
+        &self,
+        changes: &crate::session::projection::change::ChangeProjection,
+    ) -> Self {
+        crate::session::workflow::attention::change_aware_supersession(self, changes).replacement
+    }
+
+    /// The same view narrowed to the threads (components) that contain a
+    /// Revision of `scope`. Only a Change-aware view is narrowed this way: it
+    /// carries no dangling-target or cycle diagnostics, so none has to be split
+    /// across the kept and dropped threads.
+    pub(crate) fn threads_containing(&self, scope: &BTreeSet<RevisionId>) -> Self {
+        let components: Vec<BTreeSet<RevisionId>> = self
+            .components
+            .iter()
+            .filter(|component| !component.is_disjoint(scope))
+            .cloned()
+            .collect();
+        let kept: BTreeSet<&RevisionId> = components.iter().flatten().collect();
+        let keep_set = |set: &BTreeSet<RevisionId>| -> BTreeSet<RevisionId> {
+            set.iter()
+                .filter(|revision| kept.contains(revision))
+                .cloned()
+                .collect()
+        };
+        let keep_map = |map: &BTreeMap<RevisionId, BTreeSet<RevisionId>>| {
+            map.iter()
+                .filter(|(revision, _)| kept.contains(revision))
+                .map(|(revision, targets)| (revision.clone(), targets.clone()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        Self {
+            heads: keep_set(&self.heads),
+            superseded: keep_set(&self.superseded),
+            supersedes: keep_map(&self.supersedes),
+            superseded_by: keep_map(&self.superseded_by),
+            cycle_revisions: keep_set(&self.cycle_revisions),
+            diagnostics: self.diagnostics.clone(),
+            components,
+        }
     }
 
     /// The connected component (thread) containing `revision`, or `None` when the
@@ -620,6 +705,182 @@ mod tests {
             assert_eq!(view.heads, [rev("b"), rev("c")].into_iter().collect());
             assert_eq!(view.superseded, [rev("a")].into_iter().collect());
             assert!(view.diagnostics.is_empty());
+        }
+    }
+
+    mod change_scoped_replacement {
+        use super::*;
+        use crate::session::projection::test_support::ChangeStoreEvents;
+
+        fn ids(revisions: &[&crate::model::RevisionRefV1]) -> BTreeSet<RevisionId> {
+            revisions
+                .iter()
+                .map(|revision| revision.revision_id.clone())
+                .collect()
+        }
+
+        #[test]
+        fn a_change_replaced_revision_reads_as_superseded_in_one_thread() {
+            let mut store = ChangeStoreEvents::default();
+            let a = store.revision("a", "one");
+            let b = store.revision("b", "one");
+            let c = store.revision("c", "two");
+            let change = store.change(&[&a, &b, &c]);
+            store.replace(&change, &b, &a);
+            store.replace(&change, &c, &b);
+
+            // Proposal-borne edges are absent, so the legacy view reads three
+            // unrelated current heads.
+            let legacy = SupersessionView::from_events(&store.events).unwrap();
+            assert_eq!(legacy.heads, ids(&[&a, &b, &c]));
+
+            let view = SupersessionView::replacement_from_events(&store.events).unwrap();
+            assert_eq!(view.superseded, ids(&[&a, &b]));
+            assert_eq!(view.heads, ids(&[&c]));
+            assert_eq!(view.components, vec![ids(&[&a, &b, &c])]);
+            assert_eq!(view.heads_for(&a.revision_id), ids(&[&c]));
+            assert!(view.diagnostics.is_empty());
+        }
+
+        #[test]
+        fn a_revision_still_current_in_another_change_stays_current() {
+            let mut store = ChangeStoreEvents::default();
+            let a = store.revision("a", "one");
+            let b = store.revision("b", "one");
+            let c = store.revision("c", "two");
+            let x = store.change(&[&a, &b]);
+            store.replace(&x, &b, &a);
+            let y = store.change(&[&c, &a]);
+
+            let view = SupersessionView::replacement_from_events(&store.events).unwrap();
+            assert!(!view.superseded.contains(&a.revision_id), "{view:?}");
+            assert_eq!(view.heads, ids(&[&a, &b, &c]));
+            assert_eq!(view.heads_for(&a.revision_id), ids(&[&a]));
+
+            // Once y replaces it too, it is replaced in every Change that holds
+            // it: superseded by both successors, in one thread.
+            store.replace(&y, &c, &a);
+            let view = SupersessionView::replacement_from_events(&store.events).unwrap();
+            assert_eq!(view.superseded, ids(&[&a]));
+            assert_eq!(view.heads_for(&a.revision_id), ids(&[&b, &c]));
+        }
+
+        #[test]
+        fn a_store_without_change_claims_reads_its_proposal_borne_edges() {
+            let mut store = ChangeStoreEvents::default();
+            let a = store.revision("a", "one");
+            let b = store.revision_superseding("b", "one", vec![a.revision_id.clone()]);
+            let _dangling =
+                store.revision_superseding("c", "one", vec![RevisionId::new("rev:sha256:missing")]);
+            let legacy = SupersessionView::from_events(&store.events).unwrap();
+            assert_eq!(
+                SupersessionView::replacement_from_events(&store.events).unwrap(),
+                legacy
+            );
+            assert_eq!(legacy.superseded, ids(&[&a]));
+            assert!(legacy.heads.contains(&b.revision_id));
+            assert_eq!(legacy.diagnostics.len(), 1);
+        }
+
+        #[test]
+        fn a_proposal_borne_edge_carries_no_authority_once_a_change_claim_exists() {
+            let mut store = ChangeStoreEvents::default();
+            let a = store.revision("a", "one");
+            let b = store.revision_superseding("b", "one", vec![a.revision_id.clone()]);
+            let z = store.revision("z", "two");
+            store.change(&[&z]);
+
+            let view = SupersessionView::replacement_from_events(&store.events).unwrap();
+            assert_eq!(view.heads, ids(&[&a, &b, &z]));
+            assert!(view.superseded.is_empty());
+        }
+
+        #[test]
+        fn crossed_change_histories_are_not_reported_as_a_cycle() {
+            // Each Change is acyclic; only their union loops a <-> b.
+            let mut store = ChangeStoreEvents::default();
+            let a = store.revision("a", "one");
+            let b = store.revision("b", "one");
+            let c = store.revision("c", "one");
+            let x = store.change(&[&a, &b, &c]);
+            store.replace(&x, &b, &a);
+            store.replace(&x, &c, &b);
+            let y = store.change(&[&a, &b, &c]);
+            store.replace(&y, &a, &b);
+            store.replace(&y, &c, &a);
+
+            let view = SupersessionView::replacement_from_events(&store.events).unwrap();
+            assert_eq!(view.heads, ids(&[&c]));
+            assert_eq!(view.superseded, ids(&[&a, &b]));
+            assert!(view.cycle_revisions.is_empty());
+            assert!(
+                view.diagnostics
+                    .iter()
+                    .all(|diagnostic| diagnostic.code != SUPERSESSION_CYCLE_CODE),
+                "{:?}",
+                view.diagnostics
+            );
+        }
+
+        #[test]
+        fn classification_reads_change_scoped_replacement() {
+            let mut store = ChangeStoreEvents::default();
+            let a = store.revision("a", "one");
+            let b = store.revision("b", "one");
+            let c = store.revision("c", "two");
+            let x = store.change(&[&a, &b]);
+            store.replace(&x, &b, &a);
+            let y = store.change(&[&c, &a]);
+
+            // Still current in y: nothing is replaced yet.
+            let classes = revision_replacement_classification(&store.events).unwrap();
+            for revision in [&a, &b, &c] {
+                assert_eq!(classes[&revision.revision_id].state, "isolated");
+            }
+
+            // Replaced in every Change that holds it: superseded, with both
+            // successors as heads, and not contested (two Changes each replacing
+            // a shared Revision do not compete).
+            store.replace(&y, &c, &a);
+            let classes = revision_replacement_classification(&store.events).unwrap();
+            assert_eq!(classes[&a.revision_id].state, "superseded");
+            assert_eq!(classes[&b.revision_id].state, "head");
+            assert_eq!(classes[&c.revision_id].state, "head");
+            assert!(classes.values().all(|facet| !facet.competing));
+        }
+
+        #[test]
+        fn classification_without_change_claims_is_unchanged() {
+            // A proposal-borne fork: b and c both supersede a.
+            let mut store = ChangeStoreEvents::default();
+            let a = store.revision("a", "one");
+            store.revision_superseding("b", "one", vec![a.revision_id.clone()]);
+            store.revision_superseding("c", "one", vec![a.revision_id.clone()]);
+            let legacy = revision_supersession_classification(
+                &SupersessionView::from_events(&store.events).unwrap(),
+            );
+            let classes = revision_replacement_classification(&store.events).unwrap();
+            assert_eq!(classes, legacy);
+            assert_eq!(classes[&a.revision_id].state, "superseded");
+            assert!(classes[&a.revision_id].competing);
+        }
+
+        #[test]
+        fn threads_containing_keeps_whole_threads_of_the_scope() {
+            let mut store = ChangeStoreEvents::default();
+            let a = store.revision("a", "one");
+            let b = store.revision("b", "two");
+            let other = store.revision("other", "three");
+            let change = store.change(&[&a, &b]);
+            store.replace(&change, &b, &a);
+            store.change(&[&other]);
+
+            let view = SupersessionView::replacement_from_events(&store.events).unwrap();
+            let narrowed = view.threads_containing(&ids(&[&a]));
+            assert_eq!(narrowed.components, vec![ids(&[&a, &b])]);
+            assert_eq!(narrowed.heads, ids(&[&b]));
+            assert_eq!(narrowed.superseded, ids(&[&a]));
+            assert!(!narrowed.supersedes.contains_key(&other.revision_id));
         }
     }
 }

@@ -96,12 +96,31 @@ describe("Change cards", () => {
           revisionProposalSummary: "First proposal",
           summarySource: "revision_proposal_summary",
         },
-        { revision: second, summarySource: "absent" },
+        {
+          revision: second,
+          summarySource: "absent",
+          absentSummaryCue: "No summary supplied",
+        },
       ]),
     );
 
     expect(card.headline).toBe("Multiple current Revisions need selection");
+    // The card-level cue belongs to a one-current headline only.
+    expect(card.absentSummaryCue).toBeUndefined();
     expect(card.peers).toHaveLength(2);
+    expect(card.peers[0]).toMatchObject({
+      label: "First proposal",
+      visibleIdentity: "revision:aaaaaaaa · sha256:11111111",
+      title: exactRevisionAccessibleIdentity(first),
+    });
+    expect(card.peers[0]?.absentSummaryCue).toBeUndefined();
+    expect(card.peers[1]?.label).toBeUndefined();
+    expect(card.peers[1]).toMatchObject({
+      absentSummaryCue: "No summary supplied",
+      visibleIdentity: "revision:bbbbbbbb · sha256:22222222",
+      title: exactRevisionAccessibleIdentity(second),
+      accessibleName: `Current Revision — ${exactRevisionAccessibleIdentity(second)}; No summary supplied`,
+    });
     expect(card.peers.map((peer) => peer.revision)).toEqual([first, second]);
     expect(card.primaryAction).toEqual({
       kind: "open_change",
@@ -113,6 +132,8 @@ describe("Change cards", () => {
     const card = changeCardPresentation(summary([]), presentation([]));
 
     expect(card.headline).toBe("Current Revision unavailable");
+    expect(card.absentSummaryCue).toBeUndefined();
+    expect(card.peers).toEqual([]);
     expect(card.unavailableReason).toBe(
       "No exact current Revision is available for this Change.",
     );
@@ -122,24 +143,54 @@ describe("Change cards", () => {
     });
   });
 
-  it("leads an absent-summary card with the server label", () => {
+  it("keeps the exact Revision id as the headline and shows the server absent-summary cue", () => {
     const card = changeCardPresentation(
       summary([first]),
       presentation([
         {
           revision: first,
           summarySource: "absent",
-          label: "No summary at capture",
+          absentSummaryCue: "No summary supplied",
         },
       ]),
     );
 
-    expect(card.headline).toBe("No summary at capture");
-    expect(card.peers[0]?.label).toBe("No summary at capture");
-    // The accessible name stays identity-led when no summary was supplied.
+    // #752: the exact id is the headline; the cue is a separate state line.
+    expect(card.headline).toBe("revision:aaaaaaaa · sha256:11111111");
+    expect(card.absentSummaryCue).toBe("No summary supplied");
+    expect(card.peers[0]?.label).toBeUndefined();
+    expect(card.peers[0]?.absentSummaryCue).toBe("No summary supplied");
+    // The accessible name stays identity-led and names the absence.
     expect(card.peers[0]?.accessibleName).toBe(
-      `Current Revision — ${exactRevisionAccessibleIdentity(first)}`,
+      `Current Revision — ${exactRevisionAccessibleIdentity(first)}; No summary supplied`,
     );
+    expect(card.accessibleName).toContain(first.revisionId);
+    expect(card.accessibleName).toContain(first.objectArtifactContentHash);
+    expect(card.accessibleName).not.toContain("Current Revision;");
+  });
+
+  it("never invents a headline for an absent summary from an older server", () => {
+    // A pre-#752 server sent a label for an absent summary and no cue; an
+    // older one sent neither. Neither becomes the headline.
+    for (const entry of [
+      {
+        revision: first,
+        summarySource: "absent" as const,
+        label: "No summary at capture",
+      },
+      { revision: first, summarySource: "absent" as const },
+    ]) {
+      const card = changeCardPresentation(
+        summary([first]),
+        presentation([entry]),
+      );
+      expect(card.headline).toBe("revision:aaaaaaaa · sha256:11111111");
+      expect(card.absentSummaryCue).toBeUndefined();
+      expect(card.peers[0]?.label).toBeUndefined();
+      expect(card.peers[0]?.accessibleName).toBe(
+        `Current Revision — ${exactRevisionAccessibleIdentity(first)}`,
+      );
+    }
   });
 
   it("sources the supplied-case accessible name from the server label, not the raw summary", () => {
@@ -163,13 +214,20 @@ describe("Change cards", () => {
     );
   });
 
-  it("keeps the shipped generic label when an older server sends none", () => {
+  it("leads with a supplied summary when an older server sends no label", () => {
     const card = changeCardPresentation(
       summary([first]),
-      presentation([{ revision: first, summarySource: "absent" }]),
+      presentation([
+        {
+          revision: first,
+          revisionProposalSummary: "Older server summary",
+          summarySource: "revision_proposal_summary",
+        },
+      ]),
     );
 
-    expect(card.headline).toBe("Current Revision");
+    expect(card.headline).toBe("Older server summary");
+    expect(card.absentSummaryCue).toBeUndefined();
   });
 });
 

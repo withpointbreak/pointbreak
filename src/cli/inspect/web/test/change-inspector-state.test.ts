@@ -84,6 +84,7 @@ function history(cursor = authorityCursor(1)): EventHistoryDocument {
       changeIds: [],
       revisionRefs: [],
       unresolvedRevisionIds: [],
+      actorIds: [],
     },
     diagnostics: [],
     queryNotices: [],

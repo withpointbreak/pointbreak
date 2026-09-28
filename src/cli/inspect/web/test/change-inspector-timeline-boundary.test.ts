@@ -34,6 +34,7 @@ function page(
       changeIds: [],
       revisionRefs: [],
       unresolvedRevisionIds: [],
+      actorIds: [],
     },
     diagnostics: [],
     queryNotices: [],

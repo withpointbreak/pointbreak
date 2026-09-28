@@ -2815,6 +2815,37 @@ fn change_replacement_attention_equals_strict_replay_after_every_prefix() {
         on_d.freshness.state,
         crate::session::AttentionFreshnessState::Current
     );
+
+    // Thread documents read the same replacement: `a` is superseded by both
+    // successors in one thread, and `d` stays current because the withdrawn
+    // relation and the proposal-borne edge carry no authority.
+    let supersession = &strict.threads["supersession"];
+    let names = |value: &serde_json::Value| -> Vec<String> {
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item.as_str().unwrap().to_owned())
+            .collect()
+    };
+    let superseded = names(&supersession["superseded"]);
+    assert!(
+        superseded.contains(&revision_id("replaced").as_str().to_owned()),
+        "{supersession}"
+    );
+    assert!(
+        !superseded.contains(&revision_id("withdrawn-predecessor").as_str().to_owned()),
+        "{supersession}"
+    );
+    let thread = supersession["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|component| names(component).contains(&revision_id("replaced").as_str().to_owned()))
+        .expect("thread of the replaced Revision");
+    assert_eq!(names(thread).len(), 3, "{thread}");
+    // The revision family classifies from the same replacement view.
+    assert_eq!(strict.revisions["supersession"], *supersession);
 }
 
 /// Two individually acyclic Change histories over the same Revisions

@@ -232,3 +232,14 @@ reader rollout, one-time migration ceremony, and temporary migrator maintenance.
 - Known-root cutover completes and a separately reviewed cleanup can remove the production migrator.
 - A post-1.0 compatibility promise requires a versioned transition different from this explicit pre-1.0
   minimum-reader break.
+
+## Amendment: A Draft Review Is Emergent, Not a Stored State (2026-09-25)
+
+Owner decision on [#317](https://github.com/withpointbreak/pointbreak/issues/317)
+([decision comment](https://github.com/withpointbreak/pointbreak/issues/317#issuecomment-5841033112)): a
+"draft" review is emergent. It is a review whose Revision is still current, that is, not yet named as a
+predecessor by an active Change-scoped relation claim (D2). It is derived from the claims this ADR already
+defines and stops being current only when such a claim replaces it. Pointbreak adds no explicit `draft` or
+`published` state, no stored flag or pointer, and no publish, verdict, or acknowledge command; the removed
+publish/draft boundary stays removed. Revisit only if a workflow needs to distinguish a deliberately
+unfinished review from a current one in a way these facts cannot express.

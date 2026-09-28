@@ -227,17 +227,21 @@ revision recorded; its subject is always the captured snapshot, never the live w
   colorizes only when stdout is a TTY, honoring `NO_COLOR` and `CLICOLOR_FORCE` (precedence: `--color`
   > `NO_COLOR` > `CLICOLOR_FORCE` > isatty); piped or redirected output stays plain. Color is pure
   presentation — stripping the ANSI reproduces the plain diff exactly.
-- `--theme <theme>` picks the truecolor palette: `auto` (the default) detects the terminal
+- `--theme <theme>` picks the themed palette: `auto` (the default) detects the terminal
   background — light or dark — and selects the matching built-in palette; `light` / `dark` force a
   built-in; any other value names a bundled syntax theme, matched case-insensitively (bat's
   vocabulary, e.g. `"Monokai Extended"`, `"onehalflight"`, `"nord"`). Environment fallbacks: `POINTBREAK_THEME`, then
   bat's `BAT_THEME` (precedence: `--theme` > `POINTBREAK_THEME` > `BAT_THEME` > detection > dark). An
   unknown name from `--theme`/`POINTBREAK_THEME` is an error listing the valid vocabulary; an unknown
   inherited `BAT_THEME` warns on stderr and falls back. The terminal is queried only when colors
-  are on, stdout is a direct truecolor TTY, and the preference is `auto` — piped output never
-  probes and stays deterministic. Themes apply on truecolor terminals (`COLORTERM=truecolor`); the
-  16-color palette always follows the terminal's own theme. Intraline (changed sub-word) emphasis
-  renders as an add/del background tint on truecolor and as an underline on 16-color terminals.
+  are on, stdout is a direct truecolor or 256-color TTY, and the preference is `auto` — piped output
+  never probes and stays deterministic. Themes apply on truecolor terminals
+  (`COLORTERM=truecolor` or `24bit`) and, downsampled to the nearest xterm-256 color, on 256-color
+  terminals (`TERM=*-256color`, when `COLORTERM` does not advertise truecolor). Palette-index
+  themes such as `ansi` and `base16` keep their terminal palette indices on both lanes. Otherwise
+  the 16-color palette follows the terminal's own theme. Intraline (changed sub-word) emphasis
+  renders as an add/del background tint on truecolor and 256-color terminals (hand-picked 256-color
+  tints per light and dark mode, as delta uses) and as an underline on 16-color terminals.
 - `pointbreak diff` is a **filter, not a pager**: it writes plain git-diff to any pipe or redirect and
   colorizes only when writing directly to a terminal, so it composes with the tools you already use —
   `pointbreak diff | less -R` to page, `pointbreak diff | delta` (or another diff renderer) to reformat,
@@ -348,7 +352,9 @@ with `migration_required`, and an admitted but incomplete transition fails with
 `--operation-id`. Retrying the same operation with the same inputs is idempotent; reusing the id with
 different inputs is refused. `create`, `join`, and the membership/relation/link commands expose the
 low-level append-only claim vocabulary. `change capture` is the higher-level workflow for initial,
-replacement, parallel, and multi-predecessor consolidation captures. Every Change mutation participates
+replacement, parallel, and multi-predecessor consolidation captures. Its `--summary <text>` is the
+label shown on Inspector Change cards; when it is omitted, the command prints the same one-line stderr
+notice as `pointbreak capture` and the receipt carries `revision.summary: null`. Every Change mutation participates
 in the same optional signing-key resolution as the review-writing commands.
 
 `migrate-dry-run` is read-only. It inventories one or more legacy roots, reports anomalies and retained
@@ -406,6 +412,15 @@ and explicit follow/park behavior for incoming events. The server owns the filte
 Change-aware attribution. The browser keeps only a bounded page-local window in the DOM and never infers
 one Change or Revision when an event has multiple contexts.
 
+Follow and park are Timeline actions. While an event detail is open, the Timeline follow control stays
+visible and reports the retained monitor state (Following, Parked, or Show N new), but it is not operable:
+the toggle is `aria-disabled` there and acts only on the Timeline route. The detail pane reads the loaded
+history page and never a parked window, so the monitor observes incoming events only on the Timeline
+itself; the count shown with a detail open is the one from the last Timeline observation, not a live
+count. Keeping park and resume on the Timeline keeps follow semantics defined in one place instead of
+adding an interaction between the monitor and exact-event reading. Return to the Timeline to park or
+resume.
+
 The Changes and Attention lenses render Change cards, explicit current-Revision choices,
 relation-claim provenance, exact captured resources, fact origin/currency, association comparisons,
 and separately identified Revision interdiffs. Parallel current Revisions remain distinct from a
@@ -456,6 +471,11 @@ and Attention lenses page `/api/v2/changes` and `/api/v2/attention`. They open a
 member through
 `/api/v2/changes/{changeId}/revisions/{revisionId}?artifactHash={objectArtifactContentHash}`, so a
 Revision selection always carries its Change membership and exact captured-content identity. Each
+page's `presentations[].currentRevisions[]` entries carry `summarySource`; a supplied proposal summary
+also carries `revisionProposalSummary` and the finished `label`, while an absent one carries no `label`
+and the server-owned `absentSummaryCue` ("No summary supplied"). The card then keeps the exact Revision
+id as its headline and shows the cue as a muted state line. Both members are additive, so the page
+version stays 1. Each
 capture remains distinct, including shared-commit siblings; the CLI's default `revision list`
 presentation may still fold those siblings into a grouped row.
 
@@ -507,10 +527,14 @@ likely source flags such as `--include-untracked`, `--staged`, or `--unstaged` w
 explain the empty result. Use `--allow-empty` to intentionally record an empty revision.
 
 `--summary <text>` attaches an optional human-readable discovery label to the immutable capture
-event. It is projected into `revision list`, `history`, the Inspector, and the VS Code extension so
-people and agents can select the intended revision without interpreting opaque IDs. The summary is
-descriptive metadata and does not affect revision or object identity. An omitted
-summary stays absent from the event and read documents for backward compatibility. Because the
+event. It is the label shown on Inspector Change cards, and it is projected into `revision list`,
+`history`, the Inspector, and the VS Code extension so people and agents can select the intended
+revision without interpreting opaque IDs. The summary is descriptive metadata and does not affect
+revision or object identity. An omitted summary stays absent from the event and read documents for
+backward compatibility. The capture still succeeds without one, but it prints a one-line stderr
+notice (`notice: no --summary supplied; Inspector cards and receipts will show only the exact Revision
+id`), the JSON receipt carries `revision.summary: null` explicitly, and the text receipt reads
+`summary: none supplied`. `change capture` behaves the same way. Because the
 capture event is immutable, rerunning the same content with a different summary is a conflicting
 proposal rather than an edit; choose the label on the initial capture.
 
@@ -1763,7 +1787,11 @@ use the summary as the primary selection label.
   (`open|answered|unassessed|stale|follow-up|contested|superseded`), `tag:` (full string or
   first-colon key), `attention:` (`open-request|unassessed|validation-context|follow-up|stale-fact`),
   and `before:`/`after:` (ISO-8601 prefixes over the capture time); bare terms match the revision's
-  human text, and a leading `-` negates a clause. Only a filtered listing builds the per-revision
+  human text, and a leading `-` negates a clause. `is:superseded` and `is:contested` read replacement
+  from the same authority as `attention list`: on a store that holds Change claims a revision is
+  superseded only when every Change that holds it has replaced it, and nothing is contested (divergence
+  inside a Change surfaces through `change show`); proposal-borne `supersedes` decides them only on a
+  store with no Change claims. Only a filtered listing builds the per-revision
   overviews and supersession classification — a plain listing pays no new cost — and a grouped row
   filters on its representative revision. A known-but-unsupported qualifier (`type:`/`check:` on
   this surface) exits non-zero with the diagnostic; the deprecated `status:` alias for
@@ -1802,6 +1830,14 @@ pointbreak revision show [REVISION] [--repo <path>] [--track <track-id>] \
 - If multiple revisions exist, pass the `[REVISION]` positional. It is a **head seed**: a current
   head resolves exactly; a superseded revision resolves its thread's current head; and a thread with
   competing heads is reported as competing rather than auto-picked.
+- `revision show` retains legacy proposal-supersession selection and facets and does not follow Change
+  replacement: the `[REVISION]` head seed, `validationChecks[].supersededByRevisions`, and
+  `stale_by_superseding_revision` read the proposal-borne `supersedes` list only, so a Revision a
+  Change has replaced still resolves to itself. On a store that holds Change authority the document
+  says so with the advisory diagnostic `change_replacement_not_followed`, and the text digest ends
+  with the same pointer. Read Change-scoped replacement with `pointbreak change show <change-id>`
+  (current set) and the exact Revision with `pointbreak change revision <change-id> <revision-id>
+  --artifact-hash <sha256>`; `change revision` shares this projection without the redirect.
 - The output includes revision identity, event-set freshness metadata, filters, summary counts,
   current assessment status, native observations, input requests, assessments, validation checks,
   projection rows, and diagnostics.

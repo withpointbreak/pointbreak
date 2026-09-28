@@ -26,14 +26,22 @@ on a risky change before it merges.
 
 ## Event-driven and scheduled (`project-sync.yml`)
 
-Mirrors the planning labels (`priority:*`, `effort:*`, `status:*`, `research`, `tracking`) into the
-org project board's Priority, Effort, and Workflow fields, and guards those labels: one per
-namespace, changed only by people with write access. An `issues` event syncs that issue; the daily
-run and `workflow_dispatch` reconcile every open issue, so a missed webhook heals within a day.
-Needs the `PROJECT_SYNC_TOKEN` repository secret (a fine-grained token with the organization
-permission Projects: read and write and repository Issues: read); without it the sync step fails
-loudly and the guard still runs. Theme on the board is hand-set and never touched. The label
-vocabulary itself is documented in `CONTRIBUTING.md`.
+A convenience mirror of the planning labels (`priority:*`, `effort:*`, `status:*`, `research`,
+`tracking`) into the org project board's Priority, Effort, and Workflow fields; the labels on the
+issue stay authoritative, and a missed or failed run leaves only the board stale. An `issues` event
+syncs that issue; the daily run and `workflow_dispatch` reconcile every open issue, so a missed
+webhook heals within a day. On a label event the guard re-reads the current labels and label
+history, skips an event the label set has already moved past, reverts planning labels changed by
+people without write access, keeps the `priority:*`/`effort:*` label added last (bot events
+included), and comments when a removal leaves a namespace empty. Conflicting or missing
+`priority:*`/`effort:*` labels are never resolved by picking one: the field is cleared, the item
+leaves Ready, and the run warns. The decisions live in `scripts/project-sync-labels.sh` (fetched
+at the triggering commit, since the workflow uses no checkout) and are tested by
+`scripts/project-sync-labels-selftest.sh` under `just workflow-lint-assertions`. Needs the
+`PROJECT_SYNC_TOKEN` repository secret (a fine-grained token with the organization permission
+Projects: read and write and repository Issues: read); without it the sync step fails loudly and
+the guard still runs. Theme on the board is hand-set and never touched. The label vocabulary
+itself is documented in `CONTRIBUTING.md`.
 
 ## Dispatch-only measurement (`windows-ci-measure.yml`)
 

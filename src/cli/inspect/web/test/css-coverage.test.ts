@@ -71,6 +71,22 @@ function cssRuleBody(css: string, selector: string): string | null {
   return match ? match[1] : null;
 }
 
+test("styles the Timeline group rows through theme tokens only", () => {
+  // Light and dark are both covered because every colour is a token that
+  // tokens.css defines for each theme.
+  const css = readFileSync(APP_CSS_PATH, "utf8");
+  for (const selector of [
+    ".timeline-group",
+    ".timeline-group-member",
+    ".timeline-group-tally,\n.timeline-group-range",
+  ]) {
+    const rule = cssRuleBody(css, selector);
+    expect(rule, selector).not.toBeNull();
+    expect(rule).toMatch(/var\(--/);
+    expect(rule).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(/);
+  }
+});
+
 test("expresses every fact-family accent through theme tokens", () => {
   const css = readFileSync(APP_CSS_PATH, "utf8");
   for (const family of FACT_FAMILIES) {

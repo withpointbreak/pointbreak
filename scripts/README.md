@@ -105,6 +105,13 @@ advancing protected captures or marketing locks.
 
 The report workflow that drives this script is deliberately read-only: `permissions: contents: read, actions: read` only, and it never files or comments on an issue (owner decision — a human reads the step summary). It owns no state beyond the JSON artifact it uploads each run.
 
+## Project board sync
+
+| Script | Preferred entrypoint | Mutates | Expected result | Failure usually means |
+| --- | --- | --- | --- | --- |
+| `project-sync-labels.sh` | `.github/workflows/project-sync.yml`, which fetches it at the triggering commit | Read-only; reads JSON on stdin and prints a decision; the workflow performs every GitHub read and write | `fields` maps an issue's current labels to board values and reports conflicting or missing `priority:`/`effort:` labels without picking one; `guard` decides a label event against the re-read label set and history (stale skip, revert, namespace normalization, empty-namespace comment) | Malformed input JSON, or a decision rule changed without its selftest case |
+| `project-sync-labels-selftest.sh` | `just workflow-lint` | Nothing | Every untriaged, conflicting, zero-label, bot, and stale case classifies as expected | The mirror's decisions regressed or the selftest no longer matches the documented rules in `CONTRIBUTING.md` |
+
 ## Maintainer utilities
 
 | Script | Preferred entrypoint | Mutates | Expected result | Failure usually means |
