@@ -150,6 +150,46 @@ export function timelineEventRoute(
   return { kind: "event", eventId, historyQuery: context, query: {} };
 }
 
+/**
+ * Open the Timeline at the event that recorded a referenced fact. The event id
+ * is always server-supplied (an entry's `relationTargets` or a fact
+ * presentation's `recordingEventId`); this never derives one. Set filters are
+ * cleared so the event locator always matches, and the page is anchored on
+ * the event rather than reset; only the reader's order and page size carry.
+ */
+export function recordingEventRoute(
+  eventId: string,
+  from?: ChangeInspectorRoute,
+): Extract<ChangeInspectorRoute, { kind: "event" }> {
+  const current =
+    from?.kind === "timeline" || from?.kind === "event"
+      ? from.historyQuery
+      : {};
+  return {
+    kind: "event",
+    eventId,
+    historyQuery: {
+      ...(current.limit !== undefined ? { limit: current.limit } : {}),
+      ...(current.order !== undefined ? { order: current.order } : {}),
+    },
+    query: {},
+  };
+}
+
+/**
+ * The explicit activation map for a bare reference id: a fact id routes only
+ * to the recording event the server supplied for it in the current response.
+ * Every other id, and a fact id without a supplied target, has no route.
+ */
+export function referenceTargetRoute(
+  referenceId: string,
+  targets: ReadonlyMap<string, string>,
+  from?: ChangeInspectorRoute,
+): Extract<ChangeInspectorRoute, { kind: "event" }> | null {
+  const eventId = targets.get(referenceId);
+  return eventId === undefined ? null : recordingEventRoute(eventId, from);
+}
+
 /** Build a fresh Timeline set scope without carrying card or page state. */
 export function showChangeInTimelineRoute(
   changeId: string,

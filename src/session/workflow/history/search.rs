@@ -124,8 +124,17 @@ pub fn event_history_search_record(entry: &EventHistoryEntryV1) -> SearchRecord 
         RANGE_ANCHOR_FIELD.to_owned(),
         normalize_instant_to_iso_millis(&entry.occurred_at).unwrap_or_default(),
     );
+    // Relation targets are navigation metadata resolved from other events, not
+    // this event's recorded content, so free text never matches through them.
+    let text = if entry.relation_targets.is_empty() {
+        serde_json::to_string(entry)
+    } else {
+        let mut recorded = entry.clone();
+        recorded.relation_targets.clear();
+        serde_json::to_string(&recorded)
+    };
     SearchRecord {
-        text: serde_json::to_string(entry)
+        text: text
             .expect("typed Timeline entry must serialize")
             .to_lowercase(),
         fields,

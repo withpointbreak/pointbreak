@@ -34,6 +34,12 @@
       "reason": "Owns the full-frame Change-aware annotated diff. It consumes only an already validated contextual exact-Revision document, adapts its exact fact presentations to the model-neutral diff renderer, and keeps file/fact/search deep links as route intent. It imports neither the legacy aggregate store nor the quarantined diff controller."
     },
     {
+      "path": "change-inspector-references.ts",
+      "classification": "adapted",
+      "activeImport": true,
+      "reason": "Gives reference chips inside one rendered body an activation path from the server-supplied fact-to-recording-event targets of the response they came from. Each resolved chip becomes a native button with its own listener; every other chip loses its clickable affordance. It registers no document-level delegate and never derives a target."
+    },
+    {
       "path": "change-inspector-event-presentation.ts",
       "classification": "model-neutral-retained",
       "activeImport": true,

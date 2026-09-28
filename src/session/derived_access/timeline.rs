@@ -14,10 +14,11 @@ use rusqlite::types::Value;
 use crate::bench_support::longitudinal::{
     reach_timeline_carrier_locators_selected_v1, record_timeline_correlation_support_carriers,
     record_timeline_entries_emitted, record_timeline_exhaustive_candidates,
-    record_timeline_removal_support_carriers, record_timeline_revision_candidate_carriers,
-    record_timeline_selected_carriers, record_timeline_signature_support_carriers,
-    record_timeline_sqlite_candidates, record_timeline_sqlite_facet_rows,
-    record_timeline_sqlite_window_rows, record_timeline_trust_support_carriers,
+    record_timeline_relation_target_rows, record_timeline_removal_support_carriers,
+    record_timeline_revision_candidate_carriers, record_timeline_selected_carriers,
+    record_timeline_signature_support_carriers, record_timeline_sqlite_candidates,
+    record_timeline_sqlite_facet_rows, record_timeline_sqlite_window_rows,
+    record_timeline_trust_support_carriers,
 };
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::documents::{
@@ -34,12 +35,13 @@ use crate::session::derived_access::locator::LocatorRead;
 use crate::session::derived_access::service::DerivedAccessService;
 use crate::session::derived_access::sqlite::{
     HydratedLocatorRow, ProductHistoryFact, ProposalCarrierLocator,
+    timeline_relation_representative,
 };
 use crate::session::derived_access::support::{SupportEventPlan, support_event_plan};
 use crate::session::event::{EventType, ShoreEvent};
 use crate::session::projection::event_history::{
-    EventHistoryEntryDraftV1, bind_selected_event_history_trust,
-    project_selected_event_history_without_trust,
+    EventHistoryEntryDraftV1, EventHistoryRelationRecordV1, attach_event_history_relation_targets,
+    bind_selected_event_history_trust, project_selected_event_history_without_trust,
 };
 use crate::session::workflow::{
     MatchKind, QueryClause, QueryDiagnosticCode, QuerySurface, event_history_search_record,
@@ -2160,6 +2162,40 @@ pub(super) fn prepare_timeline_page(
     }
 }
 
+/// Resolve each selected entry's relationship ids to their recording events
+/// with the same rule as the strict Timeline projection. Each distinct
+/// referenced fact costs one keyed probe of the representative table that
+/// reads at most one row, so the work is bounded by the ids the page names and
+/// never by how many facts a referenced Revision carries.
+fn attach_derived_relation_targets(
+    connection: &rusqlite::Connection,
+    as_of: TruthCursor,
+    entries: &mut [EventHistoryEntryV1],
+) -> Result<(), TimelinePageError> {
+    attach_event_history_relation_targets(entries, |family, fact_id| {
+        let row =
+            timeline_relation_representative(connection, family.semantic_family(), fact_id, as_of)
+                .map_err(|error| TimelinePageError::from(error.to_string()))?;
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        record_timeline_relation_target_rows(usize::from(row.is_some()));
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        if row.event_type != family.recording_event_type().as_str() {
+            return Err(TimelinePageError::from(format!(
+                "relation representative for {fact_id} is not a recording event"
+            )));
+        }
+        Ok(Some(EventHistoryRelationRecordV1 {
+            event_id: EventId::new(row.event_id),
+            timeline_revision_id: match (row.timeline_member, row.revision_id) {
+                (true, Some(revision_id)) => Some(RevisionId::new(revision_id)),
+                _ => None,
+            },
+        }))
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_bodyless_page(
     service: &DerivedAccessService,
@@ -2203,9 +2239,10 @@ fn prepare_bodyless_page(
     validate_selected_relations(&carriers, &drafts)?;
     #[cfg(any(test, feature = "longitudinal-counting"))]
     record_timeline_trust_support_carriers(drafts.len());
-    let entries =
+    let mut entries =
         bind_selected_event_history_trust(drafts, trust_set).map_err(|error| error.to_string())?;
     hook(TimelineReadBoundary::TrustBindingComplete);
+    attach_derived_relation_targets(connection, as_of, &mut entries)?;
     #[cfg(any(test, feature = "longitudinal-counting"))]
     record_timeline_entries_emitted(entries.len());
     let document = EventHistoryDocumentV1 {
@@ -2323,7 +2360,8 @@ fn prepare_exhaustive_page(
     let (offset, match_index) = exhaustive_offset(&selected, request)?;
     let end = offset.saturating_add(request.limit()).min(match_count);
     let adjacent = exhaustive_adjacent(&selected, request.limit(), offset, end)?;
-    let entries = selected[offset..end].to_vec();
+    let mut entries = selected[offset..end].to_vec();
+    attach_derived_relation_targets(connection, as_of, &mut entries)?;
     #[cfg(any(test, feature = "longitudinal-counting"))]
     record_timeline_entries_emitted(entries.len());
     let document = EventHistoryDocumentV1 {

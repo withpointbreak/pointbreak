@@ -18,6 +18,10 @@ import {
 import type { InspectorIdentity } from "./change-inspector-identity";
 import { createLensHeading } from "./change-inspector-lens";
 import type { ChangeInspectorReading } from "./change-inspector-reading";
+import {
+  bindReferenceChips,
+  recordingEventTargets,
+} from "./change-inspector-references";
 import type { ChangeInspectorRoute } from "./change-inspector-router";
 import {
   eventAnnotatedDiffRoute,
@@ -26,6 +30,7 @@ import {
   parseChangeInspectorRoute,
   queryForExactNavigation,
   queryForLens,
+  recordingEventRoute,
   showChangeInTimelineRoute,
   showRevisionInTimelineRoute,
 } from "./change-inspector-router";
@@ -864,11 +869,79 @@ function appendDefinition(
   return definition;
 }
 
+/**
+ * One activation to the Timeline event that recorded a referenced fact. The
+ * event id is server-supplied; the control deliberately avoids `data-fact-id`,
+ * which the exact focus resolver matches.
+ */
+function recordingEventControl(
+  factId: string,
+  eventId: string,
+  activate: (eventId: string) => void,
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ghost mono";
+  button.textContent = shortRef(factId);
+  button.title = factId;
+  button.setAttribute(
+    "aria-label",
+    `Open the Timeline event that recorded ${factId}`,
+  );
+  button.dataset.relationFactId = factId;
+  button.addEventListener("click", () => activate(eventId));
+  return button;
+}
+
+/** A referenced fact id with no resolvable target: plain text, never a chip. */
+function plainFactReference(factId: string): HTMLElement {
+  const named = document.createElement("code");
+  named.textContent = shortRef(factId);
+  named.title = factId;
+  return named;
+}
+
+/** The recording events an Event History entry's relation targets name. */
+function relationTargetMap(event: EventHistoryEntry): Map<string, string> {
+  return new Map(
+    (event.relationTargets ?? []).map((target) => [
+      target.factId,
+      target.eventId,
+    ]),
+  );
+}
+
+function appendRelationDefinition(
+  list: HTMLDListElement,
+  label: string,
+  factIds: readonly string[],
+  targets: ReadonlyMap<string, string>,
+  activate: (eventId: string) => void,
+): void {
+  const term = document.createElement("dt");
+  term.textContent = label;
+  const definition = document.createElement("dd");
+  factIds.forEach((factId, index) => {
+    if (index > 0) definition.append(document.createTextNode("; "));
+    const eventId = targets.get(factId);
+    definition.append(
+      eventId === undefined
+        ? plainFactReference(factId)
+        : recordingEventControl(factId, eventId, activate),
+    );
+  });
+  list.append(term, definition);
+}
+
 function renderEventDetail(
   event: EventHistoryEntry,
+  route: Extract<ChangeInspectorRoute, { kind: "event" }>,
   actions: ChangeInspectorRenderActions,
 ): Node[] {
   const presentation = presentEvent(event);
+  const targets = relationTargetMap(event);
+  const openRecordingEvent = (eventId: string): void =>
+    actions.navigate(recordingEventRoute(eventId, route));
   const heading = detailHeading(presentation.title);
   const identity = detailLine(event.eventId, "mono");
   identity.title = event.eventId;
@@ -885,12 +958,23 @@ function renderEventDetail(
       presentation.body,
       presentation.bodyContentType ?? "text/plain",
     );
+    bindReferenceChips(body, targets, route, actions.navigate);
     summary.append(body);
   }
   const summaryFacts = document.createElement("dl");
   summaryFacts.className = "kv";
   for (const item of presentation.fields) {
-    appendDefinition(summaryFacts, item.label, item.value);
+    if (item.factIds) {
+      appendRelationDefinition(
+        summaryFacts,
+        item.label,
+        item.factIds,
+        targets,
+        openRecordingEvent,
+      );
+    } else {
+      appendDefinition(summaryFacts, item.label, item.value);
+    }
   }
   if (presentation.fields.length) summary.append(summaryFacts);
 
@@ -1161,6 +1245,7 @@ function exactRevisionIdentity(
 function renderedFactBody(
   content: FactContent,
   contentType: "text/plain" | "text/markdown",
+  bindReferences: (body: HTMLElement) => void,
 ): HTMLElement {
   const body = document.createElement("div");
   body.className = "anno-body";
@@ -1173,7 +1258,10 @@ function renderedFactBody(
   // Fact prose is supplied by the server after exact contextual validation.
   // This uses the retained pure Markdown renderer, not the retired Inspector
   // composition, so exact contextual selection remains the only reader state.
-  if (text) body.innerHTML = renderBodyContent(text, contentType);
+  if (text) {
+    body.innerHTML = renderBodyContent(text, contentType);
+    bindReferences(body);
+  }
   return body;
 }
 
@@ -1184,6 +1272,7 @@ function renderedFactBody(
  */
 function renderedInputRequestResponses(
   content: FactContent,
+  bindReferences: (body: HTMLElement) => void,
 ): HTMLElement | null {
   if (content.kind !== "input_request") return null;
   const responses = content.responses ?? [];
@@ -1212,6 +1301,7 @@ function renderedInputRequestResponses(
         response.reason,
         response.contentType,
       );
+      bindReferences(reason);
       entry.append(reason);
     }
     nest.append(entry);
@@ -1347,6 +1437,11 @@ function renderFacts(
     groups.set(fact.family, family);
   }
   const presentFactIds = documentFactIds(reading.document.factPresentations);
+  const recordingEvents = recordingEventTargets(
+    reading.document.factPresentations,
+  );
+  const bindReferences = (body: HTMLElement): void =>
+    bindReferenceChips(body, recordingEvents, route, actions.navigate);
   const focusFact = (factId: string): void =>
     actions.navigate({
       kind: route.kind,
@@ -1436,12 +1531,19 @@ function renderFacts(
         );
       }
       if (content) {
-        const responses = renderedInputRequestResponses(content.content);
+        const responses = renderedInputRequestResponses(
+          content.content,
+          bindReferences,
+        );
         card.append(
           detailLine(
             `body: ${content.bodyContentState.replaceAll("_", " ")} · ${content.contentType}`,
           ),
-          renderedFactBody(content.content, content.contentType),
+          renderedFactBody(
+            content.content,
+            content.contentType,
+            bindReferences,
+          ),
           ...(responses ? [responses] : []),
         );
       }
@@ -2161,7 +2263,7 @@ function renderDetail(
     );
     replaceDetailWith(
       ...(event
-        ? renderEventDetail(event, actions)
+        ? renderEventDetail(event, route, actions)
         : [
             detailHeading("Event"),
             message(

@@ -1277,9 +1277,46 @@
     if (!isRecord(value) || !isEventHistoryEventType(value.eventType)) {
       return false;
     }
-    return nonEmptyString2(value.eventId) && nonEmptyString2(value.occurredAt) && nonEmptyString2(value.payloadHash) && nonEmptyString2(value.journalId) && optionalString(value.trackId) && isEventHistoryWriter(value.writer) && (value.verificationStatus === "valid" || value.verificationStatus === "invalid" || value.verificationStatus === "untrusted_key" || value.verificationStatus === "unsigned") && (value.assertionMode === "advisory" || value.assertionMode === "operative") && optionalString(value.signer) && (value.sourceRef === void 0 || isRecord(value.sourceRef) && nonEmptyString2(value.sourceRef.sourceSystem) && nonEmptyString2(value.sourceRef.sourceId)) && (value.ingest === void 0 || isRecord(value.ingest) && (value.ingest.via === "ingest-events" || value.ingest.via === "bundle-apply") && nonEmptyString2(value.ingest.receivedAt)) && isEventHistorySubject(value.subject) && isStringArray(value.changeIds) && Array.isArray(value.revisionRefs) && value.revisionRefs.every(isEventHistoryRevisionRef) && isStringArray(value.unresolvedRevisionIds) && isEventHistorySummary(value.summary, value.eventType);
+    return nonEmptyString2(value.eventId) && nonEmptyString2(value.occurredAt) && nonEmptyString2(value.payloadHash) && nonEmptyString2(value.journalId) && optionalString(value.trackId) && isEventHistoryWriter(value.writer) && (value.verificationStatus === "valid" || value.verificationStatus === "invalid" || value.verificationStatus === "untrusted_key" || value.verificationStatus === "unsigned") && (value.assertionMode === "advisory" || value.assertionMode === "operative") && optionalString(value.signer) && (value.sourceRef === void 0 || isRecord(value.sourceRef) && nonEmptyString2(value.sourceRef.sourceSystem) && nonEmptyString2(value.sourceRef.sourceId)) && (value.ingest === void 0 || isRecord(value.ingest) && (value.ingest.via === "ingest-events" || value.ingest.via === "bundle-apply") && nonEmptyString2(value.ingest.receivedAt)) && isEventHistorySubject(value.subject) && isStringArray(value.changeIds) && Array.isArray(value.revisionRefs) && value.revisionRefs.every(isEventHistoryRevisionRef) && isStringArray(value.unresolvedRevisionIds) && isEventHistorySummary(value.summary, value.eventType) && (value.relationTargets === void 0 || isEventHistoryRelationTargets(
+      value.relationTargets,
+      eventHistoryRelationFactIds(value)
+    ));
   }
   __name(isEventHistoryEntry, "isEventHistoryEntry");
+  function eventHistoryRelationFactIds(entry) {
+    const summary = entry.summary;
+    switch (summary.kind) {
+      case "review_observation_recorded":
+        return [
+          ...summary.details.supersedesObservationIds ?? [],
+          ...summary.details.respondsToObservationIds ?? []
+        ];
+      case "review_assessment_recorded":
+        return [
+          ...summary.details.replacesAssessmentIds ?? [],
+          ...summary.details.relatedObservationIds ?? [],
+          ...summary.details.relatedInputRequestIds ?? []
+        ];
+      case "input_request_responded":
+        return [summary.details.inputRequestId];
+      default:
+        return [];
+    }
+  }
+  __name(eventHistoryRelationFactIds, "eventHistoryRelationFactIds");
+  function isEventHistoryRelationTargets(value, referenced) {
+    if (!Array.isArray(value)) return false;
+    const named = new Set(referenced);
+    const seen = /* @__PURE__ */ new Set();
+    return value.every((target) => {
+      if (!isRecord(target) || !nonEmptyString2(target.factId) || !nonEmptyString2(target.eventId) || !named.has(target.factId) || seen.has(target.factId)) {
+        return false;
+      }
+      seen.add(target.factId);
+      return true;
+    });
+  }
+  __name(isEventHistoryRelationTargets, "isEventHistoryRelationTargets");
   function decodeEventHistory(value) {
     const document2 = object(value, "event history");
     const completion = document2.completion;
@@ -1815,7 +1852,7 @@
   }
   __name(isRelationClaim, "isRelationClaim");
   function isFactPresentation(value) {
-    return isRecord(value) && nonEmptyString2(value.factId) && nonEmptyString2(value.family) && isRevisionRef(value.originRevision) && (value.target === void 0 || isFactTarget(value.target)) && (value.contextChangeId === void 0 || nonEmptyString2(value.contextChangeId)) && (value.presentedInRevision === void 0 || isRevisionRef(value.presentedInRevision)) && (value.portRelation === void 0 || value.portRelation === "context_only" || value.portRelation === "reanchored_as" || value.portRelation === "carried_open_as" || value.portRelation === "resolved_by") && nonEmptyString2(value.actorId) && (value.trackId === void 0 || nonEmptyString2(value.trackId)) && isOneOf(value.revisionCurrency, REVISION_CURRENCY_VALUES) && isOneOf(value.familyState, FACT_FAMILY_STATE_VALUES) && isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES);
+    return isRecord(value) && nonEmptyString2(value.factId) && nonEmptyString2(value.family) && isRevisionRef(value.originRevision) && (value.target === void 0 || isFactTarget(value.target)) && (value.contextChangeId === void 0 || nonEmptyString2(value.contextChangeId)) && (value.presentedInRevision === void 0 || isRevisionRef(value.presentedInRevision)) && (value.portRelation === void 0 || value.portRelation === "context_only" || value.portRelation === "reanchored_as" || value.portRelation === "carried_open_as" || value.portRelation === "resolved_by") && nonEmptyString2(value.actorId) && (value.trackId === void 0 || nonEmptyString2(value.trackId)) && isOneOf(value.revisionCurrency, REVISION_CURRENCY_VALUES) && isOneOf(value.familyState, FACT_FAMILY_STATE_VALUES) && isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES) && (value.recordingEventId === void 0 || nonEmptyString2(value.recordingEventId));
   }
   __name(isFactPresentation, "isFactPresentation");
   function isFactTarget(value) {
@@ -2143,6 +2180,24 @@
     return { kind: "event", eventId, historyQuery: context, query: {} };
   }
   __name(timelineEventRoute, "timelineEventRoute");
+  function recordingEventRoute(eventId, from) {
+    const current = from?.kind === "timeline" || from?.kind === "event" ? from.historyQuery : {};
+    return {
+      kind: "event",
+      eventId,
+      historyQuery: {
+        ...current.limit !== void 0 ? { limit: current.limit } : {},
+        ...current.order !== void 0 ? { order: current.order } : {}
+      },
+      query: {}
+    };
+  }
+  __name(recordingEventRoute, "recordingEventRoute");
+  function referenceTargetRoute(referenceId, targets, from) {
+    const eventId = targets.get(referenceId);
+    return eventId === void 0 ? null : recordingEventRoute(eventId, from);
+  }
+  __name(referenceTargetRoute, "referenceTargetRoute");
   function showChangeInTimelineRoute(changeId) {
     return { kind: "timeline", historyQuery: { change: changeId } };
   }
@@ -2614,6 +2669,10 @@
     return value ? { label: label2, value } : null;
   }
   __name(field, "field");
+  function relationField(label2, factIds) {
+    return factIds?.length ? { label: label2, value: factIds.join("; "), factIds: [...factIds] } : null;
+  }
+  __name(relationField, "relationField");
   function fields(...values) {
     return values.filter(
       (value) => value !== null
@@ -2660,8 +2719,8 @@
             field("target", eventTargetLabel(detail.target)),
             field("confidence", detail.confidence),
             field("tags", detail.tags?.join(", ")),
-            field("supersedes", detail.supersedesObservationIds?.join("; ")),
-            field("responds to", detail.respondsToObservationIds?.join("; "))
+            relationField("supersedes", detail.supersedesObservationIds),
+            relationField("responds to", detail.respondsToObservationIds)
           )
         };
       }
@@ -2675,9 +2734,9 @@
           fields: fields(
             field("assessment", detail.assessmentId),
             field("target", eventTargetLabel(detail.target)),
-            field("replaces", detail.replacesAssessmentIds?.join("; ")),
-            field("observations", detail.relatedObservationIds?.join("; ")),
-            field("input requests", detail.relatedInputRequestIds?.join("; "))
+            relationField("replaces", detail.replacesAssessmentIds),
+            relationField("observations", detail.relatedObservationIds),
+            relationField("input requests", detail.relatedInputRequestIds)
           )
         };
       }
@@ -2704,7 +2763,7 @@
           bodyContentType: detail.reasonContentType,
           fields: fields(
             field("response", detail.inputRequestResponseId),
-            field("input request", detail.inputRequestId),
+            relationField("input request", [detail.inputRequestId]),
             field("Revision", detail.revisionId)
           )
         };
@@ -6537,6 +6596,49 @@
   }
   __name(changeCardPresentation, "changeCardPresentation");
 
+  // src/change-inspector-references.ts
+  function recordingEventTargets(facts) {
+    const targets = /* @__PURE__ */ new Map();
+    for (const fact2 of facts) {
+      if (fact2.recordingEventId !== void 0)
+        targets.set(fact2.factId, fact2.recordingEventId);
+    }
+    return targets;
+  }
+  __name(recordingEventTargets, "recordingEventTargets");
+  function bindReferenceChips(container, targets, from, navigate) {
+    for (const chip of container.querySelectorAll(
+      "[data-ref-kind]"
+    )) {
+      const referenceId = chip.dataset.refId ?? "";
+      const route = referenceTargetRoute(referenceId, targets, from);
+      if (route === null) {
+        chip.removeAttribute("role");
+        chip.removeAttribute("tabindex");
+        chip.removeAttribute("data-ref-kind");
+        continue;
+      }
+      const button2 = document.createElement("button");
+      button2.type = "button";
+      button2.className = chip.className;
+      button2.dataset.refKind = chip.dataset.refKind;
+      button2.dataset.refId = referenceId;
+      button2.dataset.relationFactId = referenceId;
+      button2.textContent = chip.textContent;
+      button2.title = referenceId;
+      button2.setAttribute(
+        "aria-label",
+        `Open the Timeline event that recorded ${referenceId}`
+      );
+      button2.addEventListener("click", (event) => {
+        event.stopPropagation();
+        navigate(route);
+      });
+      chip.replaceWith(button2);
+    }
+  }
+  __name(bindReferenceChips, "bindReferenceChips");
+
   // src/markdown.ts
   function renderBodyContent(text, contentType) {
     if (!text) return "";
@@ -7491,11 +7593,12 @@
     return exactRoute(route, Object.keys(next).length ? next : void 0);
   }
   __name(updateFocus, "updateFocus");
-  function expandFile(section, file, ctx) {
+  function expandFile(section, file, ctx, bindReferences) {
     const body = section.querySelector("[data-dfile-body]");
     if (!body) return;
     if (body.dataset.rendered !== "1") {
       body.innerHTML = renderDiffFileBody(file, ctx.anchored);
+      bindReferences(body);
       body.dataset.rendered = "1";
     }
     section.dataset.expanded = "true";
@@ -7509,26 +7612,27 @@
     return matching.find((element) => element.classList.contains("anno")) ?? matching[0] ?? null;
   }
   __name(factTarget, "factTarget");
-  function focusFile(body, ctx, filePath) {
+  function focusFile(body, ctx, filePath, bindReferences) {
     const index = ctx.files.findIndex(
       (file) => file.new_path === filePath || file.old_path === filePath
     );
     if (index < 0) return;
     const section = body.querySelector(`[data-dfile="${index}"]`);
     if (!section) return;
-    expandFile(section, ctx.files[index], ctx);
+    expandFile(section, ctx.files[index], ctx, bindReferences);
     section.dataset.exactFocus = "true";
     section.scrollIntoView({ block: "start", behavior: "auto" });
     section.focus({ preventScroll: true });
   }
   __name(focusFile, "focusFile");
-  function focusFact(body, ctx, factId) {
+  function focusFact(body, ctx, factId, bindReferences) {
     const fact2 = [
       ...ctx.anchored,
       ...ctx.decisionContext,
       ...ctx.unanchored
     ].find((item) => item.id === factId);
-    if (fact2?.target?.filePath) focusFile(body, ctx, fact2.target.filePath);
+    if (fact2?.target?.filePath)
+      focusFile(body, ctx, fact2.target.filePath, bindReferences);
     const target = factTarget(body, factId);
     if (!target) return;
     target.dataset.exactFocus = "true";
@@ -7605,7 +7709,7 @@
     }
   }
   __name(renderNavigator, "renderNavigator");
-  function bindDiffBody(body, route, actions2, ctx) {
+  function bindDiffBody(body, route, actions2, ctx, bindReferences) {
     ctx.files.forEach((file, index) => {
       const section = body.querySelector(`[data-dfile="${index}"]`);
       if (!section) return;
@@ -7619,7 +7723,7 @@
           section.dataset.expanded = "false";
           section.querySelector(".dfile-head")?.setAttribute("aria-expanded", "false");
         } else {
-          expandFile(section, file, ctx);
+          expandFile(section, file, ctx, bindReferences);
         }
       }, "toggle");
       const header = section.querySelector(".dfile-head");
@@ -7636,7 +7740,7 @@
         const section = renderAll.closest(".dfile");
         const index = Number(section?.dataset.dfile);
         if (section && Number.isInteger(index))
-          expandFile(section, ctx.files[index], ctx);
+          expandFile(section, ctx.files[index], ctx, bindReferences);
         return;
       }
       const noted = target?.closest(".drow-noted[data-anno]");
@@ -7714,12 +7818,16 @@
       artifact,
       annotationsForExactRevision(detail)
     );
+    const recordingEvents = recordingEventTargets(detail.factPresentations);
+    const bindReferences = /* @__PURE__ */ __name((element) => bindReferenceChips(element, recordingEvents, route, actions2.navigate), "bindReferences");
     body.innerHTML = rendered.html;
-    bindDiffBody(body, route, actions2, rendered.ctx);
+    bindReferences(body);
+    bindDiffBody(body, route, actions2, rendered.ctx, bindReferences);
     renderNavigator(nav, route, actions2, rendered.ctx);
     if (route.focus?.filePath)
-      focusFile(body, rendered.ctx, route.focus.filePath);
-    if (route.focus?.factId) focusFact(body, rendered.ctx, route.focus.factId);
+      focusFile(body, rendered.ctx, route.focus.filePath, bindReferences);
+    if (route.focus?.factId)
+      focusFact(body, rendered.ctx, route.focus.factId, bindReferences);
     return true;
   }
   __name(renderChangeInspectorDiffPage, "renderChangeInspectorDiffPage");
@@ -8956,8 +9064,55 @@
     return definition;
   }
   __name(appendDefinition, "appendDefinition");
-  function renderEventDetail(event, actions2) {
+  function recordingEventControl(factId, eventId, activate) {
+    const button2 = document.createElement("button");
+    button2.type = "button";
+    button2.className = "ghost mono";
+    button2.textContent = shortRef(factId);
+    button2.title = factId;
+    button2.setAttribute(
+      "aria-label",
+      `Open the Timeline event that recorded ${factId}`
+    );
+    button2.dataset.relationFactId = factId;
+    button2.addEventListener("click", () => activate(eventId));
+    return button2;
+  }
+  __name(recordingEventControl, "recordingEventControl");
+  function plainFactReference(factId) {
+    const named = document.createElement("code");
+    named.textContent = shortRef(factId);
+    named.title = factId;
+    return named;
+  }
+  __name(plainFactReference, "plainFactReference");
+  function relationTargetMap(event) {
+    return new Map(
+      (event.relationTargets ?? []).map((target) => [
+        target.factId,
+        target.eventId
+      ])
+    );
+  }
+  __name(relationTargetMap, "relationTargetMap");
+  function appendRelationDefinition(list, label2, factIds, targets, activate) {
+    const term = document.createElement("dt");
+    term.textContent = label2;
+    const definition = document.createElement("dd");
+    factIds.forEach((factId, index) => {
+      if (index > 0) definition.append(document.createTextNode("; "));
+      const eventId = targets.get(factId);
+      definition.append(
+        eventId === void 0 ? plainFactReference(factId) : recordingEventControl(factId, eventId, activate)
+      );
+    });
+    list.append(term, definition);
+  }
+  __name(appendRelationDefinition, "appendRelationDefinition");
+  function renderEventDetail(event, route, actions2) {
     const presentation = presentEvent(event);
+    const targets = relationTargetMap(event);
+    const openRecordingEvent = /* @__PURE__ */ __name((eventId) => actions2.navigate(recordingEventRoute(eventId, route)), "openRecordingEvent");
     const heading = detailHeading(presentation.title);
     const identity = detailLine(event.eventId, "mono");
     identity.title = event.eventId;
@@ -8972,12 +9127,23 @@
         presentation.body,
         presentation.bodyContentType ?? "text/plain"
       );
+      bindReferenceChips(body, targets, route, actions2.navigate);
       summary.append(body);
     }
     const summaryFacts = document.createElement("dl");
     summaryFacts.className = "kv";
     for (const item of presentation.fields) {
-      appendDefinition(summaryFacts, item.label, item.value);
+      if (item.factIds) {
+        appendRelationDefinition(
+          summaryFacts,
+          item.label,
+          item.factIds,
+          targets,
+          openRecordingEvent
+        );
+      } else {
+        appendDefinition(summaryFacts, item.label, item.value);
+      }
     }
     if (presentation.fields.length) summary.append(summaryFacts);
     const attribution = document.createElement("section");
@@ -9218,15 +9384,18 @@
     return identity;
   }
   __name(exactRevisionIdentity2, "exactRevisionIdentity");
-  function renderedFactBody(content, contentType) {
+  function renderedFactBody(content, contentType, bindReferences) {
     const body = document.createElement("div");
     body.className = "anno-body";
     const text = content.kind === "observation" || content.kind === "input_request" ? content.body : content.kind === "assessment" || content.kind === "validation" ? content.summary : void 0;
-    if (text) body.innerHTML = renderBodyContent(text, contentType);
+    if (text) {
+      body.innerHTML = renderBodyContent(text, contentType);
+      bindReferences(body);
+    }
     return body;
   }
   __name(renderedFactBody, "renderedFactBody");
-  function renderedInputRequestResponses(content) {
+  function renderedInputRequestResponses(content, bindReferences) {
     if (content.kind !== "input_request") return null;
     const responses = content.responses ?? [];
     if (responses.length === 0) return null;
@@ -9254,6 +9423,7 @@
           response.reason,
           response.contentType
         );
+        bindReferences(reason);
         entry.append(reason);
       }
       nest.append(entry);
@@ -9339,6 +9509,10 @@
       groups.set(fact2.family, family);
     }
     const presentFactIds = documentFactIds(reading.document.factPresentations);
+    const recordingEvents = recordingEventTargets(
+      reading.document.factPresentations
+    );
+    const bindReferences = /* @__PURE__ */ __name((body) => bindReferenceChips(body, recordingEvents, route, actions2.navigate), "bindReferences");
     const focusFact2 = /* @__PURE__ */ __name((factId) => actions2.navigate({
       kind: route.kind,
       changeId: route.changeId,
@@ -9414,12 +9588,19 @@
           );
         }
         if (content) {
-          const responses = renderedInputRequestResponses(content.content);
+          const responses = renderedInputRequestResponses(
+            content.content,
+            bindReferences
+          );
           card.append(
             detailLine(
               `body: ${content.bodyContentState.replaceAll("_", " ")} · ${content.contentType}`
             ),
-            renderedFactBody(content.content, content.contentType),
+            renderedFactBody(
+              content.content,
+              content.contentType,
+              bindReferences
+            ),
             ...responses ? [responses] : []
           );
         }
@@ -10035,7 +10216,7 @@
         (entry) => entry.eventId === route.eventId
       );
       replaceDetailWith(
-        ...event ? renderEventDetail(event, actions2) : [
+        ...event ? renderEventDetail(event, route, actions2) : [
           detailHeading("Event"),
           message(
             "This exact event was not present in the bounded Timeline response."

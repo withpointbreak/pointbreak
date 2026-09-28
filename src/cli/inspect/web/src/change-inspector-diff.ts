@@ -9,6 +9,10 @@
  * the active reader.
  */
 
+import {
+  bindReferenceChips,
+  recordingEventTargets,
+} from "./change-inspector-references";
 import type { ChangeInspectorRenderActions } from "./change-inspector-render";
 import type { ChangeInspectorRoute } from "./change-inspector-router";
 import type {
@@ -138,15 +142,19 @@ function updateFocus(
   return exactRoute(route, Object.keys(next).length ? next : undefined);
 }
 
+type BindReferences = (body: HTMLElement) => void;
+
 function expandFile(
   section: HTMLElement,
   file: DiffCtx["files"][number],
   ctx: DiffCtx,
+  bindReferences: BindReferences,
 ): void {
   const body = section.querySelector<HTMLElement>("[data-dfile-body]");
   if (!body) return;
   if (body.dataset.rendered !== "1") {
     body.innerHTML = renderDiffFileBody(file, ctx.anchored);
+    bindReferences(body);
     body.dataset.rendered = "1";
   }
   section.dataset.expanded = "true";
@@ -166,26 +174,37 @@ function factTarget(root: HTMLElement, factId: string): HTMLElement | null {
   );
 }
 
-function focusFile(body: HTMLElement, ctx: DiffCtx, filePath: string): void {
+function focusFile(
+  body: HTMLElement,
+  ctx: DiffCtx,
+  filePath: string,
+  bindReferences: BindReferences,
+): void {
   const index = ctx.files.findIndex(
     (file) => file.new_path === filePath || file.old_path === filePath,
   );
   if (index < 0) return;
   const section = body.querySelector<HTMLElement>(`[data-dfile="${index}"]`);
   if (!section) return;
-  expandFile(section, ctx.files[index], ctx);
+  expandFile(section, ctx.files[index], ctx, bindReferences);
   section.dataset.exactFocus = "true";
   section.scrollIntoView({ block: "start", behavior: "auto" });
   section.focus({ preventScroll: true });
 }
 
-function focusFact(body: HTMLElement, ctx: DiffCtx, factId: string): void {
+function focusFact(
+  body: HTMLElement,
+  ctx: DiffCtx,
+  factId: string,
+  bindReferences: BindReferences,
+): void {
   const fact = [
     ...ctx.anchored,
     ...ctx.decisionContext,
     ...ctx.unanchored,
   ].find((item) => item.id === factId);
-  if (fact?.target?.filePath) focusFile(body, ctx, fact.target.filePath);
+  if (fact?.target?.filePath)
+    focusFile(body, ctx, fact.target.filePath, bindReferences);
   const target = factTarget(body, factId);
   if (!target) return;
   target.dataset.exactFocus = "true";
@@ -276,6 +295,7 @@ function bindDiffBody(
   route: DiffRoute,
   actions: ChangeInspectorRenderActions,
   ctx: DiffCtx,
+  bindReferences: BindReferences,
 ): void {
   ctx.files.forEach((file, index) => {
     const section = body.querySelector<HTMLElement>(`[data-dfile="${index}"]`);
@@ -292,7 +312,7 @@ function bindDiffBody(
           .querySelector<HTMLElement>(".dfile-head")
           ?.setAttribute("aria-expanded", "false");
       } else {
-        expandFile(section, file, ctx);
+        expandFile(section, file, ctx, bindReferences);
       }
     };
     const header = section.querySelector<HTMLElement>(".dfile-head");
@@ -309,7 +329,7 @@ function bindDiffBody(
       const section = renderAll.closest<HTMLElement>(".dfile");
       const index = Number(section?.dataset.dfile);
       if (section && Number.isInteger(index))
-        expandFile(section, ctx.files[index], ctx);
+        expandFile(section, ctx.files[index], ctx, bindReferences);
       return;
     }
     const noted = target?.closest<HTMLElement>(".drow-noted[data-anno]");
@@ -413,12 +433,17 @@ export function renderChangeInspectorDiffPage(
     artifact,
     annotationsForExactRevision(detail),
   );
+  const recordingEvents = recordingEventTargets(detail.factPresentations);
+  const bindReferences: BindReferences = (element) =>
+    bindReferenceChips(element, recordingEvents, route, actions.navigate);
   body.innerHTML = rendered.html;
-  bindDiffBody(body, route, actions, rendered.ctx);
+  bindReferences(body);
+  bindDiffBody(body, route, actions, rendered.ctx, bindReferences);
   renderNavigator(nav, route, actions, rendered.ctx);
   if (route.focus?.filePath)
-    focusFile(body, rendered.ctx, route.focus.filePath);
-  if (route.focus?.factId) focusFact(body, rendered.ctx, route.focus.factId);
+    focusFile(body, rendered.ctx, route.focus.filePath, bindReferences);
+  if (route.focus?.factId)
+    focusFact(body, rendered.ctx, route.focus.factId, bindReferences);
   return true;
 }
 

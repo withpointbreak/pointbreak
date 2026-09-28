@@ -135,6 +135,11 @@ pub struct FactPresentationV1 {
     pub family_state: FactFamilyStateV1,
     pub revision_currency: ChangeRevisionCurrencyV1,
     pub availability: ContentAvailabilityV1,
+    /// The Timeline event that recorded this fact. Readers navigate a bare
+    /// reference to this fact to the Timeline at this event; absent means no
+    /// target, and the reference renders as plain text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_event_id: Option<EventId>,
 }
 
 /// Whether one recorded fact-port carrier can contribute continuity in the
@@ -2013,7 +2018,7 @@ pub fn normalize_fact_presentations(
             },
         );
         facts.push(normalized_fact(
-            NormalizedFactIdentity::new(&fact_id, "observation"),
+            NormalizedFactIdentity::new(&fact_id, "observation", &view.event_id),
             exact,
             Some(view.target.clone()),
             &view.writer.actor_id,
@@ -2063,7 +2068,7 @@ pub fn normalize_fact_presentations(
             },
         );
         facts.push(normalized_fact(
-            NormalizedFactIdentity::new(&fact_id, "input_request"),
+            NormalizedFactIdentity::new(&fact_id, "input_request", &view.event_id),
             exact,
             Some(view.target.clone()),
             &view.writer.actor_id,
@@ -2089,7 +2094,7 @@ pub fn normalize_fact_presentations(
             },
         );
         facts.push(normalized_fact(
-            NormalizedFactIdentity::new(&fact_id, "assessment"),
+            NormalizedFactIdentity::new(&fact_id, "assessment", &view.event_id),
             exact,
             Some(view.target.clone()),
             &view.writer.actor_id,
@@ -2121,7 +2126,7 @@ pub fn normalize_fact_presentations(
             },
         );
         facts.push(normalized_fact(
-            NormalizedFactIdentity::new(&fact_id, "validation"),
+            NormalizedFactIdentity::new(&fact_id, "validation", &view.event_id),
             exact,
             None,
             &view.writer.actor_id,
@@ -2328,11 +2333,16 @@ fn validation_status_wire(status: crate::model::ValidationStatus) -> &'static st
 struct NormalizedFactIdentity<'a> {
     fact_id: &'a str,
     family: &'static str,
+    recording_event_id: &'a EventId,
 }
 
 impl<'a> NormalizedFactIdentity<'a> {
-    const fn new(fact_id: &'a str, family: &'static str) -> Self {
-        Self { fact_id, family }
+    const fn new(fact_id: &'a str, family: &'static str, recording_event_id: &'a EventId) -> Self {
+        Self {
+            fact_id,
+            family,
+            recording_event_id,
+        }
     }
 }
 
@@ -2363,6 +2373,7 @@ fn normalized_fact(
         } else {
             content_availability
         },
+        recording_event_id: Some(identity.recording_event_id.clone()),
     }
 }
 
@@ -2671,6 +2682,7 @@ mod tests {
             family_state: FactFamilyStateV1::Current,
             revision_currency: ChangeRevisionCurrencyV1::Current,
             availability: ContentAvailabilityV1::Available,
+            recording_event_id: None,
         }
     }
 
@@ -3730,6 +3742,7 @@ mod tests {
             family_state: FactFamilyStateV1::Current,
             revision_currency: ChangeRevisionCurrencyV1::Current,
             availability: ContentAvailabilityV1::Available,
+            recording_event_id: None,
         };
         let document = facade
             .contextual_revision_document(

@@ -3414,3 +3414,288 @@ describe("Change page order prose", () => {
     );
   });
 });
+
+describe("Bare fact references navigate to their recording events", () => {
+  const resolved = "obs:sha256:aaaaaaaa11111111";
+  const unresolved = "obs:sha256:bbbbbbbb22222222";
+  const replaced = "assess:sha256:cccccccc33333333";
+  const recordingEvent = "evt:sha256:dddddddd44444444";
+
+  function assessmentEventHistory(): EventHistoryDocument {
+    const base = eventHistory();
+    return {
+      ...base,
+      facets: { review_assessment_recorded: 1, change_declared: 0 },
+      completion: {
+        ...base.completion,
+        eventTypes: ["review_assessment_recorded", "change_declared"],
+      },
+      entries: [
+        {
+          ...base.entries[0],
+          eventType: "review_assessment_recorded",
+          summary: {
+            kind: "review_assessment_recorded",
+            details: {
+              assessmentId: "assess:sha256:eeeeeeee55555555",
+              target: { kind: "revision", revisionId: revision.revisionId },
+              assessment: "accepted",
+              summary: `Built on ${resolved}; see also ${unresolved}.`,
+              summaryContentType: "text/markdown",
+              replacesAssessmentIds: [replaced],
+              relatedObservationIds: [resolved, unresolved],
+            },
+          },
+          relationTargets: [{ factId: resolved, eventId: recordingEvent }],
+        },
+      ],
+    };
+  }
+
+  function renderAssessmentEvent(
+    historyQuery: Extract<
+      ChangeInspectorRoute,
+      { kind: "event" }
+    >["historyQuery"],
+  ): ReturnType<typeof vi.fn> {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "event",
+      eventId: "evt:sha256:one",
+      historyQuery,
+      query: {},
+    });
+    state.publish(
+      stageGeneration(
+        profile,
+        changes,
+        attention,
+        profile,
+        assessmentEventHistory(),
+      ),
+    );
+    renderChangeInspector(state.snapshot(), { navigate });
+    return navigate;
+  }
+
+  function summaryDefinition(label: string): HTMLElement | null {
+    const terms = document.querySelectorAll<HTMLElement>(
+      "#detail-body .event-detail-summary dt",
+    );
+    const term = [...terms].find((item) => item.textContent === label);
+    return (term?.nextElementSibling as HTMLElement | null) ?? null;
+  }
+
+  it("activates a relationship id the server resolved to its recording event", () => {
+    const navigate = renderAssessmentEvent({ order: "asc", q: "accepted" });
+    const related = summaryDefinition("observations");
+    const control = related?.querySelector<HTMLButtonElement>(
+      `button[data-relation-fact-id="${resolved}"]`,
+    );
+    expect(control?.type).toBe("button");
+    expect(control?.textContent).toBe("obs:aaaaaaaa");
+    expect(control?.getAttribute("aria-label")).toBe(
+      `Open the Timeline event that recorded ${resolved}`,
+    );
+    // Keyboard reachable as a native, enabled button in tab order.
+    expect(control?.tabIndex).toBe(0);
+    expect(control?.disabled).toBe(false);
+    expect(control?.hidden).toBe(false);
+    // A relation control never shadows a fact card in focus resolution.
+    expect(control?.dataset.factId).toBeUndefined();
+    control?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    // Filters are cleared so the locator always matches; the page anchors on
+    // the recording event instead of resetting, and the reader's order stays.
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "event",
+      eventId: recordingEvent,
+      historyQuery: { order: "asc" },
+      query: {},
+    });
+  });
+
+  it("renders a relationship id without a server target as plain text", () => {
+    renderAssessmentEvent({});
+    const related = summaryDefinition("observations");
+    expect(related?.querySelectorAll("button")).toHaveLength(1);
+    const plain = [...(related?.querySelectorAll("code") ?? [])];
+    expect(plain.map((item) => item.title)).toEqual([unresolved]);
+    expect(plain[0]?.dataset.relationFactId).toBeUndefined();
+    expect(plain[0]?.getAttribute("role")).toBeNull();
+    expect(plain[0]?.tabIndex).toBe(-1);
+    const replaces = summaryDefinition("replaces");
+    expect(replaces?.querySelector("button")).toBeNull();
+    expect(replaces?.querySelector("[data-relation-fact-id]")).toBeNull();
+    expect(replaces?.querySelector("code")?.title).toBe(replaced);
+  });
+
+  it("routes a resolved reference chip in a Markdown event body and flattens the rest", () => {
+    const navigate = renderAssessmentEvent({});
+    const body = document.querySelector<HTMLElement>(
+      "#detail-body .event-detail-summary .anno-body",
+    );
+    const chip = body?.querySelector<HTMLButtonElement>(
+      `button[data-ref-id="${resolved}"]`,
+    );
+    expect(chip?.type).toBe("button");
+    expect(chip?.dataset.relationFactId).toBe(resolved);
+    chip?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "event",
+      eventId: recordingEvent,
+      historyQuery: {},
+      query: {},
+    });
+    const flat = body?.querySelector<HTMLElement>(
+      `[data-ref-id="${unresolved}"]`,
+    );
+    expect(flat?.tagName).toBe("SPAN");
+    expect(flat?.dataset.refKind).toBeUndefined();
+    expect(flat?.getAttribute("role")).toBeNull();
+    expect(flat?.hasAttribute("tabindex")).toBe(false);
+    expect(flat?.title).toBe(unresolved);
+  });
+
+  it("routes a reference chip inside an annotated-diff fact body without also focusing its row", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "diff",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+      focus: { filePath: "src/lib.rs" },
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    const base = revisionReading().document;
+    const document_ = {
+      ...base,
+      factPresentations: [
+        base.factPresentations[0],
+        {
+          factId: resolved,
+          family: "observation",
+          originRevision: revision,
+          actorId: "author",
+          revisionCurrency: "current",
+          familyState: "current",
+          availability: "available",
+          recordingEventId: recordingEvent,
+        },
+      ],
+      factContentPresentations: {
+        ...base.factContentPresentations,
+        "obs:sha256:focused": {
+          contentType: "text/markdown" as const,
+          bodyContentState: "present" as const,
+          content: {
+            kind: "observation" as const,
+            title: "Readable fact",
+            body: `Follows ${resolved} but not ${unresolved}`,
+          },
+        },
+      },
+    };
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      { reading: { kind: "diff", document: document_ }, refusal: null },
+    );
+    const chip = document.querySelector<HTMLButtonElement>(
+      `#diff-page-body button[data-ref-id="${resolved}"]`,
+    );
+    expect(chip?.type).toBe("button");
+    expect(chip?.dataset.relationFactId).toBe(resolved);
+    navigate.mockClear();
+    chip?.click();
+    expect(navigate).toHaveBeenCalledOnce();
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "event",
+      eventId: recordingEvent,
+      historyQuery: {},
+      query: {},
+    });
+    const flat = document.querySelector<HTMLElement>(
+      `#diff-page-body [data-ref-id="${unresolved}"]`,
+    );
+    expect(flat?.dataset.refKind).toBeUndefined();
+    expect(flat?.getAttribute("role")).toBeNull();
+  });
+
+  it("routes a reference chip inside an exact Revision Markdown body to the server-supplied recording event", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    const base = revisionReading().document;
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading: readingWith({
+          factPresentations: [
+            {
+              ...base.factPresentations[0],
+              recordingEventId: "evt:sha256:ffffffff66666666",
+            },
+            {
+              factId: resolved,
+              family: "observation",
+              originRevision: revision,
+              actorId: "author",
+              revisionCurrency: "current",
+              familyState: "current",
+              availability: "available",
+              recordingEventId: recordingEvent,
+            },
+          ],
+          factContentPresentations: {
+            ...base.factContentPresentations,
+            "obs:sha256:focused": {
+              contentType: "text/markdown",
+              bodyContentState: "present",
+              content: {
+                kind: "observation",
+                title: "Readable fact",
+                body: `**Follows** ${resolved} but not ${unresolved}`,
+              },
+            },
+          },
+        }),
+        refusal: null,
+      },
+    );
+    const card = document.querySelector<HTMLElement>(
+      '#detail-body .detail-facts [data-fact-id="obs:sha256:focused"]',
+    );
+    expect(card?.querySelector("strong")?.textContent).toBe("Follows");
+    const chip = card?.querySelector<HTMLButtonElement>(
+      `.anno-body button[data-ref-id="${resolved}"]`,
+    );
+    expect(chip?.type).toBe("button");
+    expect(chip?.getAttribute("aria-label")).toBe(
+      `Open the Timeline event that recorded ${resolved}`,
+    );
+    expect(chip?.dataset.factId).toBeUndefined();
+    expect(chip?.closest("[data-fact-id]")).toBe(card);
+    chip?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "event",
+      eventId: recordingEvent,
+      historyQuery: {},
+      query: {},
+    });
+    const flat = card?.querySelector<HTMLElement>(
+      `.anno-body [data-ref-id="${unresolved}"]`,
+    );
+    expect(flat?.tagName).toBe("SPAN");
+    expect(flat?.dataset.refKind).toBeUndefined();
+    expect(flat?.getAttribute("role")).toBeNull();
+  });
+});
