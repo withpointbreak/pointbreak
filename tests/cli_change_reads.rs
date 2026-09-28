@@ -1062,6 +1062,98 @@ fn change_revision_emits_the_contextual_document_in_each_format_lane() {
 }
 
 #[test]
+fn change_revision_carries_recorded_responds_to_and_relates_edges() {
+    let fixture = exact_read_fixture();
+    let repo_arg = fixture.repo_arg().to_owned();
+    let revision_id = fixture.accepted_revision_id.clone();
+    let parent = fixture.target_observation_id.clone();
+    let reply = pointbreak_env(
+        [
+            "observation",
+            "add",
+            "--repo",
+            &repo_arg,
+            "--exact-revision",
+            &revision_id,
+            "--track",
+            REVIEW_TRACK,
+            "--title",
+            "reply to the target fact",
+            "--responds-to",
+            &parent,
+        ],
+        OFF,
+    );
+    assert_success(&reply);
+    let reply = parse_json(&reply.stdout)["observationId"]
+        .as_str()
+        .expect("reply observation id")
+        .to_owned();
+    let request = open_operative_request(&fixture, &revision_id);
+    let assessment = pointbreak_env(
+        [
+            "assessment",
+            "add",
+            "--repo",
+            &repo_arg,
+            "--exact-revision",
+            &revision_id,
+            "--track",
+            REVIEW_TRACK,
+            "--assessment",
+            "needs-clarification",
+            "--related-observation",
+            &parent,
+            "--related-input-request",
+            &request,
+        ],
+        OFF,
+    );
+    assert_success(&assessment);
+    let assessment = parse_json(&assessment.stdout)["assessmentId"]
+        .as_str()
+        .expect("assessment id")
+        .to_owned();
+    fixture.build_derived();
+
+    let document = assert_exact_floor_parity(&fixture, "revision", "json", false);
+    let facts = document["factPresentations"]
+        .as_array()
+        .expect("fact presentations");
+    let fact = |fact_id: &str| {
+        facts
+            .iter()
+            .find(|fact| fact["factId"] == fact_id)
+            .unwrap_or_else(|| panic!("fact {fact_id}: {document}"))
+    };
+    assert_eq!(
+        fact(&reply)["relations"],
+        serde_json::json!([{
+            "kind": "responds_to",
+            "fromFactId": reply,
+            "toFactId": parent,
+        }]),
+        "an observation carries its recorded responds-to edge"
+    );
+    let mut relates = vec![
+        serde_json::json!({ "kind": "relates", "fromFactId": assessment, "toFactId": parent }),
+        serde_json::json!({ "kind": "relates", "fromFactId": assessment, "toFactId": request }),
+    ];
+    relates.sort_by_key(|edge| edge["toFactId"].as_str().unwrap().to_owned());
+    assert_eq!(
+        fact(&assessment)["relations"],
+        serde_json::Value::Array(relates),
+        "an assessment carries its recorded relates edges"
+    );
+    for without in [&parent, &request] {
+        assert!(
+            fact(without).get("relations").is_none(),
+            "a fact that records no edge omits the field"
+        );
+    }
+}
+
+#[test]
 fn derived_change_revision_matches_the_floor_modulo_the_seek_stamp() {
     let fixture = exact_read_fixture();
     fixture.build_derived();

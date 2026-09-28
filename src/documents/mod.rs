@@ -65,9 +65,10 @@ pub use change::{
     ChangeRevisionDocumentV1, ChangeRevisionPresentationDocumentV1, ChangeSummaryV1,
     CurrentRevisionPresentationV1, FactContentPresentationV1, FactContentV1, FactFamilyStateV1,
     FactInputResponseContentV1, FactPortApplicabilityV1, FactPortPresentationV1,
-    FactPresentationV1, INSPECT_ATTENTION_SCHEMA_V2, INSPECT_CHANGES_PAGE_SCHEMA,
-    REVIEW_CHANGE_LIST_SCHEMA, REVIEW_CHANGE_REVISION_SCHEMA, REVIEW_CHANGE_SCHEMA,
-    RevisionQualificationV1, RevisionSummarySourceV1, UnavailableChangeMemberRevisionV1,
+    FactPresentationV1, FactRelationKindV1, FactRelationV1, INSPECT_ATTENTION_SCHEMA_V2,
+    INSPECT_CHANGES_PAGE_SCHEMA, REVIEW_CHANGE_LIST_SCHEMA, REVIEW_CHANGE_REVISION_SCHEMA,
+    REVIEW_CHANGE_SCHEMA, RevisionQualificationV1, RevisionSummarySourceV1,
+    UnavailableChangeMemberRevisionV1,
 };
 #[doc(hidden)]
 pub use change::{

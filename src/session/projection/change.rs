@@ -2108,6 +2108,7 @@ mod tests {
             context_change_id: None,
             presented_in_revision: None,
             port_relation: None,
+            relations: Vec::new(),
             actor_id: crate::model::ActorId::new("actor:test"),
             track_id: None,
             family_state: crate::documents::FactFamilyStateV1::Current,

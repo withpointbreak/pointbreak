@@ -1584,6 +1584,103 @@ describe("bounded Change protocol", () => {
   });
 });
 
+describe("recorded fact relation edges", () => {
+  const revision = {
+    revisionId: "rev:sha256:target",
+    objectArtifactContentHash: "sha256:target-artifact",
+  };
+  const observation = {
+    factId: "obs:sha256:reply",
+    family: "observation",
+    originRevision: revision,
+    actorId: "actor:one",
+    revisionCurrency: "current",
+    familyState: "current",
+    availability: "available",
+  };
+  const assessment = {
+    ...observation,
+    factId: "assess:sha256:call",
+    family: "assessment",
+  };
+  const detail = (...factPresentations: Record<string, unknown>[]) => ({
+    schema: "pointbreak.review-change-revision",
+    version: 1,
+    changeId: "change:sha256:one",
+    revision,
+    membershipSupport: [],
+    revisionCurrency: "current",
+    relationClassification: "current",
+    availability: "available",
+    exactRevisionDocument: availableResource(revision),
+    factPresentations,
+    factPorts: [],
+    associations: [],
+    diagnostics: [],
+    projectionStamp: "sha256:generation",
+  });
+  const respondsTo = {
+    kind: "responds_to",
+    fromFactId: "obs:sha256:reply",
+    toFactId: "obs:sha256:parent",
+  };
+  const relates = {
+    kind: "relates",
+    fromFactId: "assess:sha256:call",
+    toFactId: "input-request:sha256:ask",
+  };
+
+  it("carries responds-to and relates edges when the facts record them", () => {
+    const decoded = decodeChangeRevisionDetail(
+      detail(
+        { ...observation, relations: [respondsTo] },
+        { ...assessment, relations: [relates] },
+      ),
+    );
+    expect(decoded.factPresentations.map((fact) => fact.relations)).toEqual([
+      [respondsTo],
+      [relates],
+    ]);
+  });
+
+  it("leaves relations absent when no fact records one", () => {
+    const decoded = decodeChangeRevisionDetail(detail(observation, assessment));
+    expect(decoded.factPresentations.map((fact) => fact.relations)).toEqual([
+      undefined,
+      undefined,
+    ]);
+  });
+
+  it("rejects an edge the carrying fact cannot have recorded", () => {
+    for (const invalid of [
+      { ...observation, relations: [] },
+      { ...observation, relations: respondsTo },
+      { ...observation, relations: [{ ...respondsTo, kind: "relates" }] },
+      { ...assessment, relations: [{ ...relates, kind: "responds_to" }] },
+      {
+        ...observation,
+        relations: [{ ...respondsTo, fromFactId: "obs:sha256:other" }],
+      },
+      { ...observation, relations: [{ ...respondsTo, toFactId: "" }] },
+      {
+        ...observation,
+        relations: [{ ...respondsTo, toFactId: "obs:sha256:reply" }],
+      },
+      { ...observation, relations: [respondsTo, respondsTo] },
+      {
+        ...observation,
+        factId: "validation:sha256:gate",
+        family: "validation",
+        relations: [{ ...respondsTo, fromFactId: "validation:sha256:gate" }],
+      },
+    ]) {
+      expect(() => decodeChangeRevisionDetail(detail(invalid))).toThrow(
+        "Revision detail DTO",
+      );
+    }
+  });
+});
+
 // One event-history document whose single entry carries the given summary. The
 // decoder cross-validates `facets`, `completion.eventTypes` and the entry's
 // `eventType`/`summary.kind`, so all four move together.

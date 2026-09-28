@@ -2322,10 +2322,105 @@ describe("Change inspector render", () => {
       "#detail-body .detail-facts",
     );
     const text = facts?.textContent ?? "";
-    // These live only on the Timeline wire, never on the exact-Revision response.
+    // No fact in this response carries a relation edge, so none is rendered.
     expect(text).not.toContain("responds to");
+    expect(text).not.toContain("relates to");
     expect(text).not.toContain("related observations");
     expect(text).not.toContain("related input requests");
+  });
+
+  it("states recorded responds-to and relates edges and activates only same-document endpoints", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    const facts = localFacts();
+    const presentations = (facts.factPresentations ?? []).map((fact) =>
+      fact.factId === "obs:sha256:focused"
+        ? {
+            ...fact,
+            relations: [
+              {
+                kind: "responds_to" as const,
+                fromFactId: "obs:sha256:focused",
+                toFactId: "obs:sha256:elsewhere",
+              },
+            ],
+          }
+        : fact.factId === "assess:sha256:verdict"
+          ? {
+              ...fact,
+              relations: [
+                {
+                  kind: "relates" as const,
+                  fromFactId: "assess:sha256:verdict",
+                  toFactId: "input-request:sha256:ask",
+                },
+                {
+                  kind: "relates" as const,
+                  fromFactId: "assess:sha256:verdict",
+                  toFactId: "obs:sha256:focused",
+                },
+              ],
+            }
+          : fact,
+    );
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading: readingWith({ ...facts, factPresentations: presentations }),
+        refusal: null,
+      },
+    );
+    const lines = (factId: string) =>
+      Array.from(
+        document.querySelectorAll<HTMLElement>(
+          `#detail-body .detail-facts [data-fact-id="${factId}"] .fact-rel`,
+        ),
+      );
+
+    // The endpoint is absent from this response: named, never activated.
+    const reply = lines("obs:sha256:focused").find((line) =>
+      line.textContent?.startsWith("responds to"),
+    );
+    expect(reply?.querySelector("button")).toBeNull();
+    expect(reply?.querySelector("code")?.title).toBe("obs:sha256:elsewhere");
+
+    const relates = lines("assess:sha256:verdict").filter((line) =>
+      line.textContent?.startsWith("relates to"),
+    );
+    expect(relates).toHaveLength(2);
+    const controls = relates.map((line) =>
+      line.querySelector<HTMLButtonElement>("button"),
+    );
+    expect(controls.map((control) => control?.dataset.relationFactId)).toEqual([
+      "input-request:sha256:ask",
+      "obs:sha256:focused",
+    ]);
+    for (const control of controls) {
+      expect(control?.type).toBe("button");
+      expect(control?.dataset.factId).toBeUndefined();
+    }
+    controls[1]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+      focus: { factId: "obs:sha256:focused" },
+    });
+    // A fact that records no edge gets no relation line of either kind.
+    expect(
+      lines("input-request:sha256:ask").filter((line) =>
+        /^(responds to|relates to)/.test(line.textContent ?? ""),
+      ),
+    ).toHaveLength(0);
   });
 
   it("activates a replacement target the same response carries", () => {
