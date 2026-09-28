@@ -226,3 +226,18 @@ directly.
 - In-repo `docs/adr/`: ADR-0003 (advisory-first), ADR-0017 (identity layering; the `shore inspect`
   substrate-vocabulary exception, §A4 viii), ADR-0018 (event-borne supersession; competing heads),
   ADR-0019 (no-runtime / pull-only), ADR-0020 (durable-storage seam; truth-vs-projection split).
+
+## Amendment: The Server Owns Meaning (2026-09-27)
+
+D1 generalizes into one principle for every Inspector surface: the server owns meaning. The Inspector renders
+the meaning the server supplies and never invents headlines, navigation targets, classifications, or content
+types. When the server supplies nothing, the client renders the absence as the server reports it (plain text,
+a muted state) rather than deriving a substitute from ids, prose, or edge maps. Recorded once here after the
+2026-09-25 triage ([#830](https://github.com/withpointbreak/pointbreak/issues/830), §6 insight 8) found
+several Inspector issues deferring on it. Instances:
+[#752](https://github.com/withpointbreak/pointbreak/issues/752) (a Revision with no summary shows a muted
+"No summary supplied" from a server-owned field and keeps the exact id as its headline, rather than a
+client-invented one), and [#764](https://github.com/withpointbreak/pointbreak/issues/764) and
+[#767](https://github.com/withpointbreak/pointbreak/issues/767) (a bare fact id, in the event pane or in a
+rendered Markdown body, navigates to a target the server supplies, and renders as plain text when the server
+resolves none).

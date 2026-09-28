@@ -316,6 +316,8 @@ struct ChangeCaptureArgs {
     include_untracked: bool,
     #[arg(long)]
     allow_empty: bool,
+    /// Short human-readable label shown on Inspector Change cards and by revision discovery
+    /// surfaces. Optional; without it, cards and receipts show only the exact Revision id.
     #[arg(long)]
     summary: Option<String>,
     #[arg(long = "path")]
@@ -726,6 +728,7 @@ fn run_change_capture(
     }
     let receipt = capture_change_revision(operation)?;
     common::surface_best_effort_skip(&skip, stderr);
+    common::surface_missing_summary(receipt.revision.summary.as_deref(), stderr);
     write(&args.format_args, stdout, &receipt)
 }
 

@@ -3172,7 +3172,9 @@ pub(super) fn threads_json(repo: &Path) -> Result<String, String> {
     let view = {
         let span = tracing::debug_span!("shore.inspect.threads.supersession_view");
         let _guard = span.enter();
-        SupersessionView::from_events(&events).map_err(|error| error.to_string())?
+        // Threads follow Change-scoped replacement (ADR-0042), not the
+        // proposal-borne edges alone.
+        SupersessionView::replacement_from_events(&events).map_err(|error| error.to_string())?
     };
 
     let threads = {

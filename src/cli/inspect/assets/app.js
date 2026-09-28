@@ -1279,16 +1279,53 @@
     if (!isRecord(value) || !isEventHistoryEventType(value.eventType)) {
       return false;
     }
-    return nonEmptyString2(value.eventId) && nonEmptyString2(value.occurredAt) && nonEmptyString2(value.payloadHash) && nonEmptyString2(value.journalId) && optionalString(value.trackId) && isEventHistoryWriter(value.writer) && (value.verificationStatus === "valid" || value.verificationStatus === "invalid" || value.verificationStatus === "untrusted_key" || value.verificationStatus === "unsigned") && (value.assertionMode === "advisory" || value.assertionMode === "operative") && optionalString(value.signer) && (value.sourceRef === void 0 || isRecord(value.sourceRef) && nonEmptyString2(value.sourceRef.sourceSystem) && nonEmptyString2(value.sourceRef.sourceId)) && (value.ingest === void 0 || isRecord(value.ingest) && (value.ingest.via === "ingest-events" || value.ingest.via === "bundle-apply") && nonEmptyString2(value.ingest.receivedAt)) && isEventHistorySubject(value.subject) && isStringArray(value.changeIds) && Array.isArray(value.revisionRefs) && value.revisionRefs.every(isEventHistoryRevisionRef) && isStringArray(value.unresolvedRevisionIds) && isEventHistorySummary(value.summary, value.eventType);
+    return nonEmptyString2(value.eventId) && nonEmptyString2(value.occurredAt) && nonEmptyString2(value.payloadHash) && nonEmptyString2(value.journalId) && optionalString(value.trackId) && isEventHistoryWriter(value.writer) && (value.verificationStatus === "valid" || value.verificationStatus === "invalid" || value.verificationStatus === "untrusted_key" || value.verificationStatus === "unsigned") && (value.assertionMode === "advisory" || value.assertionMode === "operative") && optionalString(value.signer) && (value.sourceRef === void 0 || isRecord(value.sourceRef) && nonEmptyString2(value.sourceRef.sourceSystem) && nonEmptyString2(value.sourceRef.sourceId)) && (value.ingest === void 0 || isRecord(value.ingest) && (value.ingest.via === "ingest-events" || value.ingest.via === "bundle-apply") && nonEmptyString2(value.ingest.receivedAt)) && isEventHistorySubject(value.subject) && isStringArray(value.changeIds) && Array.isArray(value.revisionRefs) && value.revisionRefs.every(isEventHistoryRevisionRef) && isStringArray(value.unresolvedRevisionIds) && isEventHistorySummary(value.summary, value.eventType) && (value.relationTargets === void 0 || isEventHistoryRelationTargets(
+      value.relationTargets,
+      eventHistoryRelationFactIds(value)
+    ));
   }
   __name(isEventHistoryEntry, "isEventHistoryEntry");
+  function eventHistoryRelationFactIds(entry) {
+    const summary = entry.summary;
+    switch (summary.kind) {
+      case "review_observation_recorded":
+        return [
+          ...summary.details.supersedesObservationIds ?? [],
+          ...summary.details.respondsToObservationIds ?? []
+        ];
+      case "review_assessment_recorded":
+        return [
+          ...summary.details.replacesAssessmentIds ?? [],
+          ...summary.details.relatedObservationIds ?? [],
+          ...summary.details.relatedInputRequestIds ?? []
+        ];
+      case "input_request_responded":
+        return [summary.details.inputRequestId];
+      default:
+        return [];
+    }
+  }
+  __name(eventHistoryRelationFactIds, "eventHistoryRelationFactIds");
+  function isEventHistoryRelationTargets(value, referenced) {
+    if (!Array.isArray(value)) return false;
+    const named = new Set(referenced);
+    const seen = /* @__PURE__ */ new Set();
+    return value.every((target) => {
+      if (!isRecord(target) || !nonEmptyString2(target.factId) || !nonEmptyString2(target.eventId) || !named.has(target.factId) || seen.has(target.factId)) {
+        return false;
+      }
+      seen.add(target.factId);
+      return true;
+    });
+  }
+  __name(isEventHistoryRelationTargets, "isEventHistoryRelationTargets");
   function decodeEventHistory(value) {
     const document2 = object(value, "event history");
     const completion = document2.completion;
     const authorityCursor = decodeAuthorityCursorV2(document2.authorityCursor);
     if (document2.schema !== "pointbreak.inspect-event-history" || document2.version !== 1 || !nonEmptyString2(document2.sourceChangeProjectionStamp) || !nonEmptyString2(document2.timelineProjectionStamp) || document2.order !== "asc" && document2.order !== "desc" || !Number.isSafeInteger(document2.eventCount) || document2.eventCount < 0 || document2.eventCount !== authorityCursor.eventCount || !Number.isSafeInteger(document2.matchCount) || document2.matchCount < 0 || !Number.isSafeInteger(document2.offset) || document2.offset < 0 || document2.matchIndex !== void 0 && (!Number.isSafeInteger(document2.matchIndex) || document2.matchIndex < 0) || !isRecord(document2.facets) || !Object.entries(document2.facets).every(
       ([eventType, count]) => isEventHistoryEventType(eventType) && typeof count === "number" && Number.isSafeInteger(count) && count >= 0
-    ) || !isRecord(completion) || !isStringArray(completion.eventTypes) || !completion.eventTypes.every(isEventHistoryEventType) || new Set(completion.eventTypes).size !== completion.eventTypes.length || !isStringArray(completion.trackIds) || !isStringArray(completion.changeIds) || !Array.isArray(completion.revisionRefs) || !completion.revisionRefs.every(isEventHistoryRevisionRef) || !isStringArray(completion.unresolvedRevisionIds) || !isStringArray(document2.diagnostics) || !isStringArray(document2.queryNotices) || !Array.isArray(document2.entries) || document2.entries.length > 100 || !document2.entries.every(isEventHistoryEntry) || document2.matchCount > document2.eventCount || document2.offset > document2.matchCount || document2.offset + document2.entries.length > document2.matchCount || document2.previous !== void 0 && !nonEmptyString2(document2.previous) || document2.next !== void 0 && !nonEmptyString2(document2.next)) {
+    ) || !isRecord(completion) || !isStringArray(completion.eventTypes) || !completion.eventTypes.every(isEventHistoryEventType) || new Set(completion.eventTypes).size !== completion.eventTypes.length || !isStringArray(completion.trackIds) || !isStringArray(completion.changeIds) || !Array.isArray(completion.revisionRefs) || !completion.revisionRefs.every(isEventHistoryRevisionRef) || !isStringArray(completion.unresolvedRevisionIds) || !isStringArray(completion.actorIds) || new Set(completion.actorIds).size !== completion.actorIds.length || !isStringArray(document2.diagnostics) || !isStringArray(document2.queryNotices) || !Array.isArray(document2.entries) || document2.entries.length > 100 || !document2.entries.every(isEventHistoryEntry) || document2.matchCount > document2.eventCount || document2.offset > document2.matchCount || document2.offset + document2.entries.length > document2.matchCount || document2.previous !== void 0 && !nonEmptyString2(document2.previous) || document2.next !== void 0 && !nonEmptyString2(document2.next)) {
       throw new Error("invalid event history DTO");
     }
     if (document2.offset + document2.entries.length > document2.matchCount) {
@@ -1574,7 +1611,9 @@
   function isPresentationRevision(value) {
     return isRecord(value) && isRevisionRef(value.revision) && // Server-owned display string (D7): optional for an older server, but a
     // non-empty string when present. summarySource validation is unchanged.
-    (value.label === void 0 || nonEmptyString2(value.label)) && (value.summarySource === "revision_proposal_summary" && nonEmptyString2(value.revisionProposalSummary) || value.summarySource === "absent" && value.revisionProposalSummary === void 0);
+    (value.label === void 0 || nonEmptyString2(value.label)) && // Server-owned absent-summary cue (#752): only on an absent summary, and a
+    // non-empty string when present.
+    (value.absentSummaryCue === void 0 || value.summarySource === "absent" && nonEmptyString2(value.absentSummaryCue)) && (value.summarySource === "revision_proposal_summary" && nonEmptyString2(value.revisionProposalSummary) || value.summarySource === "absent" && value.revisionProposalSummary === void 0);
   }
   __name(isPresentationRevision, "isPresentationRevision");
   function isRevisionRef(value) {
@@ -1815,9 +1854,23 @@
   }
   __name(isRelationClaim, "isRelationClaim");
   function isFactPresentation(value) {
-    return isRecord(value) && nonEmptyString2(value.factId) && nonEmptyString2(value.family) && isRevisionRef(value.originRevision) && (value.target === void 0 || isFactTarget(value.target)) && (value.contextChangeId === void 0 || nonEmptyString2(value.contextChangeId)) && (value.presentedInRevision === void 0 || isRevisionRef(value.presentedInRevision)) && (value.portRelation === void 0 || value.portRelation === "context_only" || value.portRelation === "reanchored_as" || value.portRelation === "carried_open_as" || value.portRelation === "resolved_by") && nonEmptyString2(value.actorId) && (value.trackId === void 0 || nonEmptyString2(value.trackId)) && isOneOf(value.revisionCurrency, REVISION_CURRENCY_VALUES) && isOneOf(value.familyState, FACT_FAMILY_STATE_VALUES) && isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES);
+    return isRecord(value) && nonEmptyString2(value.factId) && nonEmptyString2(value.family) && isRevisionRef(value.originRevision) && (value.target === void 0 || isFactTarget(value.target)) && (value.contextChangeId === void 0 || nonEmptyString2(value.contextChangeId)) && (value.presentedInRevision === void 0 || isRevisionRef(value.presentedInRevision)) && (value.portRelation === void 0 || value.portRelation === "context_only" || value.portRelation === "reanchored_as" || value.portRelation === "carried_open_as" || value.portRelation === "resolved_by") && nonEmptyString2(value.actorId) && (value.trackId === void 0 || nonEmptyString2(value.trackId)) && isOneOf(value.revisionCurrency, REVISION_CURRENCY_VALUES) && isOneOf(value.familyState, FACT_FAMILY_STATE_VALUES) && isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES) && (value.recordingEventId === void 0 || nonEmptyString2(value.recordingEventId)) && (value.relations === void 0 || isFactRelations(value.relations, value.factId, value.family));
   }
   __name(isFactPresentation, "isFactPresentation");
+  function isFactRelations(value, factId, family) {
+    const kind = family === "observation" ? "responds_to" : family === "assessment" ? "relates" : null;
+    if (!Array.isArray(value) || value.length === 0 || kind === null)
+      return false;
+    const seen = /* @__PURE__ */ new Set();
+    return value.every((edge) => {
+      if (!isRecord(edge) || edge.kind !== kind || edge.fromFactId !== factId || !nonEmptyString2(edge.toFactId) || edge.toFactId === factId || seen.has(edge.toFactId)) {
+        return false;
+      }
+      seen.add(edge.toFactId);
+      return true;
+    });
+  }
+  __name(isFactRelations, "isFactRelations");
   function isFactTarget(value) {
     if (!isRecord(value) || !nonEmptyString2(value.revisionId)) return false;
     if (value.kind === "revision") return true;
@@ -2143,6 +2196,24 @@
     return { kind: "event", eventId, historyQuery: context, query: {} };
   }
   __name(timelineEventRoute, "timelineEventRoute");
+  function recordingEventRoute(eventId, from) {
+    const current = from?.kind === "timeline" || from?.kind === "event" ? from.historyQuery : {};
+    return {
+      kind: "event",
+      eventId,
+      historyQuery: {
+        ...current.limit !== void 0 ? { limit: current.limit } : {},
+        ...current.order !== void 0 ? { order: current.order } : {}
+      },
+      query: {}
+    };
+  }
+  __name(recordingEventRoute, "recordingEventRoute");
+  function referenceTargetRoute(referenceId, targets, from) {
+    const eventId = targets.get(referenceId);
+    return eventId === void 0 ? null : recordingEventRoute(eventId, from);
+  }
+  __name(referenceTargetRoute, "referenceTargetRoute");
   function showChangeInTimelineRoute(changeId) {
     return { kind: "timeline", historyQuery: { change: changeId } };
   }
@@ -2614,6 +2685,10 @@
     return value ? { label: label2, value } : null;
   }
   __name(field, "field");
+  function relationField(label2, factIds) {
+    return factIds?.length ? { label: label2, value: factIds.join("; "), factIds: [...factIds] } : null;
+  }
+  __name(relationField, "relationField");
   function fields(...values) {
     return values.filter(
       (value) => value !== null
@@ -2660,8 +2735,8 @@
             field("target", eventTargetLabel(detail.target)),
             field("confidence", detail.confidence),
             field("tags", detail.tags?.join(", ")),
-            field("supersedes", detail.supersedesObservationIds?.join("; ")),
-            field("responds to", detail.respondsToObservationIds?.join("; "))
+            relationField("supersedes", detail.supersedesObservationIds),
+            relationField("responds to", detail.respondsToObservationIds)
           )
         };
       }
@@ -2675,9 +2750,9 @@
           fields: fields(
             field("assessment", detail.assessmentId),
             field("target", eventTargetLabel(detail.target)),
-            field("replaces", detail.replacesAssessmentIds?.join("; ")),
-            field("observations", detail.relatedObservationIds?.join("; ")),
-            field("input requests", detail.relatedInputRequestIds?.join("; "))
+            relationField("replaces", detail.replacesAssessmentIds),
+            relationField("observations", detail.relatedObservationIds),
+            relationField("input requests", detail.relatedInputRequestIds)
           )
         };
       }
@@ -2704,7 +2779,7 @@
           bodyContentType: detail.reasonContentType,
           fields: fields(
             field("response", detail.inputRequestResponseId),
-            field("input request", detail.inputRequestId),
+            relationField("input request", [detail.inputRequestId]),
             field("Revision", detail.revisionId)
           )
         };
@@ -2929,7 +3004,9 @@
     timelineShell: "timeline-shell",
     timelineNewPill: "timeline-new-pill",
     timelineGroup: "timeline-group",
-    timelineGroupMembers: "timeline-group-members",
+    timelineGroupMember: "timeline-group-member",
+    timelineGroupTally: "timeline-group-tally",
+    timelineGroupRange: "timeline-group-range",
     lensHeading: "lens-heading",
     lensMeta: "lens-meta",
     lensCount: "lens-count",
@@ -3238,6 +3315,35 @@
   __name(createLensHeading, "createLensHeading");
 
   // src/change-inspector-timeline-grouping.ts
+  var VALIDATION_STATUS_ORDER = [
+    "passed",
+    "failed",
+    "errored",
+    "skipped"
+  ];
+  function summarizeTimelineGroup(group) {
+    const first = group.members[0];
+    const last = group.members[group.members.length - 1];
+    if (first === void 0 || last === void 0) {
+      throw new Error("Timeline group has no members");
+    }
+    const counts = /* @__PURE__ */ new Map();
+    for (const member of group.members) {
+      if (member.summary?.kind !== "validation_check_recorded") continue;
+      const status = member.summary.details.status;
+      counts.set(status, (counts.get(status) ?? 0) + 1);
+    }
+    return {
+      count: group.members.length,
+      firstOccurredAt: first.occurredAt,
+      lastOccurredAt: last.occurredAt,
+      statusTally: VALIDATION_STATUS_ORDER.flatMap((status) => {
+        const count = counts.get(status) ?? 0;
+        return count > 0 ? [{ status, count }] : [];
+      })
+    };
+  }
+  __name(summarizeTimelineGroup, "summarizeTimelineGroup");
   var GROUP_MIN_RUN = 3;
   function groupTimelineEntries(entries, minRun) {
     const rows = [];
@@ -3615,10 +3721,10 @@
   function appendActorFilterClause(filterText, actorId, surface) {
     const current = filterText.trim();
     const short = actorId.replace(/^actor:/, "");
-    if (!short || short.includes('"')) return current;
+    if (!short || short.includes('"')) return null;
     const clause = /\s/.test(short) ? `actor:"${short}"` : `actor:${short}`;
     const minted = parseSearchQueryFor(clause, surface).clauses[0];
-    if (minted?.kind !== "field" || minted.field !== "actor") return current;
+    if (minted?.kind !== "field" || minted.field !== "actor") return null;
     const already = parseSearchQueryFor(current, surface).clauses.some(
       (existing) => existing.kind === "field" && existing.field === "actor" && !existing.negate && existing.value === minted.value
     );
@@ -3967,33 +4073,44 @@
     row.append(rail);
   }
   __name(appendRail, "appendRail");
+  var GROUP_COLLAPSED_HINT = "collapsed run, press Enter to expand";
   function groupName(group) {
     const first = group.members[0];
     if (first === void 0) throw new Error("Timeline group has no members");
-    return `${eventGroupLabel(first)}, ${group.members.length} events`;
+    const summary = summarizeTimelineGroup(group);
+    const tally = summary.statusTally.map(
+      ({ status, count }) => `${count} ${status}`
+    );
+    return [
+      eventGroupLabel(first),
+      `${summary.count} events`,
+      ...tally,
+      `${summary.firstOccurredAt} to ${summary.lastOccurredAt}`
+    ].join(", ");
   }
   __name(groupName, "groupName");
-  function groupContainer(group) {
-    const item = document.createElement("li");
-    item.className = CLASS.timelineGroupMembers;
-    item.dataset.timelineGroupMembers = group.eventType;
-    item.setAttribute("role", "group");
-    item.setAttribute("aria-label", groupName(group));
-    const members = document.createElement("ol");
-    members.setAttribute("role", "none");
-    item.append(members);
-    return { item, members };
+  function clockText(occurredAt) {
+    const occurred = new Date(occurredAt);
+    return Number.isNaN(occurred.valueOf()) ? occurredAt : occurred.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit"
+    });
   }
-  __name(groupContainer, "groupContainer");
+  __name(clockText, "clockText");
   function groupRow(group, selectedEventId) {
     const first = group.members[0];
     if (first === void 0) throw new Error("Timeline group has no members");
     const presentation = presentEvent(first);
+    const summary = summarizeTimelineGroup(group);
     const row = optionRow(first.eventId, selectedEventId);
     row.classList.add(CLASS.timelineGroup);
     row.dataset.timelineGroup = group.eventType;
     row.dataset.timelineGroupSize = String(group.members.length);
-    row.setAttribute("aria-label", `${groupName(group)}, collapsed`);
+    row.setAttribute(
+      "aria-label",
+      `${groupName(group)}, ${GROUP_COLLAPSED_HINT}`
+    );
     appendOccurredAt(row, first.occurredAt);
     appendRail(row, group.eventType);
     const body = document.createElement("div");
@@ -4011,8 +4128,19 @@
     eventType.style.color = eventTypeColor(group.eventType);
     const count = document.createElement("span");
     count.className = CLASS.typeCount;
-    count.textContent = String(group.members.length);
+    count.textContent = String(summary.count);
     meta.append(eventType, count);
+    if (summary.statusTally.length) {
+      const tally = document.createElement("span");
+      tally.className = CLASS.timelineGroupTally;
+      tally.textContent = summary.statusTally.map(({ status, count: count2 }) => `${count2} ${status}`).join(" · ");
+      meta.append(tally);
+    }
+    const range = document.createElement("span");
+    range.className = CLASS.timelineGroupRange;
+    range.title = `${summary.firstOccurredAt} to ${summary.lastOccurredAt}`;
+    range.textContent = `${clockText(summary.firstOccurredAt)} – ${clockText(summary.lastOccurredAt)}`;
+    meta.append(range);
     body.append(heading, meta);
     row.append(body);
     return row;
@@ -4032,6 +4160,14 @@
       actorId,
       "change-timeline"
     );
+    if (q === null) {
+      const writer = document.createElement("span");
+      writer.dataset.timelineUnfilterableWriter = actorId;
+      writer.textContent = actorId;
+      writer.title = `writer ${actorId} · no filter link: Timeline search cannot express an id containing a double quote (")`;
+      parent.append(writer);
+      return;
+    }
     const link = appendTimelineLink(
       parent,
       actorId,
@@ -4176,25 +4312,17 @@
     const top = rowSpacer(localStart * rowHeight);
     const bottom = rowSpacer(Math.max(0, rows.length - localEnd) * rowHeight);
     const painted = [];
-    const containers = /* @__PURE__ */ new Map();
     for (const row of rows.slice(localStart, localEnd)) {
       if (row.kind === "group") {
         painted.push(groupRow(row, view.selectedEventId));
         continue;
       }
-      const member = entryRow(row.entry, view.selectedEventId, view.route);
-      if (row.ofGroup === void 0) {
-        painted.push(member);
-        continue;
+      const item = entryRow(row.entry, view.selectedEventId, view.route);
+      if (row.ofGroup !== void 0) {
+        item.classList.add(CLASS.timelineGroupMember);
+        item.dataset.timelineGroupMember = groupKey(row.ofGroup);
       }
-      let members = containers.get(row.ofGroup);
-      if (members === void 0) {
-        const created = groupContainer(row.ofGroup);
-        members = created.members;
-        containers.set(row.ofGroup, members);
-        painted.push(created.item);
-      }
-      members.append(member);
+      painted.push(item);
     }
     list.replaceChildren(top, ...painted, bottom);
     const activeOption = view.selectedEventId ? Array.from(list.querySelectorAll("[data-event-id]")).find(
@@ -5773,7 +5901,8 @@
           }
           return;
         }
-        if (event.key === "Enter" && !isNativeActionControl(event.target) || event.key === "ArrowRight" && isTimelineListTarget(event.target)) {
+        const space = event.key === " " && route.kind === "timeline" && isTimelineListTarget(event.target) && !isNativeActionControl(event.target);
+        if (event.key === "Enter" && !isNativeActionControl(event.target) || space || event.key === "ArrowRight" && isTimelineListTarget(event.target)) {
           const group = changeInspectorTimelineGroupAt(selectedTimelineEventId);
           if (group !== null) {
             event.preventDefault();
@@ -5785,7 +5914,7 @@
           }
           if (event.key === "ArrowRight") return;
         }
-        if (event.key === "ArrowLeft" && isTimelineListTarget(event.target)) {
+        if (space || event.key === "ArrowLeft" && isTimelineListTarget(event.target)) {
           const owner = changeInspectorTimelineGroupAt(selectedTimelineEventId, {
             includeExpanded: true
           });
@@ -6437,21 +6566,23 @@
       );
       const summaryLabel = entry?.summarySource === "revision_proposal_summary" ? entry.revisionProposalSummary : void 0;
       const identity = exactRevisionAccessibleIdentity(revision2);
-      const visibleLabel = entry?.label ?? (summaryLabel || "Current Revision");
+      const visibleLabel = summaryLabel === void 0 ? void 0 : entry?.label ?? summaryLabel;
+      const absentSummaryCue = entry?.summarySource === "absent" ? entry.absentSummaryCue : void 0;
       return {
         revision: revision2,
-        label: visibleLabel,
+        ...visibleLabel === void 0 ? {} : { label: visibleLabel },
+        ...absentSummaryCue === void 0 ? {} : { absentSummaryCue },
         visibleIdentity: shortExactRevision(revision2),
         // The accessible name leads with the same visible label the card shows
         // (never a raw summary that could drift from it), and stays identity-led
         // for an absent summary so it never claims a summary that was not given.
-        accessibleName: entry?.summarySource === "revision_proposal_summary" ? `Current Revision — ${visibleLabel}; ${identity}` : `Current Revision — ${identity}`,
+        accessibleName: visibleLabel !== void 0 ? `Current Revision — ${visibleLabel}; ${identity}` : absentSummaryCue !== void 0 ? `Current Revision — ${identity}; ${absentSummaryCue}` : `Current Revision — ${identity}`,
         title: identity,
         copyText: exactRevisionCopyText([revision2])
       };
     });
     const onlyPeer = peers.length === 1 ? peers[0] : void 0;
-    const headline = onlyPeer === void 0 ? peers.length === 0 ? "Current Revision unavailable" : "Multiple current Revisions need selection" : onlyPeer.label;
+    const headline = onlyPeer === void 0 ? peers.length === 0 ? "Current Revision unavailable" : "Multiple current Revisions need selection" : onlyPeer.label ?? onlyPeer.visibleIdentity;
     const currentRevisionName = peers.length === 0 ? "Current Revision unavailable" : peers.length === 1 ? peers[0].accessibleName : `Current Revisions — ${peers.map(
       (peer) => peer.accessibleName.replace(/^Current Revision — /, "")
     ).join("; ")}`;
@@ -6463,6 +6594,7 @@
       title: `Change ${summary.changeId}`,
       copyText: summary.changeId,
       headline,
+      ...onlyPeer?.absentSummaryCue === void 0 ? {} : { absentSummaryCue: onlyPeer.absentSummaryCue },
       stateAxes: [
         { label: "Topology", value: words2(summary.topology) },
         { label: "Lifecycle", value: words2(summary.lifecycle) },
@@ -6479,6 +6611,49 @@
     };
   }
   __name(changeCardPresentation, "changeCardPresentation");
+
+  // src/change-inspector-references.ts
+  function recordingEventTargets(facts) {
+    const targets = /* @__PURE__ */ new Map();
+    for (const fact2 of facts) {
+      if (fact2.recordingEventId !== void 0)
+        targets.set(fact2.factId, fact2.recordingEventId);
+    }
+    return targets;
+  }
+  __name(recordingEventTargets, "recordingEventTargets");
+  function bindReferenceChips(container, targets, from, navigate) {
+    for (const chip of container.querySelectorAll(
+      "[data-ref-kind]"
+    )) {
+      const referenceId = chip.dataset.refId ?? "";
+      const route = referenceTargetRoute(referenceId, targets, from);
+      if (route === null) {
+        chip.removeAttribute("role");
+        chip.removeAttribute("tabindex");
+        chip.removeAttribute("data-ref-kind");
+        continue;
+      }
+      const button2 = document.createElement("button");
+      button2.type = "button";
+      button2.className = chip.className;
+      button2.dataset.refKind = chip.dataset.refKind;
+      button2.dataset.refId = referenceId;
+      button2.dataset.relationFactId = referenceId;
+      button2.textContent = chip.textContent;
+      button2.title = referenceId;
+      button2.setAttribute(
+        "aria-label",
+        `Open the Timeline event that recorded ${referenceId}`
+      );
+      button2.addEventListener("click", (event) => {
+        event.stopPropagation();
+        navigate(route);
+      });
+      chip.replaceWith(button2);
+    }
+  }
+  __name(bindReferenceChips, "bindReferenceChips");
 
   // src/markdown.ts
   function renderBodyContent(text, contentType) {
@@ -7434,11 +7609,12 @@
     return exactRoute(route, Object.keys(next).length ? next : void 0);
   }
   __name(updateFocus, "updateFocus");
-  function expandFile(section, file, ctx) {
+  function expandFile(section, file, ctx, bindReferences) {
     const body = section.querySelector("[data-dfile-body]");
     if (!body) return;
     if (body.dataset.rendered !== "1") {
       body.innerHTML = renderDiffFileBody(file, ctx.anchored);
+      bindReferences(body);
       body.dataset.rendered = "1";
     }
     section.dataset.expanded = "true";
@@ -7452,26 +7628,27 @@
     return matching.find((element) => element.classList.contains("anno")) ?? matching[0] ?? null;
   }
   __name(factTarget, "factTarget");
-  function focusFile(body, ctx, filePath) {
+  function focusFile(body, ctx, filePath, bindReferences) {
     const index = ctx.files.findIndex(
       (file) => file.new_path === filePath || file.old_path === filePath
     );
     if (index < 0) return;
     const section = body.querySelector(`[data-dfile="${index}"]`);
     if (!section) return;
-    expandFile(section, ctx.files[index], ctx);
+    expandFile(section, ctx.files[index], ctx, bindReferences);
     section.dataset.exactFocus = "true";
     section.scrollIntoView({ block: "start", behavior: "auto" });
     section.focus({ preventScroll: true });
   }
   __name(focusFile, "focusFile");
-  function focusFact(body, ctx, factId) {
+  function focusFact(body, ctx, factId, bindReferences) {
     const fact2 = [
       ...ctx.anchored,
       ...ctx.decisionContext,
       ...ctx.unanchored
     ].find((item) => item.id === factId);
-    if (fact2?.target?.filePath) focusFile(body, ctx, fact2.target.filePath);
+    if (fact2?.target?.filePath)
+      focusFile(body, ctx, fact2.target.filePath, bindReferences);
     const target = factTarget(body, factId);
     if (!target) return;
     target.dataset.exactFocus = "true";
@@ -7548,7 +7725,7 @@
     }
   }
   __name(renderNavigator, "renderNavigator");
-  function bindDiffBody(body, route, actions2, ctx) {
+  function bindDiffBody(body, route, actions2, ctx, bindReferences) {
     ctx.files.forEach((file, index) => {
       const section = body.querySelector(`[data-dfile="${index}"]`);
       if (!section) return;
@@ -7562,7 +7739,7 @@
           section.dataset.expanded = "false";
           section.querySelector(".dfile-head")?.setAttribute("aria-expanded", "false");
         } else {
-          expandFile(section, file, ctx);
+          expandFile(section, file, ctx, bindReferences);
         }
       }, "toggle");
       const header = section.querySelector(".dfile-head");
@@ -7579,7 +7756,7 @@
         const section = renderAll.closest(".dfile");
         const index = Number(section?.dataset.dfile);
         if (section && Number.isInteger(index))
-          expandFile(section, ctx.files[index], ctx);
+          expandFile(section, ctx.files[index], ctx, bindReferences);
         return;
       }
       const noted = target?.closest(".drow-noted[data-anno]");
@@ -7657,12 +7834,16 @@
       artifact,
       annotationsForExactRevision(detail)
     );
+    const recordingEvents = recordingEventTargets(detail.factPresentations);
+    const bindReferences = /* @__PURE__ */ __name((element) => bindReferenceChips(element, recordingEvents, route, actions2.navigate), "bindReferences");
     body.innerHTML = rendered.html;
-    bindDiffBody(body, route, actions2, rendered.ctx);
+    bindReferences(body);
+    bindDiffBody(body, route, actions2, rendered.ctx, bindReferences);
     renderNavigator(nav, route, actions2, rendered.ctx);
     if (route.focus?.filePath)
-      focusFile(body, rendered.ctx, route.focus.filePath);
-    if (route.focus?.factId) focusFact(body, rendered.ctx, route.focus.factId);
+      focusFile(body, rendered.ctx, route.focus.filePath, bindReferences);
+    if (route.focus?.factId)
+      focusFact(body, rendered.ctx, route.focus.factId, bindReferences);
     return true;
   }
   __name(renderChangeInspectorDiffPage, "renderChangeInspectorDiffPage");
@@ -8913,8 +9094,55 @@
     return definition;
   }
   __name(appendDefinition, "appendDefinition");
-  function renderEventDetail(event, actions2) {
+  function recordingEventControl(factId, eventId, activate) {
+    const button2 = document.createElement("button");
+    button2.type = "button";
+    button2.className = "ghost mono";
+    button2.textContent = shortRef(factId);
+    button2.title = factId;
+    button2.setAttribute(
+      "aria-label",
+      `Open the Timeline event that recorded ${factId}`
+    );
+    button2.dataset.relationFactId = factId;
+    button2.addEventListener("click", () => activate(eventId));
+    return button2;
+  }
+  __name(recordingEventControl, "recordingEventControl");
+  function plainFactReference(factId) {
+    const named = document.createElement("code");
+    named.textContent = shortRef(factId);
+    named.title = factId;
+    return named;
+  }
+  __name(plainFactReference, "plainFactReference");
+  function relationTargetMap(event) {
+    return new Map(
+      (event.relationTargets ?? []).map((target) => [
+        target.factId,
+        target.eventId
+      ])
+    );
+  }
+  __name(relationTargetMap, "relationTargetMap");
+  function appendRelationDefinition(list, label2, factIds, targets, activate) {
+    const term = document.createElement("dt");
+    term.textContent = label2;
+    const definition = document.createElement("dd");
+    factIds.forEach((factId, index) => {
+      if (index > 0) definition.append(document.createTextNode("; "));
+      const eventId = targets.get(factId);
+      definition.append(
+        eventId === void 0 ? plainFactReference(factId) : recordingEventControl(factId, eventId, activate)
+      );
+    });
+    list.append(term, definition);
+  }
+  __name(appendRelationDefinition, "appendRelationDefinition");
+  function renderEventDetail(event, route, actions2) {
     const presentation = presentEvent(event);
+    const targets = relationTargetMap(event);
+    const openRecordingEvent = /* @__PURE__ */ __name((eventId) => actions2.navigate(recordingEventRoute(eventId, route)), "openRecordingEvent");
     const heading = detailHeading(presentation.title);
     const identity = detailLine(event.eventId, "mono");
     identity.title = event.eventId;
@@ -8929,12 +9157,23 @@
         presentation.body,
         presentation.bodyContentType ?? "text/plain"
       );
+      bindReferenceChips(body, targets, route, actions2.navigate);
       summary.append(body);
     }
     const summaryFacts = document.createElement("dl");
     summaryFacts.className = "kv";
     for (const item of presentation.fields) {
-      appendDefinition(summaryFacts, item.label, item.value);
+      if (item.factIds) {
+        appendRelationDefinition(
+          summaryFacts,
+          item.label,
+          item.factIds,
+          targets,
+          openRecordingEvent
+        );
+      } else {
+        appendDefinition(summaryFacts, item.label, item.value);
+      }
     }
     if (presentation.fields.length) summary.append(summaryFacts);
     const attribution = document.createElement("section");
@@ -9175,15 +9414,18 @@
     return identity;
   }
   __name(exactRevisionIdentity2, "exactRevisionIdentity");
-  function renderedFactBody(content, contentType) {
+  function renderedFactBody(content, contentType, bindReferences) {
     const body = document.createElement("div");
     body.className = "anno-body";
     const text = content.kind === "observation" || content.kind === "input_request" ? content.body : content.kind === "assessment" || content.kind === "validation" ? content.summary : void 0;
-    if (text) body.innerHTML = renderBodyContent(text, contentType);
+    if (text) {
+      body.innerHTML = renderBodyContent(text, contentType);
+      bindReferences(body);
+    }
     return body;
   }
   __name(renderedFactBody, "renderedFactBody");
-  function renderedInputRequestResponses(content) {
+  function renderedInputRequestResponses(content, bindReferences) {
     if (content.kind !== "input_request") return null;
     const responses = content.responses ?? [];
     if (responses.length === 0) return null;
@@ -9211,6 +9453,7 @@
           response.reason,
           response.contentType
         );
+        bindReferences(reason);
         entry.append(reason);
       }
       nest.append(entry);
@@ -9249,8 +9492,7 @@
     return line;
   }
   __name(factTargetLine, "factTargetLine");
-  function factRelationLines(factId, graph, present, activate) {
-    if (!graph) return [];
+  function factRelationLines(factId, graph, relations, present, activate) {
     const lines = [];
     const relate = /* @__PURE__ */ __name((label2, edges) => {
       for (const edge of edges) {
@@ -9273,8 +9515,18 @@
         lines.push(line);
       }
     }, "relate");
-    relate("supersedes", graph.observationSupersedes);
-    relate("replaces", graph.assessmentReplaces);
+    if (graph) {
+      relate("supersedes", graph.observationSupersedes);
+      relate("replaces", graph.assessmentReplaces);
+    }
+    relate(
+      "responds to",
+      relations.filter((edge) => edge.kind === "responds_to")
+    );
+    relate(
+      "relates to",
+      relations.filter((edge) => edge.kind === "relates")
+    );
     return lines;
   }
   __name(factRelationLines, "factRelationLines");
@@ -9296,6 +9548,10 @@
       groups.set(fact2.family, family);
     }
     const presentFactIds = documentFactIds(reading.document.factPresentations);
+    const recordingEvents = recordingEventTargets(
+      reading.document.factPresentations
+    );
+    const bindReferences = /* @__PURE__ */ __name((body) => bindReferenceChips(body, recordingEvents, route, actions2.navigate), "bindReferences");
     const focusFact2 = /* @__PURE__ */ __name((factId) => actions2.navigate({
       kind: route.kind,
       changeId: route.changeId,
@@ -9355,6 +9611,7 @@
           ...factRelationLines(
             fact2.factId,
             reading.document.inspectorPresentation?.factGraph,
+            fact2.relations ?? [],
             presentFactIds,
             focusFact2
           )
@@ -9371,12 +9628,19 @@
           );
         }
         if (content) {
-          const responses = renderedInputRequestResponses(content.content);
+          const responses = renderedInputRequestResponses(
+            content.content,
+            bindReferences
+          );
           card.append(
             detailLine(
               `body: ${content.bodyContentState.replaceAll("_", " ")} · ${content.contentType}`
             ),
-            renderedFactBody(content.content, content.contentType),
+            renderedFactBody(
+              content.content,
+              content.contentType,
+              bindReferences
+            ),
             ...responses ? [responses] : []
           );
         }
@@ -9992,7 +10256,7 @@
         (entry) => entry.eventId === route.eventId
       );
       replaceDetailWith(
-        ...event ? renderEventDetail(event, actions2) : [
+        ...event ? renderEventDetail(event, route, actions2) : [
           detailHeading("Event"),
           message(
             "This exact event was not present in the bounded Timeline response."
@@ -10241,6 +10505,12 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         cardHeading.className = "change-card-heading";
         cardHeading.append(primary);
         element.append(cardHeading);
+        if (card.absentSummaryCue !== void 0) {
+          const cue = document.createElement("p");
+          cue.className = "change-card-summary-absent";
+          cue.textContent = card.absentSummaryCue;
+          element.append(cue);
+        }
         if (card.attention) {
           const attention = document.createElement("section");
           attention.className = "change-card-attention";
@@ -10344,7 +10614,13 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
             const choose = document.createElement("button");
             choose.type = "button";
             choose.className = "ghost change-card-peer-open";
-            choose.textContent = `Open · ${peer.label} · ${peer.visibleIdentity}`;
+            choose.textContent = peer.label === void 0 ? `Open · ${peer.visibleIdentity}` : `Open · ${peer.label} · ${peer.visibleIdentity}`;
+            if (peer.absentSummaryCue !== void 0) {
+              const cue = document.createElement("span");
+              cue.className = "change-card-summary-absent";
+              cue.textContent = ` · ${peer.absentSummaryCue}`;
+              choose.append(cue);
+            }
             choose.title = peer.title;
             choose.setAttribute(
               "aria-label",
@@ -10489,13 +10765,27 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           ) ?? [],
           ...completion?.unresolvedRevisionIds ?? []
         ]);
+      case "actor":
+        return (completion?.actorIds ?? []).filter(
+          (actorId) => !actorShortForm(actorId).includes('"')
+        );
       default:
         return [];
     }
   }
   __name(completionValues, "completionValues");
+  function actorShortForm(actorId) {
+    return actorId.replace(/^actor:/, "");
+  }
+  __name(actorShortForm, "actorShortForm");
   function suggestionForValue(typedField, canonicalField, value, negate) {
     const prefix = negate ? "-" : "";
+    if (canonicalField === "actor") {
+      const short = actorShortForm(value);
+      const clauseValue = /\s/.test(short) ? `"${short}"` : short;
+      const insertText2 = `${prefix}${typedField}:${clauseValue}`;
+      return { insertText: insertText2, label: insertText2, title: `${typedField}:${value}` };
+    }
     const insertText = `${prefix}${typedField}:${value}`;
     if (canonicalField !== "change" && canonicalField !== "revision") {
       return { insertText, label: insertText };

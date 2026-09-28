@@ -279,6 +279,7 @@ function eventHistory(): EventHistoryDocument {
       changeIds: ["change:sha256:one"],
       revisionRefs: [revision],
       unresolvedRevisionIds: [],
+      actorIds: [],
     },
     diagnostics: [],
     queryNotices: [],
@@ -1766,6 +1767,50 @@ describe("Change inspector render", () => {
     expect(card?.querySelectorAll("button")).toHaveLength(1);
   });
 
+  it("renders an absent-summary card with the exact id headline and a muted server cue", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const absentChanges: ChangesPage = {
+      ...changes,
+      presentations: {
+        "change:sha256:one": {
+          currentRevisions: [
+            {
+              revision,
+              summarySource: "absent",
+              absentSummaryCue: "No summary supplied",
+            },
+          ],
+        },
+      },
+    };
+    const state = createChangeInspectorState({
+      kind: "lens",
+      lens: "changes",
+      query: {},
+    });
+    state.publish(stageGeneration(profile, absentChanges, attention, profile));
+    renderChangeInspector(state.snapshot(), { navigate });
+
+    const card = document.querySelector<HTMLElement>(
+      '.unit-card[data-change-id="change:sha256:one"]',
+    );
+    expect(card?.querySelector("h3 .change-card-headline")?.textContent).toBe(
+      "revision:sha256:one · sha256:artifact",
+    );
+    const cue = card?.querySelector(":scope > p.change-card-summary-absent");
+    expect(cue?.textContent).toBe("No summary supplied");
+    // The cue sits directly under the heading, outside the primary control.
+    expect(
+      cue?.previousElementSibling?.classList.contains("change-card-heading"),
+    ).toBe(true);
+    expect(card?.textContent).not.toContain("Current Revision ·  ");
+    expect(
+      card?.querySelector(".change-card-primary")?.getAttribute("aria-label"),
+    ).toContain("No summary supplied");
+    expect(card?.querySelectorAll("button")).toHaveLength(1);
+  });
+
   it("renders one exact current Revision as a native secondary anchor without changing the card primary", () => {
     const navigate = vi.fn();
     prepareChangeInspectorShell({ navigate });
@@ -1822,7 +1867,7 @@ describe("Change inspector render", () => {
             {
               revision,
               summarySource: "absent",
-              label: "No summary at capture",
+              absentSummaryCue: "No summary supplied",
             },
             {
               revision: secondRevision,
@@ -1852,9 +1897,20 @@ describe("Change inspector render", () => {
     const firstPeer = peerActions.find(
       (action) => action.dataset.revisionId === revision.revisionId,
     );
+    // #752: an absent-summary peer is named by its short exact id once, with
+    // the server cue as a muted suffix; a supplied summary leads its peer.
     expect(firstPeer?.textContent).toBe(
-      "Open · No summary at capture · revision:sha256:one · sha256:artifact",
+      "Open · revision:sha256:one · sha256:artifact · No summary supplied",
     );
+    expect(
+      firstPeer?.querySelector(".change-card-summary-absent")?.textContent,
+    ).toBe(" · No summary supplied");
+    expect(firstPeer?.getAttribute("aria-label")).toContain(
+      "No summary supplied",
+    );
+    expect(
+      document.querySelector(".unit-card > .change-card-summary-absent"),
+    ).toBeNull();
     expect(firstPeer?.getAttribute("aria-label")).toContain(
       revision.revisionId,
     );
@@ -2266,10 +2322,105 @@ describe("Change inspector render", () => {
       "#detail-body .detail-facts",
     );
     const text = facts?.textContent ?? "";
-    // These live only on the Timeline wire, never on the exact-Revision response.
+    // No fact in this response carries a relation edge, so none is rendered.
     expect(text).not.toContain("responds to");
+    expect(text).not.toContain("relates to");
     expect(text).not.toContain("related observations");
     expect(text).not.toContain("related input requests");
+  });
+
+  it("states recorded responds-to and relates edges and activates only same-document endpoints", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    const facts = localFacts();
+    const presentations = (facts.factPresentations ?? []).map((fact) =>
+      fact.factId === "obs:sha256:focused"
+        ? {
+            ...fact,
+            relations: [
+              {
+                kind: "responds_to" as const,
+                fromFactId: "obs:sha256:focused",
+                toFactId: "obs:sha256:elsewhere",
+              },
+            ],
+          }
+        : fact.factId === "assess:sha256:verdict"
+          ? {
+              ...fact,
+              relations: [
+                {
+                  kind: "relates" as const,
+                  fromFactId: "assess:sha256:verdict",
+                  toFactId: "input-request:sha256:ask",
+                },
+                {
+                  kind: "relates" as const,
+                  fromFactId: "assess:sha256:verdict",
+                  toFactId: "obs:sha256:focused",
+                },
+              ],
+            }
+          : fact,
+    );
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading: readingWith({ ...facts, factPresentations: presentations }),
+        refusal: null,
+      },
+    );
+    const lines = (factId: string) =>
+      Array.from(
+        document.querySelectorAll<HTMLElement>(
+          `#detail-body .detail-facts [data-fact-id="${factId}"] .fact-rel`,
+        ),
+      );
+
+    // The endpoint is absent from this response: named, never activated.
+    const reply = lines("obs:sha256:focused").find((line) =>
+      line.textContent?.startsWith("responds to"),
+    );
+    expect(reply?.querySelector("button")).toBeNull();
+    expect(reply?.querySelector("code")?.title).toBe("obs:sha256:elsewhere");
+
+    const relates = lines("assess:sha256:verdict").filter((line) =>
+      line.textContent?.startsWith("relates to"),
+    );
+    expect(relates).toHaveLength(2);
+    const controls = relates.map((line) =>
+      line.querySelector<HTMLButtonElement>("button"),
+    );
+    expect(controls.map((control) => control?.dataset.relationFactId)).toEqual([
+      "input-request:sha256:ask",
+      "obs:sha256:focused",
+    ]);
+    for (const control of controls) {
+      expect(control?.type).toBe("button");
+      expect(control?.dataset.factId).toBeUndefined();
+    }
+    controls[1]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+      focus: { factId: "obs:sha256:focused" },
+    });
+    // A fact that records no edge gets no relation line of either kind.
+    expect(
+      lines("input-request:sha256:ask").filter((line) =>
+        /^(responds to|relates to)/.test(line.textContent ?? ""),
+      ),
+    ).toHaveLength(0);
   });
 
   it("activates a replacement target the same response carries", () => {
@@ -3356,5 +3507,290 @@ describe("Change page order prose", () => {
     expect(metadataFor("attention", "change_id_asc")).toContain(
       "Change ID order within groups",
     );
+  });
+});
+
+describe("Bare fact references navigate to their recording events", () => {
+  const resolved = "obs:sha256:aaaaaaaa11111111";
+  const unresolved = "obs:sha256:bbbbbbbb22222222";
+  const replaced = "assess:sha256:cccccccc33333333";
+  const recordingEvent = "evt:sha256:dddddddd44444444";
+
+  function assessmentEventHistory(): EventHistoryDocument {
+    const base = eventHistory();
+    return {
+      ...base,
+      facets: { review_assessment_recorded: 1, change_declared: 0 },
+      completion: {
+        ...base.completion,
+        eventTypes: ["review_assessment_recorded", "change_declared"],
+      },
+      entries: [
+        {
+          ...base.entries[0],
+          eventType: "review_assessment_recorded",
+          summary: {
+            kind: "review_assessment_recorded",
+            details: {
+              assessmentId: "assess:sha256:eeeeeeee55555555",
+              target: { kind: "revision", revisionId: revision.revisionId },
+              assessment: "accepted",
+              summary: `Built on ${resolved}; see also ${unresolved}.`,
+              summaryContentType: "text/markdown",
+              replacesAssessmentIds: [replaced],
+              relatedObservationIds: [resolved, unresolved],
+            },
+          },
+          relationTargets: [{ factId: resolved, eventId: recordingEvent }],
+        },
+      ],
+    };
+  }
+
+  function renderAssessmentEvent(
+    historyQuery: Extract<
+      ChangeInspectorRoute,
+      { kind: "event" }
+    >["historyQuery"],
+  ): ReturnType<typeof vi.fn> {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "event",
+      eventId: "evt:sha256:one",
+      historyQuery,
+      query: {},
+    });
+    state.publish(
+      stageGeneration(
+        profile,
+        changes,
+        attention,
+        profile,
+        assessmentEventHistory(),
+      ),
+    );
+    renderChangeInspector(state.snapshot(), { navigate });
+    return navigate;
+  }
+
+  function summaryDefinition(label: string): HTMLElement | null {
+    const terms = document.querySelectorAll<HTMLElement>(
+      "#detail-body .event-detail-summary dt",
+    );
+    const term = [...terms].find((item) => item.textContent === label);
+    return (term?.nextElementSibling as HTMLElement | null) ?? null;
+  }
+
+  it("activates a relationship id the server resolved to its recording event", () => {
+    const navigate = renderAssessmentEvent({ order: "asc", q: "accepted" });
+    const related = summaryDefinition("observations");
+    const control = related?.querySelector<HTMLButtonElement>(
+      `button[data-relation-fact-id="${resolved}"]`,
+    );
+    expect(control?.type).toBe("button");
+    expect(control?.textContent).toBe("obs:aaaaaaaa");
+    expect(control?.getAttribute("aria-label")).toBe(
+      `Open the Timeline event that recorded ${resolved}`,
+    );
+    // Keyboard reachable as a native, enabled button in tab order.
+    expect(control?.tabIndex).toBe(0);
+    expect(control?.disabled).toBe(false);
+    expect(control?.hidden).toBe(false);
+    // A relation control never shadows a fact card in focus resolution.
+    expect(control?.dataset.factId).toBeUndefined();
+    control?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    // Filters are cleared so the locator always matches; the page anchors on
+    // the recording event instead of resetting, and the reader's order stays.
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "event",
+      eventId: recordingEvent,
+      historyQuery: { order: "asc" },
+      query: {},
+    });
+  });
+
+  it("renders a relationship id without a server target as plain text", () => {
+    renderAssessmentEvent({});
+    const related = summaryDefinition("observations");
+    expect(related?.querySelectorAll("button")).toHaveLength(1);
+    const plain = [...(related?.querySelectorAll("code") ?? [])];
+    expect(plain.map((item) => item.title)).toEqual([unresolved]);
+    expect(plain[0]?.dataset.relationFactId).toBeUndefined();
+    expect(plain[0]?.getAttribute("role")).toBeNull();
+    expect(plain[0]?.tabIndex).toBe(-1);
+    const replaces = summaryDefinition("replaces");
+    expect(replaces?.querySelector("button")).toBeNull();
+    expect(replaces?.querySelector("[data-relation-fact-id]")).toBeNull();
+    expect(replaces?.querySelector("code")?.title).toBe(replaced);
+  });
+
+  it("routes a resolved reference chip in a Markdown event body and flattens the rest", () => {
+    const navigate = renderAssessmentEvent({});
+    const body = document.querySelector<HTMLElement>(
+      "#detail-body .event-detail-summary .anno-body",
+    );
+    const chip = body?.querySelector<HTMLButtonElement>(
+      `button[data-ref-id="${resolved}"]`,
+    );
+    expect(chip?.type).toBe("button");
+    expect(chip?.dataset.relationFactId).toBe(resolved);
+    chip?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "event",
+      eventId: recordingEvent,
+      historyQuery: {},
+      query: {},
+    });
+    const flat = body?.querySelector<HTMLElement>(
+      `[data-ref-id="${unresolved}"]`,
+    );
+    expect(flat?.tagName).toBe("SPAN");
+    expect(flat?.dataset.refKind).toBeUndefined();
+    expect(flat?.getAttribute("role")).toBeNull();
+    expect(flat?.hasAttribute("tabindex")).toBe(false);
+    expect(flat?.title).toBe(unresolved);
+  });
+
+  it("routes a reference chip inside an annotated-diff fact body without also focusing its row", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "diff",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+      focus: { filePath: "src/lib.rs" },
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    const base = revisionReading().document;
+    const document_ = {
+      ...base,
+      factPresentations: [
+        base.factPresentations[0],
+        {
+          factId: resolved,
+          family: "observation",
+          originRevision: revision,
+          actorId: "author",
+          revisionCurrency: "current",
+          familyState: "current",
+          availability: "available",
+          recordingEventId: recordingEvent,
+        },
+      ],
+      factContentPresentations: {
+        ...base.factContentPresentations,
+        "obs:sha256:focused": {
+          contentType: "text/markdown" as const,
+          bodyContentState: "present" as const,
+          content: {
+            kind: "observation" as const,
+            title: "Readable fact",
+            body: `Follows ${resolved} but not ${unresolved}`,
+          },
+        },
+      },
+    };
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      { reading: { kind: "diff", document: document_ }, refusal: null },
+    );
+    const chip = document.querySelector<HTMLButtonElement>(
+      `#diff-page-body button[data-ref-id="${resolved}"]`,
+    );
+    expect(chip?.type).toBe("button");
+    expect(chip?.dataset.relationFactId).toBe(resolved);
+    navigate.mockClear();
+    chip?.click();
+    expect(navigate).toHaveBeenCalledOnce();
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "event",
+      eventId: recordingEvent,
+      historyQuery: {},
+      query: {},
+    });
+    const flat = document.querySelector<HTMLElement>(
+      `#diff-page-body [data-ref-id="${unresolved}"]`,
+    );
+    expect(flat?.dataset.refKind).toBeUndefined();
+    expect(flat?.getAttribute("role")).toBeNull();
+  });
+
+  it("routes a reference chip inside an exact Revision Markdown body to the server-supplied recording event", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    const base = revisionReading().document;
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading: readingWith({
+          factPresentations: [
+            {
+              ...base.factPresentations[0],
+              recordingEventId: "evt:sha256:ffffffff66666666",
+            },
+            {
+              factId: resolved,
+              family: "observation",
+              originRevision: revision,
+              actorId: "author",
+              revisionCurrency: "current",
+              familyState: "current",
+              availability: "available",
+              recordingEventId: recordingEvent,
+            },
+          ],
+          factContentPresentations: {
+            ...base.factContentPresentations,
+            "obs:sha256:focused": {
+              contentType: "text/markdown",
+              bodyContentState: "present",
+              content: {
+                kind: "observation",
+                title: "Readable fact",
+                body: `**Follows** ${resolved} but not ${unresolved}`,
+              },
+            },
+          },
+        }),
+        refusal: null,
+      },
+    );
+    const card = document.querySelector<HTMLElement>(
+      '#detail-body .detail-facts [data-fact-id="obs:sha256:focused"]',
+    );
+    expect(card?.querySelector("strong")?.textContent).toBe("Follows");
+    const chip = card?.querySelector<HTMLButtonElement>(
+      `.anno-body button[data-ref-id="${resolved}"]`,
+    );
+    expect(chip?.type).toBe("button");
+    expect(chip?.getAttribute("aria-label")).toBe(
+      `Open the Timeline event that recorded ${resolved}`,
+    );
+    expect(chip?.dataset.factId).toBeUndefined();
+    expect(chip?.closest("[data-fact-id]")).toBe(card);
+    chip?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "event",
+      eventId: recordingEvent,
+      historyQuery: {},
+      query: {},
+    });
+    const flat = card?.querySelector<HTMLElement>(
+      `.anno-body [data-ref-id="${unresolved}"]`,
+    );
+    expect(flat?.tagName).toBe("SPAN");
+    expect(flat?.dataset.refKind).toBeUndefined();
+    expect(flat?.getAttribute("role")).toBeNull();
   });
 });

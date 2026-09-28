@@ -10,9 +10,9 @@ use pointbreak::session::{
     AUTHORITATIVE_REVISION_PAGE_PROFILE, DerivedHistoryAccess, DerivedRevisionPageRoute,
     QueryDiagnosticCode, QuerySurface, RefFilterMode, RevisionListOptions,
     RevisionOverviewsOptions, RevisionPageCursor, RevisionPageRequest, RevisionPageRequestError,
-    RevisionRecordInputs, SnapshotSummaryCache, SupersessionView, UnreachableVisibility,
+    RevisionRecordInputs, SnapshotSummaryCache, UnreachableVisibility,
     build_revision_search_record, list_revisions, matches_query, parse_event_instant,
-    parse_search_query_for, read_events_for_display, revision_supersession_classification,
+    parse_search_query_for, read_events_for_display, revision_replacement_classification,
     show_revision_overviews,
 };
 use sha2::{Digest, Sha256};
@@ -457,8 +457,8 @@ fn apply_revision_filter(
             .with_read_for_display(true),
     )?;
     let (events, _) = read_events_for_display(repo)?;
-    let classification =
-        revision_supersession_classification(&SupersessionView::from_events(&events)?);
+    // `is:superseded` and `is:contested` follow Change-scoped replacement.
+    let classification = revision_replacement_classification(&events)?;
 
     // Parse on the revision surface. A known-but-unsupported qualifier or value is
     // a usage error (non-zero exit carrying the message); a deprecated qualifier

@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use pointbreak::documents::{EventHistoryDocumentV1, EventHistoryEntryV1, EventHistoryOrderV1};
+use pointbreak::documents::{
+    EventHistoryDocumentV1, EventHistoryEntryV1, EventHistoryOrderV1, event_history_page_actor_ids,
+};
 use pointbreak::session::{
     DerivedTimelinePageBoundaryV1, DerivedTimelinePageV1, QueryDiagnosticCode, QuerySurface,
     SearchRecord, event_history_search_record, matches_query, parse_search_query_for,
@@ -69,7 +71,16 @@ pub(super) fn bind_derived_page(
     let mut document = page.into_document();
     document.previous = previous;
     document.next = next;
+    bind_page_actor_completion(&mut document);
     Ok(document)
+}
+
+/// Actor completion is page-scoped: it names only the writers of the entries
+/// this document returns, so it is bounded by the page limit and never
+/// enumerates the store. Both the derived and the in-memory path bind it here,
+/// after the page window is final.
+fn bind_page_actor_completion(document: &mut EventHistoryDocumentV1) {
+    document.completion.actor_ids = event_history_page_actor_ids(&document.entries);
 }
 
 fn public_boundary(boundary: &DerivedTimelinePageBoundaryV1) -> Boundary {
@@ -209,6 +220,7 @@ pub(super) fn apply(
     document.offset = start;
     document.match_index = match_index;
     document.entries = selected[start..end].to_vec();
+    bind_page_actor_completion(&mut document);
     Ok(document)
 }
 
@@ -360,6 +372,7 @@ mod tests {
                     .into_iter()
                     .collect(),
                 summary: EventHistorySummaryV1::ReviewInitialized,
+                relation_targets: Vec::new(),
             })
             .collect::<Vec<_>>();
         EventHistoryDocumentV1 {
@@ -446,6 +459,49 @@ mod tests {
             );
             assert!(third.next.is_none());
         }
+    }
+
+    #[test]
+    fn actor_completion_names_only_the_writers_on_the_returned_page() {
+        let mut source = document(6);
+        for (index, entry) in source.entries.iter_mut().enumerate() {
+            entry.writer.actor_id = pointbreak::model::ActorId::new(match index {
+                0 | 3 => "actor:zeta",
+                1 => "actor:alpha",
+                2 => "actor:mu",
+                _ => "actor:omega",
+            });
+        }
+        // The in-memory path starts from a whole-history document whose
+        // store-wide sets are untouched; actor ids come from the page only.
+        source.completion.actor_ids = vec![pointbreak::model::ActorId::new("actor:stale")];
+
+        let first = apply(source.clone(), &parse("limit=3&order=asc"), &signer()).unwrap();
+        assert_eq!(
+            first
+                .completion
+                .actor_ids
+                .iter()
+                .map(|actor| actor.as_str())
+                .collect::<Vec<_>>(),
+            ["actor:alpha", "actor:mu", "actor:zeta"]
+        );
+        let second = apply(
+            source,
+            &submit_token("limit=3&order=asc", first.next.as_deref().unwrap()),
+            &signer(),
+        )
+        .unwrap();
+        assert_eq!(
+            second
+                .completion
+                .actor_ids
+                .iter()
+                .map(|actor| actor.as_str())
+                .collect::<Vec<_>>(),
+            ["actor:omega", "actor:zeta"]
+        );
+        assert!(second.completion.actor_ids.len() <= second.entries.len());
     }
 
     #[test]

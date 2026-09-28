@@ -141,6 +141,7 @@ function validEventHistoryValue() {
       changeIds: ["change:sha256:one"],
       revisionRefs: [],
       unresolvedRevisionIds: [],
+      actorIds: ["actor:author"],
     },
     diagnostics: [],
     queryNotices: [],
@@ -305,6 +306,31 @@ describe("bounded Change protocol", () => {
     for (const corrupt of malformed) {
       const value = structuredClone(validEventHistoryValue());
       corrupt(value);
+      expect(() => decodeEventHistory(value)).toThrow(
+        "invalid event history DTO",
+      );
+    }
+  });
+
+  it("decodes page-scoped actor completion and rejects a missing or duplicated set", () => {
+    expect(
+      decodeEventHistory(structuredClone(validEventHistoryValue())).completion
+        .actorIds,
+    ).toEqual(["actor:author"]);
+
+    const missing: Record<string, unknown> = structuredClone(
+      validEventHistoryValue(),
+    );
+    delete (missing.completion as Record<string, unknown>).actorIds;
+    const duplicated = structuredClone(validEventHistoryValue());
+    duplicated.completion.actorIds = ["actor:author", "actor:author"];
+    const malformed = structuredClone(validEventHistoryValue()) as Record<
+      string,
+      unknown
+    >;
+    (malformed.completion as Record<string, unknown>).actorIds = [7];
+
+    for (const value of [missing, duplicated, malformed]) {
       expect(() => decodeEventHistory(value)).toThrow(
         "invalid event history DTO",
       );
@@ -796,6 +822,67 @@ describe("bounded Change protocol", () => {
         lens: "changes",
         bounded: true,
       }),
+    ).toThrow("invalid changes Change page DTO");
+  });
+
+  it("accepts the absent-summary cue only on an absent summary", () => {
+    const revision = {
+      revisionId: "rev:sha256:a",
+      objectArtifactContentHash: "sha256:artifact-a",
+    };
+    const withEntry = (
+      entry: ChangePresentation["currentRevisions"][number],
+    ): unknown => {
+      const value = page("pointbreak.inspect-changes-page");
+      const row = (value.changes as ChangeSummary[])[0];
+      if (!row) throw new Error("fixture must include a Change row");
+      row.currentRevisionRefs = [revision];
+      const presentation = value.presentations?.["change:sha256:a"] as
+        | ChangePresentation
+        | undefined;
+      if (!presentation) throw new Error("fixture must include a presentation");
+      presentation.currentRevisions = [entry];
+      return value;
+    };
+    const options = { lens: "changes" as const, bounded: true };
+
+    expect(
+      decodeChangePage(
+        withEntry({
+          revision,
+          summarySource: "absent",
+          absentSummaryCue: "No summary supplied",
+        }),
+        options,
+      ).presentations?.["change:sha256:a"]?.currentRevisions[0]
+        ?.absentSummaryCue,
+    ).toBe("No summary supplied");
+    // An older server sends no cue.
+    expect(() =>
+      decodeChangePage(
+        withEntry({ revision, summarySource: "absent" }),
+        options,
+      ),
+    ).not.toThrow();
+    // A cue beside a supplied summary contradicts the server fold.
+    expect(() =>
+      decodeChangePage(
+        withEntry({
+          revision,
+          summarySource: "revision_proposal_summary",
+          revisionProposalSummary: "Supplied",
+          label: "Supplied",
+          absentSummaryCue: "No summary supplied",
+        }),
+        options,
+      ),
+    ).toThrow("invalid changes Change page DTO");
+    // An empty cue is malformed, not a valid "no cue".
+    expect(() =>
+      decodeChangePage(
+        withEntry({ revision, summarySource: "absent", absentSummaryCue: "" }),
+        options,
+      ),
     ).toThrow("invalid changes Change page DTO");
   });
 
@@ -1497,6 +1584,103 @@ describe("bounded Change protocol", () => {
   });
 });
 
+describe("recorded fact relation edges", () => {
+  const revision = {
+    revisionId: "rev:sha256:target",
+    objectArtifactContentHash: "sha256:target-artifact",
+  };
+  const observation = {
+    factId: "obs:sha256:reply",
+    family: "observation",
+    originRevision: revision,
+    actorId: "actor:one",
+    revisionCurrency: "current",
+    familyState: "current",
+    availability: "available",
+  };
+  const assessment = {
+    ...observation,
+    factId: "assess:sha256:call",
+    family: "assessment",
+  };
+  const detail = (...factPresentations: Record<string, unknown>[]) => ({
+    schema: "pointbreak.review-change-revision",
+    version: 1,
+    changeId: "change:sha256:one",
+    revision,
+    membershipSupport: [],
+    revisionCurrency: "current",
+    relationClassification: "current",
+    availability: "available",
+    exactRevisionDocument: availableResource(revision),
+    factPresentations,
+    factPorts: [],
+    associations: [],
+    diagnostics: [],
+    projectionStamp: "sha256:generation",
+  });
+  const respondsTo = {
+    kind: "responds_to",
+    fromFactId: "obs:sha256:reply",
+    toFactId: "obs:sha256:parent",
+  };
+  const relates = {
+    kind: "relates",
+    fromFactId: "assess:sha256:call",
+    toFactId: "input-request:sha256:ask",
+  };
+
+  it("carries responds-to and relates edges when the facts record them", () => {
+    const decoded = decodeChangeRevisionDetail(
+      detail(
+        { ...observation, relations: [respondsTo] },
+        { ...assessment, relations: [relates] },
+      ),
+    );
+    expect(decoded.factPresentations.map((fact) => fact.relations)).toEqual([
+      [respondsTo],
+      [relates],
+    ]);
+  });
+
+  it("leaves relations absent when no fact records one", () => {
+    const decoded = decodeChangeRevisionDetail(detail(observation, assessment));
+    expect(decoded.factPresentations.map((fact) => fact.relations)).toEqual([
+      undefined,
+      undefined,
+    ]);
+  });
+
+  it("rejects an edge the carrying fact cannot have recorded", () => {
+    for (const invalid of [
+      { ...observation, relations: [] },
+      { ...observation, relations: respondsTo },
+      { ...observation, relations: [{ ...respondsTo, kind: "relates" }] },
+      { ...assessment, relations: [{ ...relates, kind: "responds_to" }] },
+      {
+        ...observation,
+        relations: [{ ...respondsTo, fromFactId: "obs:sha256:other" }],
+      },
+      { ...observation, relations: [{ ...respondsTo, toFactId: "" }] },
+      {
+        ...observation,
+        relations: [{ ...respondsTo, toFactId: "obs:sha256:reply" }],
+      },
+      { ...observation, relations: [respondsTo, respondsTo] },
+      {
+        ...observation,
+        factId: "validation:sha256:gate",
+        family: "validation",
+        relations: [{ ...respondsTo, fromFactId: "validation:sha256:gate" }],
+      },
+    ]) {
+      expect(() => decodeChangeRevisionDetail(detail(invalid))).toThrow(
+        "Revision detail DTO",
+      );
+    }
+  });
+});
+
 // One event-history document whose single entry carries the given summary. The
 // decoder cross-validates `facets`, `completion.eventTypes` and the entry's
 // `eventType`/`summary.kind`, so all four move together.
@@ -1598,6 +1782,128 @@ describe("declared event body content types", () => {
       expect(() =>
         decodeEventHistory(eventHistoryWith({ eventType, details })),
       ).toThrow();
+    }
+  });
+});
+
+describe("server-supplied recording-event targets", () => {
+  const assessmentDetails = {
+    assessmentId: "assess:sha256:one",
+    target: { kind: "revision", revisionId: "rev:sha256:one" },
+    assessment: "accepted",
+    replacesAssessmentIds: ["assess:sha256:old"],
+    relatedObservationIds: ["obs:sha256:one", "obs:sha256:two"],
+  };
+
+  function withTargets(relationTargets: unknown) {
+    const value = eventHistoryWith({
+      eventType: "review_assessment_recorded",
+      details: assessmentDetails,
+    });
+    return {
+      ...value,
+      entries: [{ ...value.entries[0], relationTargets }],
+    };
+  }
+
+  it("carries relation targets for ids the entry's relationship fields name", () => {
+    const targets = [
+      { factId: "obs:sha256:one", eventId: "evt:sha256:recorded" },
+      { factId: "assess:sha256:old", eventId: "evt:sha256:older" },
+    ];
+    expect(
+      decodeEventHistory(withTargets(targets)).entries[0].relationTargets,
+    ).toEqual(targets);
+    const absent = decodeEventHistory(
+      eventHistoryWith({
+        eventType: "review_assessment_recorded",
+        details: assessmentDetails,
+      }),
+    );
+    expect(absent.entries[0].relationTargets).toBeUndefined();
+  });
+
+  it("rejects relation targets the entry cannot carry", () => {
+    for (const invalid of [
+      "evt:sha256:recorded",
+      [{ factId: "obs:sha256:unnamed", eventId: "evt:sha256:recorded" }],
+      [{ factId: "obs:sha256:one", eventId: "" }],
+      [{ factId: "obs:sha256:one" }],
+      [
+        { factId: "obs:sha256:one", eventId: "evt:sha256:a" },
+        { factId: "obs:sha256:one", eventId: "evt:sha256:b" },
+      ],
+    ]) {
+      expect(() => decodeEventHistory(withTargets(invalid))).toThrow();
+    }
+    const unrelated = eventHistoryWith({
+      eventType: "validation_check_recorded",
+      details: {
+        validationCheckId: "validation:sha256:one",
+        target: { kind: "revision", revisionId: "rev:sha256:one" },
+        checkName: "web",
+        status: "passed",
+        trigger: "manual",
+      },
+    });
+    expect(() =>
+      decodeEventHistory({
+        ...unrelated,
+        entries: [
+          {
+            ...unrelated.entries[0],
+            relationTargets: [
+              { factId: "validation:sha256:one", eventId: "evt:sha256:x" },
+            ],
+          },
+        ],
+      }),
+    ).toThrow();
+  });
+
+  it("carries an optional recording event on each exact fact presentation", () => {
+    const revision = {
+      revisionId: "rev:sha256:target",
+      objectArtifactContentHash: "sha256:target-artifact",
+    };
+    const fact = {
+      factId: "obs:sha256:one",
+      family: "observation",
+      originRevision: revision,
+      actorId: "actor:one",
+      revisionCurrency: "current",
+      familyState: "current",
+      availability: "available",
+    };
+    const detail = (factPresentation: Record<string, unknown>) => ({
+      schema: "pointbreak.review-change-revision",
+      version: 1,
+      changeId: "change:sha256:one",
+      revision,
+      membershipSupport: [],
+      revisionCurrency: "current",
+      relationClassification: "current",
+      availability: "available",
+      exactRevisionDocument: availableResource(revision),
+      factPresentations: [factPresentation],
+      factPorts: [],
+      associations: [],
+      diagnostics: [],
+      projectionStamp: "sha256:generation",
+    });
+    expect(
+      decodeChangeRevisionDetail(
+        detail({ ...fact, recordingEventId: "evt:sha256:recorded" }),
+      ).factPresentations[0].recordingEventId,
+    ).toBe("evt:sha256:recorded");
+    expect(
+      decodeChangeRevisionDetail(detail(fact)).factPresentations[0]
+        .recordingEventId,
+    ).toBeUndefined();
+    for (const recordingEventId of ["", 7, null]) {
+      expect(() =>
+        decodeChangeRevisionDetail(detail({ ...fact, recordingEventId })),
+      ).toThrow("Revision detail DTO");
     }
   });
 });

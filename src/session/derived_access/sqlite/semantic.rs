@@ -750,6 +750,97 @@ fn exact_revision_event_ids_statement(
     ))
 }
 
+/// One keyed probe of the representative table for a Timeline relation id.
+const TIMELINE_RELATION_REPRESENTATIVE_SQL: &str = "SELECT locator.event_id,
+                    locator.event_type,
+                    fact.revision_id,
+                    EXISTS (
+                        SELECT 1 FROM product_history_event AS history
+                        WHERE history.sequence = representative.sequence
+                    )
+             FROM semantic_representative_text AS representative
+             JOIN semantic_event_fact_text AS fact
+               ON fact.sequence = representative.sequence
+             JOIN locator_event_text AS locator
+               ON locator.sequence = representative.sequence
+             WHERE representative.family_id = ?1
+               AND representative.semantic_key_hash = ?2
+               AND representative.semantic_key = ?3
+               AND locator.epoch = ?4
+               AND representative.sequence <= ?5";
+
+#[cfg(test)]
+pub(crate) fn timeline_relation_representative_query_plan(
+    connection: &rusqlite::Connection,
+) -> Result<Vec<String>, SqliteSemanticError> {
+    let mut statement = connection
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {TIMELINE_RELATION_REPRESENTATIVE_SQL}"
+        ))
+        .map_err(|error| sqlite_error("prepare Timeline relation query plan", error))?;
+    let rows = statement
+        .query_map(
+            params![
+                2_i64,
+                [0_u8; 32].as_slice(),
+                "obs:sha256:plan",
+                1_i64,
+                1_i64
+            ],
+            |row| row.get::<_, String>(3),
+        )
+        .map_err(|error| sqlite_error("query Timeline relation query plan", error))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| sqlite_error("read Timeline relation query plan", error))
+}
+
+/// The representative recording event of one semantic fact, as the derived
+/// Timeline resolves a relationship id.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TimelineRelationRepresentativeRow {
+    pub(crate) event_id: String,
+    pub(crate) event_type: String,
+    pub(crate) revision_id: Option<String>,
+    pub(crate) timeline_member: bool,
+}
+
+/// Resolve one fact id to its representative recording event through the
+/// `semantic_representative` primary key `(family_id, semantic_key_hash)`.
+/// This is a single keyed probe that reads at most one row, independent of
+/// how many facts the Revision or store carries. A representative applied
+/// after `observed` is not visible to this read.
+pub(crate) fn timeline_relation_representative(
+    connection: &rusqlite::Connection,
+    family: &str,
+    fact_id: &str,
+    observed: TruthCursor,
+) -> Result<Option<TimelineRelationRepresentativeRow>, SqliteSemanticError> {
+    let family = family_code(family).map_err(SqliteSemanticError::from)?;
+    let epoch = to_i64(observed.epoch, "Timeline relation epoch")?;
+    let sequence = to_i64(observed.sequence, "Timeline relation cursor")?;
+    connection
+        .query_row(
+            TIMELINE_RELATION_REPRESENTATIVE_SQL,
+            params![
+                family,
+                semantic_key_digest(fact_id).as_slice(),
+                fact_id,
+                epoch,
+                sequence
+            ],
+            |row| {
+                Ok(TimelineRelationRepresentativeRow {
+                    event_id: row.get(0)?,
+                    event_type: row.get(1)?,
+                    revision_id: row.get(2)?,
+                    timeline_member: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| sqlite_error("read Timeline relation representative", error))
+}
+
 fn exact_revision_event_ids_query(
     identity_predicate: &str,
     epoch_parameter: usize,

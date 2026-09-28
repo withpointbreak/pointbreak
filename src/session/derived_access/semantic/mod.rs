@@ -211,9 +211,14 @@ impl SemanticSnapshot {
         events: &[ShoreEvent],
     ) -> Result<Self, SemanticModelError> {
         let state = SemanticStateSnapshot::from_events(events)?;
-        let revisions = revision::revision_documents(events)?;
-        let threads = thread::thread_documents(events)?;
         let changes = crate::session::project_changes(events)?;
+        let replacement = thread::thread_supersession(
+            crate::session::SupersessionView::from_events(events)?,
+            &changes,
+            None,
+        );
+        let revisions = revision::revision_documents(events, &replacement)?;
+        let threads = thread::thread_documents(events, &changes, None)?;
         let attention = AttentionSemanticSnapshot::from_events(events, &changes)?;
         let removed_content =
             crate::session::projection::ArtifactRemovalProjection::from_events(events)?
@@ -249,9 +254,11 @@ impl SemanticSnapshot {
             crate::bench_support::longitudinal::record_event_folds(facts.len().saturating_mul(5));
         }
         let state = SemanticStateSnapshot::from_facts(facts)?;
-        let revisions = revision_documents_from_facts(facts)?;
-        let threads = thread_documents_from_facts(facts)?;
         let changes = change_projection_from_facts(facts)?;
+        let replacement =
+            thread::thread_supersession(thread::supersession_from_facts(facts)?, &changes, None);
+        let revisions = revision_documents_from_facts(facts, &replacement)?;
+        let threads = thread_documents_from_facts(facts, &changes, None)?;
         let attention = AttentionSemanticSnapshot::from_facts(facts, &changes)?;
         let removed_content = facts
             .iter()
@@ -305,8 +312,17 @@ impl SemanticSnapshot {
         attention_scope: Option<&BTreeSet<crate::model::RevisionId>>,
         changes: crate::session::ChangeProjection,
     ) -> Result<Self, SemanticModelError> {
-        let revisions = revision_documents_from_facts(facts)?;
-        let threads = thread_documents_from_facts(facts)?;
+        // Revision and thread supersession share attention's dependency
+        // closure: replacement is decided over the store-wide Change
+        // projection, and a scoped read keeps the threads containing a Revision
+        // of its scope.
+        let replacement = thread::thread_supersession(
+            thread::supersession_from_facts(attention_facts)?,
+            &changes,
+            attention_scope,
+        );
+        let revisions = revision_documents_from_facts(facts, &replacement)?;
+        let threads = thread_documents_from_facts(attention_facts, &changes, attention_scope)?;
         let attention = match attention_scope {
             Some(scope) => {
                 AttentionSemanticSnapshot::from_facts_scoped(attention_facts, &changes, scope)?
@@ -338,9 +354,14 @@ impl SemanticSnapshot {
     ) -> Result<Self, SemanticModelError> {
         let mut state = SemanticStateSnapshot::from_events(events)?;
         state.event_set_hash = None;
-        let revisions = revision::revision_documents(events)?;
-        let threads = thread::thread_documents(events)?;
         let changes = crate::session::project_changes(events)?;
+        let replacement = thread::thread_supersession(
+            crate::session::SupersessionView::from_events(events)?,
+            &changes,
+            None,
+        );
+        let revisions = revision::revision_documents(events, &replacement)?;
+        let threads = thread::thread_documents(events, &changes, None)?;
         let attention = AttentionSemanticSnapshot::from_events(events, &changes)?;
         let removed_content =
             crate::session::projection::ArtifactRemovalProjection::from_events(events)?
@@ -432,23 +453,31 @@ impl SemanticSnapshot {
 
         let mut state = SemanticStateSnapshot::from_events(events)?;
         state.event_set_hash = None;
-        let revisions = revision::revision_documents(&selected)?;
-        let threads = thread::thread_documents(&selected)?;
         let changes = crate::session::project_changes(events)?;
-        // Attention depends on every Revision the engagement's Revisions are
-        // connected to: Change relations cross engagements, and thread heads
-        // are component-wide. Fold that whole selection, then keep what is
-        // anchored on the engagement.
+        // Attention and threads depend on every Revision the engagement's
+        // Revisions are connected to: Change relations cross engagements, and
+        // thread heads are component-wide. Fold that whole selection, then keep
+        // what is anchored on (or threaded through) the engagement.
         let dependencies = attention_dependency_revisions(events, &revision_ids, &changes)?;
-        let attention = if dependencies == revision_ids {
-            AttentionSemanticSnapshot::from_events_scoped(&selected, &changes, &revision_ids)?
+        let widened;
+        let dependency_events = if dependencies == revision_ids {
+            &selected
         } else {
-            AttentionSemanticSnapshot::from_events_scoped(
-                &select(&dependencies, &BTreeSet::new())?,
-                &changes,
-                &revision_ids,
-            )?
+            widened = select(&dependencies, &BTreeSet::new())?;
+            &widened
         };
+        let replacement = thread::thread_supersession(
+            crate::session::SupersessionView::from_events(dependency_events)?,
+            &changes,
+            Some(&revision_ids),
+        );
+        let revisions = revision::revision_documents(&selected, &replacement)?;
+        let threads = thread::thread_documents(dependency_events, &changes, Some(&revision_ids))?;
+        let attention = AttentionSemanticSnapshot::from_events_scoped(
+            dependency_events,
+            &changes,
+            &revision_ids,
+        )?;
         let removed_content =
             crate::session::projection::ArtifactRemovalProjection::from_events(&selected)?
                 .claimed_hashes()

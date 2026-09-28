@@ -104,7 +104,7 @@ describe("appendActorFilterClause", () => {
       "change-timeline",
     );
     expect(next).toBe('actor:"git-name:Kevin Swiber"');
-    expect(parseSearchQueryFor(next, "change-timeline").clauses).toEqual([
+    expect(parseSearchQueryFor(next ?? "", "change-timeline").clauses).toEqual([
       {
         kind: "field",
         field: "actor",
@@ -122,7 +122,7 @@ describe("appendActorFilterClause", () => {
     );
     expect(
       appendActorFilterClause(
-        once,
+        once ?? "",
         "actor:agent:codex-loop",
         "change-timeline",
       ),
@@ -140,7 +140,9 @@ describe("appendActorFilterClause", () => {
     const did = "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd";
     const once = appendActorFilterClause("", did, "change-timeline");
     expect(once).toBe(`actor:${did}`);
-    expect(appendActorFilterClause(once, did, "change-timeline")).toBe(once);
+    expect(appendActorFilterClause(once ?? "", did, "change-timeline")).toBe(
+      once,
+    );
   });
 
   it("still appends when the existing actor clause is negated", () => {
@@ -153,13 +155,20 @@ describe("appendActorFilterClause", () => {
     ).toBe("-actor:agent:codex-loop actor:agent:codex-loop");
   });
 
-  it("returns the query unchanged for an empty id or an id the grammar cannot express", () => {
+  it("returns null for an empty id or an id the grammar cannot express", () => {
     expect(
       appendActorFilterClause("type:observation", "", "change-timeline"),
-    ).toBe("type:observation");
+    ).toBeNull();
     expect(
       appendActorFilterClause("", 'actor:weird"quote', "change-timeline"),
-    ).toBe("");
+    ).toBeNull();
+    expect(
+      appendActorFilterClause(
+        "type:observation",
+        'actor:git-name:Kevin "KS" Swiber',
+        "change-timeline",
+      ),
+    ).toBeNull();
   });
 
   it("preserves free text and other clauses in order", () => {

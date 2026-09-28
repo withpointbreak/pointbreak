@@ -79,6 +79,7 @@ function historyPage(projectionStamp = "sha256:generation") {
       changeIds: [],
       revisionRefs: [],
       unresolvedRevisionIds: [],
+      actorIds: [],
     },
     diagnostics: [],
     queryNotices: [],
@@ -97,6 +98,7 @@ function searchableHistoryPage(
       changeIds: ["change:sha256:one", "change:sha256:two"],
       revisionRefs: [revision],
       unresolvedRevisionIds: ["revision:sha256:unresolved"],
+      actorIds: [],
     },
   };
 }
@@ -140,6 +142,7 @@ function activationHistoryPage(
       changeIds: [...entry.changeIds],
       revisionRefs: [...entry.revisionRefs],
       unresolvedRevisionIds: [...entry.unresolvedRevisionIds],
+      actorIds: [entry.writer.actorId],
     },
     entries: [entry],
   };
@@ -1226,6 +1229,49 @@ describe("Change-first composition", () => {
     expect(change?.textContent).toBe("change:change:bbbbbbbb");
     expect(change?.title).toContain(fullChangeId);
     expect(change?.getAttribute("aria-label")).toContain(fullChangeId);
+  });
+
+  it("offers the page's writer actor ids as actor: completions the grammar can express", async () => {
+    history.replaceState(null, "", "/#/timeline?limit=20");
+    const searchable = searchableHistoryPage();
+    serveComposition({
+      ...searchable,
+      completion: {
+        ...searchable.completion,
+        actorIds: [
+          "actor:agent:codex-loop",
+          "actor:git-name:Kevin Swiber",
+          'actor:git-name:Kevin "KS" Swiber',
+        ],
+      },
+    });
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const search = document.querySelector<HTMLInputElement>("#filter-text");
+    const suggestions = document.querySelector<HTMLElement>(
+      "#filter-suggestions",
+    );
+    if (!search || !suggestions) throw new Error("missing Timeline search UI");
+    const options = () =>
+      Array.from(suggestions.querySelectorAll<HTMLElement>("[role='option']"));
+
+    search.value = "actor:";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    // The quoted id has no representation in the grammar, so it is omitted;
+    // a whitespace-bearing id is minted as one quoted field token.
+    expect(options().map((option) => option.textContent)).toEqual([
+      "actor:agent:codex-loop",
+      'actor:"git-name:Kevin Swiber"',
+    ]);
+    expect(options()[1]?.title).toBe("actor:actor:git-name:Kevin Swiber");
+
+    search.value = "-actor:kevin";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(options().map((option) => option.textContent)).toEqual([
+      '-actor:"git-name:Kevin Swiber"',
+    ]);
   });
 
   it("keeps invalid Timeline input local and announces its parser diagnostic", async () => {

@@ -129,12 +129,42 @@ pub struct FactPresentationV1 {
     pub presented_in_revision: Option<RevisionRefV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port_relation: Option<FactPortRelationV1>,
+    /// Relationship edges recorded with this fact, each naming both endpoints
+    /// by fact id: an observation's `responds_to` edges and an assessment's
+    /// `relates` edges. Only what the recorded fact carries is listed; the
+    /// other endpoint may be absent from this exact response.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relations: Vec<FactRelationV1>,
     pub actor_id: ActorId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub track_id: Option<TrackId>,
     pub family_state: FactFamilyStateV1,
     pub revision_currency: ChangeRevisionCurrencyV1,
     pub availability: ContentAvailabilityV1,
+    /// The Timeline event that recorded this fact. Readers navigate a bare
+    /// reference to this fact to the Timeline at this event; absent means no
+    /// target, and the reference renders as plain text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_event_id: Option<EventId>,
+}
+
+/// The kind of one recorded fact-to-fact relationship.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FactRelationKindV1 {
+    /// An observation recorded as a response to another observation.
+    RespondsTo,
+    /// An assessment recorded as related to an observation or input request.
+    Relates,
+}
+
+/// One recorded relationship edge; both endpoints are fact ids.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FactRelationV1 {
+    pub kind: FactRelationKindV1,
+    pub from_fact_id: String,
+    pub to_fact_id: String,
 }
 
 /// Whether one recorded fact-port carrier can contribute continuity in the
@@ -184,9 +214,10 @@ pub enum RevisionSummarySourceV1 {
     Absent,
 }
 
-/// Server-owned copy for a current Revision whose proposal carried no summary.
-/// Fixed by owner decision D1; the Inspector never re-derives it client-side.
-pub const ABSENT_SUMMARY_LABEL: &str = "No summary at capture";
+/// Server-owned cue for a current Revision whose proposal carried no summary.
+/// Fixed by the owner decision on #752: a muted state line, while the exact
+/// Revision id stays the headline. The Inspector never re-derives it client-side.
+pub const ABSENT_SUMMARY_CUE: &str = "No summary supplied";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -195,10 +226,15 @@ pub struct CurrentRevisionPresentationV1 {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision_proposal_summary: Option<String>,
     pub summary_source: RevisionSummarySourceV1,
-    /// Finished display string. The proposal summary when one was supplied,
-    /// otherwise `ABSENT_SUMMARY_LABEL`. Server owns this so the client mints
-    /// no copy of its own.
-    pub label: String,
+    /// Finished display string, present exactly when a proposal summary was
+    /// supplied. An absent summary has no label: the exact Revision id is the
+    /// headline and `absent_summary_cue` carries the server-owned state line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// `ABSENT_SUMMARY_CUE`, present exactly when `summary_source` is `absent`.
+    /// Server owns this so the client mints no copy of its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub absent_summary_cue: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -828,8 +864,10 @@ impl ChangeDocumentFacadeV1 {
                 .collect::<Vec<_>>();
             if actual != expected
                 || presentation.current_revisions.iter().any(|current| {
-                    matches!(current.summary_source, RevisionSummarySourceV1::Absent)
-                        != current.revision_proposal_summary.is_none()
+                    let absent = matches!(current.summary_source, RevisionSummarySourceV1::Absent);
+                    absent != current.revision_proposal_summary.is_none()
+                        || absent != current.label.is_none()
+                        || absent != current.absent_summary_cue.is_some()
                 })
             {
                 return Err(ShoreError::Message(
@@ -1957,9 +1995,10 @@ fn presentation_for_current_revisions(
             let revision_proposal_summary = (summaries.len() == 1)
                 .then(|| summaries.iter().next().cloned().flatten())
                 .flatten();
-            let label = revision_proposal_summary
-                .clone()
-                .unwrap_or_else(|| ABSENT_SUMMARY_LABEL.to_owned());
+            let label = revision_proposal_summary.clone();
+            let absent_summary_cue = revision_proposal_summary
+                .is_none()
+                .then(|| ABSENT_SUMMARY_CUE.to_owned());
             Ok(CurrentRevisionPresentationV1 {
                 summary_source: if revision_proposal_summary.is_some() {
                     RevisionSummarySourceV1::RevisionProposalSummary
@@ -1969,6 +2008,7 @@ fn presentation_for_current_revisions(
                 revision,
                 revision_proposal_summary,
                 label,
+                absent_summary_cue,
             })
         })
         .collect()
@@ -2003,7 +2043,7 @@ pub fn normalize_fact_presentations(
             },
         );
         facts.push(normalized_fact(
-            NormalizedFactIdentity::new(&fact_id, "observation"),
+            NormalizedFactIdentity::new(&fact_id, "observation", &view.event_id),
             exact,
             Some(view.target.clone()),
             &view.writer.actor_id,
@@ -2053,7 +2093,7 @@ pub fn normalize_fact_presentations(
             },
         );
         facts.push(normalized_fact(
-            NormalizedFactIdentity::new(&fact_id, "input_request"),
+            NormalizedFactIdentity::new(&fact_id, "input_request", &view.event_id),
             exact,
             Some(view.target.clone()),
             &view.writer.actor_id,
@@ -2079,7 +2119,7 @@ pub fn normalize_fact_presentations(
             },
         );
         facts.push(normalized_fact(
-            NormalizedFactIdentity::new(&fact_id, "assessment"),
+            NormalizedFactIdentity::new(&fact_id, "assessment", &view.event_id),
             exact,
             Some(view.target.clone()),
             &view.writer.actor_id,
@@ -2111,7 +2151,7 @@ pub fn normalize_fact_presentations(
             },
         );
         facts.push(normalized_fact(
-            NormalizedFactIdentity::new(&fact_id, "validation"),
+            NormalizedFactIdentity::new(&fact_id, "validation", &view.event_id),
             exact,
             None,
             &view.writer.actor_id,
@@ -2127,8 +2167,57 @@ pub fn normalize_fact_presentations(
             ),
         ));
     }
+    let mut relations = recorded_fact_relations(result);
+    for fact in &mut facts {
+        if let Some(edges) = relations.remove(&fact.fact_id) {
+            fact.relations = edges;
+        }
+    }
     facts.sort_by(|left, right| left.fact_id.cmp(&right.fact_id));
     (facts, content)
+}
+
+/// The relationship edges each recorded fact carries: an observation's
+/// `responds_to` ids and an assessment's related observation and input
+/// request ids, keyed by the carrying fact's id.
+fn recorded_fact_relations(
+    result: &crate::session::RevisionShowResult,
+) -> BTreeMap<String, Vec<FactRelationV1>> {
+    let edges = |from: &str, kind: FactRelationKindV1, to: Vec<&str>| {
+        let mut edges = to
+            .into_iter()
+            .map(|to| FactRelationV1 {
+                kind,
+                from_fact_id: from.to_owned(),
+                to_fact_id: to.to_owned(),
+            })
+            .collect::<Vec<_>>();
+        edges.sort();
+        edges.dedup();
+        edges
+    };
+    let mut relations = BTreeMap::new();
+    for view in &result.observations {
+        let to = view.responds_to.iter().map(|id| id.as_str()).collect();
+        relations.insert(
+            view.id.as_str().to_owned(),
+            edges(view.id.as_str(), FactRelationKindV1::RespondsTo, to),
+        );
+    }
+    for view in &result.assessments {
+        let to = view
+            .related_observations
+            .iter()
+            .map(|id| id.as_str())
+            .chain(view.related_input_requests.iter().map(|id| id.as_str()))
+            .collect();
+        relations.insert(
+            view.id.as_str().to_owned(),
+            edges(view.id.as_str(), FactRelationKindV1::Relates, to),
+        );
+    }
+    relations.retain(|_, edges: &mut Vec<FactRelationV1>| !edges.is_empty());
+    relations
 }
 
 /// Bind every explicit fact-port carrier to the same validated event generation
@@ -2318,11 +2407,16 @@ fn validation_status_wire(status: crate::model::ValidationStatus) -> &'static st
 struct NormalizedFactIdentity<'a> {
     fact_id: &'a str,
     family: &'static str,
+    recording_event_id: &'a EventId,
 }
 
 impl<'a> NormalizedFactIdentity<'a> {
-    const fn new(fact_id: &'a str, family: &'static str) -> Self {
-        Self { fact_id, family }
+    const fn new(fact_id: &'a str, family: &'static str, recording_event_id: &'a EventId) -> Self {
+        Self {
+            fact_id,
+            family,
+            recording_event_id,
+        }
     }
 }
 
@@ -2344,6 +2438,7 @@ fn normalized_fact(
         context_change_id: None,
         presented_in_revision: None,
         port_relation: None,
+        relations: Vec::new(),
         actor_id: actor_id.clone(),
         track_id,
         family_state,
@@ -2353,6 +2448,7 @@ fn normalized_fact(
         } else {
             content_availability
         },
+        recording_event_id: Some(identity.recording_event_id.clone()),
     }
 }
 
@@ -2656,11 +2752,13 @@ mod tests {
             context_change_id: None,
             presented_in_revision: None,
             port_relation: None,
+            relations: Vec::new(),
             actor_id: ActorId::new("actor:author"),
             track_id: None,
             family_state: FactFamilyStateV1::Current,
             revision_currency: ChangeRevisionCurrencyV1::Current,
             availability: ContentAvailabilityV1::Available,
+            recording_event_id: None,
         }
     }
 
@@ -3715,11 +3813,13 @@ mod tests {
             context_change_id: Some(change_id.clone()),
             presented_in_revision: None,
             port_relation: None,
+            relations: Vec::new(),
             actor_id: ActorId::new("actor:author"),
             track_id: None,
             family_state: FactFamilyStateV1::Current,
             revision_currency: ChangeRevisionCurrencyV1::Current,
             availability: ContentAvailabilityV1::Available,
+            recording_event_id: None,
         };
         let document = facade
             .contextual_revision_document(
@@ -4146,13 +4246,15 @@ mod tests {
                                 revision: revision.clone(),
                                 revision_proposal_summary: Some("first proposal".to_owned()),
                                 summary_source: RevisionSummarySourceV1::RevisionProposalSummary,
-                                label: "first proposal".to_owned(),
+                                label: Some("first proposal".to_owned()),
+                                absent_summary_cue: None,
                             },
                             CurrentRevisionPresentationV1 {
                                 revision: other.clone(),
                                 revision_proposal_summary: None,
                                 summary_source: RevisionSummarySourceV1::Absent,
-                                label: ABSENT_SUMMARY_LABEL.to_owned(),
+                                label: None,
+                                absent_summary_cue: Some(ABSENT_SUMMARY_CUE.to_owned()),
                             },
                         ],
                     },
@@ -4441,17 +4543,27 @@ mod tests {
     }
 
     #[test]
-    fn absent_proposal_summary_presents_a_server_owned_label() {
+    fn absent_proposal_summary_presents_a_server_owned_cue_and_no_label() {
         let revision = reference("one", 'a');
         let summaries = BTreeMap::from([(revision.clone(), BTreeSet::from([None]))]);
         let presented =
             presentation_for_current_revisions(vec![revision.clone()], &summaries).unwrap();
         assert_eq!(presented[0].summary_source, RevisionSummarySourceV1::Absent);
         assert_eq!(presented[0].revision_proposal_summary, None);
-        assert_eq!(presented[0].label, ABSENT_SUMMARY_LABEL);
-        // Pin the owner-approved copy (D1) end to end; the client fixtures use
+        // No label: the exact Revision id stays the headline (#752).
+        assert_eq!(presented[0].label, None);
+        assert_eq!(
+            presented[0].absent_summary_cue.as_deref(),
+            Some(ABSENT_SUMMARY_CUE)
+        );
+        // Pin the owner-approved copy (#752) end to end; the client fixtures use
         // the same literal, so drift on either side fails a test.
-        assert_eq!(presented[0].label, "No summary at capture");
+        assert_eq!(ABSENT_SUMMARY_CUE, "No summary supplied");
+        let wire = serde_json::to_value(&presented[0]).unwrap();
+        assert!(wire.get("label").is_none(), "{wire}");
+        assert!(wire.get("revisionProposalSummary").is_none(), "{wire}");
+        assert_eq!(wire["summarySource"], "absent");
+        assert_eq!(wire["absentSummaryCue"], "No summary supplied");
     }
 
     #[test]
@@ -4467,7 +4579,13 @@ mod tests {
             presented[0].summary_source,
             RevisionSummarySourceV1::RevisionProposalSummary
         );
-        assert_eq!(presented[0].label, "Preserve atomic captures");
+        assert_eq!(
+            presented[0].label.as_deref(),
+            Some("Preserve atomic captures")
+        );
+        assert_eq!(presented[0].absent_summary_cue, None);
+        let wire = serde_json::to_value(&presented[0]).unwrap();
+        assert!(wire.get("absentSummaryCue").is_none(), "{wire}");
     }
 
     #[test]
@@ -4478,7 +4596,8 @@ mod tests {
                 revision,
                 revision_proposal_summary: Some("stable".to_owned()),
                 summary_source: RevisionSummarySourceV1::RevisionProposalSummary,
-                label: "stable".to_owned(),
+                label: Some("stable".to_owned()),
+                absent_summary_cue: None,
             }],
         };
         let bind = |event_set_hash: &str| {

@@ -24,6 +24,7 @@ import {
   groupTimelineEntries,
   navigableEventIds,
   owningGroupKey,
+  summarizeTimelineGroup,
   type TimelineGroup,
   type TimelineRow,
   visualRows,
@@ -219,39 +220,44 @@ function appendRail(
   row.append(rail);
 }
 
-/**
- * One collapsed same-type run as a single option row. It is addressed by its
- * first member's id, carries no links, and (per WAI-ARIA 1.2) no
- * `aria-expanded`: that attribute is unsupported on `role="option"`.
- */
-/** The accessible name shared by a group's collapsed row and expanded container. */
+/** Appended to a collapsed group row's accessible name. */
+const GROUP_COLLAPSED_HINT = "collapsed run, press Enter to expand";
+
+/** The summary part of a collapsed group row's accessible name. */
 function groupName(group: TimelineGroup): string {
   const first = group.members[0];
   if (first === undefined) throw new Error("Timeline group has no members");
-  return `${eventGroupLabel(first)}, ${group.members.length} events`;
+  const summary = summarizeTimelineGroup(group);
+  const tally = summary.statusTally.map(
+    ({ status, count }) => `${count} ${status}`,
+  );
+  return [
+    eventGroupLabel(first),
+    `${summary.count} events`,
+    ...tally,
+    `${summary.firstOccurredAt} to ${summary.lastOccurredAt}`,
+  ].join(", ");
+}
+
+function clockText(occurredAt: string): string {
+  const occurred = new Date(occurredAt);
+  return Number.isNaN(occurred.valueOf())
+    ? occurredAt
+    : occurred.toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      });
 }
 
 /**
- * An expanded group is a labelled `role="group"` container (permitted inside
- * a listbox) whose children are the ordinary member option rows. It carries
- * no `data-event-id` and no `event` class, so selection, measurement, and the
- * keyboard cursor see only the member rows.
+ * One collapsed same-type run as a single option row inside the flat listbox.
+ * It is addressed by its first member's id and carries no links. WAI-ARIA 1.2
+ * does not support `aria-expanded` on `role="option"`, so the collapsed state
+ * and how to expand it live in the accessible name. Activating the row
+ * (pointer, Enter, or Space) splices the member rows in its place, so an
+ * expanded group has no heading row.
  */
-function groupContainer(group: TimelineGroup): {
-  item: HTMLLIElement;
-  members: HTMLOListElement;
-} {
-  const item = document.createElement("li");
-  item.className = CLASS.timelineGroupMembers;
-  item.dataset.timelineGroupMembers = group.eventType;
-  item.setAttribute("role", "group");
-  item.setAttribute("aria-label", groupName(group));
-  const members = document.createElement("ol");
-  members.setAttribute("role", "none");
-  item.append(members);
-  return { item, members };
-}
-
 function groupRow(
   group: TimelineGroup,
   selectedEventId: string | null,
@@ -259,13 +265,15 @@ function groupRow(
   const first = group.members[0];
   if (first === undefined) throw new Error("Timeline group has no members");
   const presentation = presentEvent(first);
+  const summary = summarizeTimelineGroup(group);
   const row = optionRow(first.eventId, selectedEventId);
   row.classList.add(CLASS.timelineGroup);
   row.dataset.timelineGroup = group.eventType;
   row.dataset.timelineGroupSize = String(group.members.length);
-  // The collapsed state lives in the accessible name: WAI-ARIA 1.2 does not
-  // support aria-expanded on role=option. Activating the row expands it.
-  row.setAttribute("aria-label", `${groupName(group)}, collapsed`);
+  row.setAttribute(
+    "aria-label",
+    `${groupName(group)}, ${GROUP_COLLAPSED_HINT}`,
+  );
   appendOccurredAt(row, first.occurredAt);
   appendRail(row, group.eventType);
   const body = document.createElement("div");
@@ -283,8 +291,21 @@ function groupRow(
   eventType.style.color = eventTypeColor(group.eventType);
   const count = document.createElement("span");
   count.className = CLASS.typeCount;
-  count.textContent = String(group.members.length);
+  count.textContent = String(summary.count);
   meta.append(eventType, count);
+  if (summary.statusTally.length) {
+    const tally = document.createElement("span");
+    tally.className = CLASS.timelineGroupTally;
+    tally.textContent = summary.statusTally
+      .map(({ status, count }) => `${count} ${status}`)
+      .join(" · ");
+    meta.append(tally);
+  }
+  const range = document.createElement("span");
+  range.className = CLASS.timelineGroupRange;
+  range.title = `${summary.firstOccurredAt} to ${summary.lastOccurredAt}`;
+  range.textContent = `${clockText(summary.firstOccurredAt)} – ${clockText(summary.lastOccurredAt)}`;
+  meta.append(range);
   body.append(heading, meta);
   row.append(body);
   return row;
@@ -305,6 +326,8 @@ function rowSpacer(height: number): HTMLLIElement {
 
 // The writer is a query clause, not a scope param: appending composes with the
 // existing query text and leaves the `track` param free for an explicit track.
+// A writer id the search grammar cannot express gets plain text instead of a
+// link, so a click never resets paging without applying a filter.
 function appendActorFilterLink(
   parent: HTMLElement,
   actorId: string,
@@ -315,6 +338,14 @@ function appendActorFilterLink(
     actorId,
     "change-timeline",
   );
+  if (q === null) {
+    const writer = document.createElement("span");
+    writer.dataset.timelineUnfilterableWriter = actorId;
+    writer.textContent = actorId;
+    writer.title = `writer ${actorId} · no filter link: Timeline search cannot express an id containing a double quote (")`;
+    parent.append(writer);
+    return;
+  }
   const link = appendTimelineLink(
     parent,
     actorId,
@@ -487,28 +518,20 @@ function paintVisible(view: TimelineView): void {
   // estimator stays valid.
   const top = rowSpacer(localStart * rowHeight);
   const bottom = rowSpacer(Math.max(0, rows.length - localEnd) * rowHeight);
+  // One `<li>` per visual row: an expanded group's members are ordinary
+  // option rows spliced flat into the listbox, marked with their group key.
   const painted: HTMLLIElement[] = [];
-  // A group's members are contiguous in the visual rows, so one container
-  // per expanded group inside the painted window is exactly the DOM needed.
-  const containers = new Map<TimelineGroup, HTMLOListElement>();
   for (const row of rows.slice(localStart, localEnd)) {
     if (row.kind === "group") {
       painted.push(groupRow(row, view.selectedEventId));
       continue;
     }
-    const member = entryRow(row.entry, view.selectedEventId, view.route);
-    if (row.ofGroup === undefined) {
-      painted.push(member);
-      continue;
+    const item = entryRow(row.entry, view.selectedEventId, view.route);
+    if (row.ofGroup !== undefined) {
+      item.classList.add(CLASS.timelineGroupMember);
+      item.dataset.timelineGroupMember = groupKey(row.ofGroup);
     }
-    let members = containers.get(row.ofGroup);
-    if (members === undefined) {
-      const created = groupContainer(row.ofGroup);
-      members = created.members;
-      containers.set(row.ofGroup, members);
-      painted.push(created.item);
-    }
-    members.append(member);
+    painted.push(item);
   }
   list.replaceChildren(top, ...painted, bottom);
   const activeOption = view.selectedEventId

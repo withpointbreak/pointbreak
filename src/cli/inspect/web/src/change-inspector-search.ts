@@ -94,11 +94,22 @@ function completionValues(
         ) ?? []),
         ...(completion?.unresolvedRevisionIds ?? []),
       ]);
+    case "actor":
+      // Page-scoped writer ids from the server. An id whose short form holds a
+      // `"` has no representation in the search grammar, so it is not offered.
+      return (completion?.actorIds ?? []).filter(
+        (actorId) => !actorShortForm(actorId).includes('"'),
+      );
     default:
-      // The Event History completion contract does not provide actor or tag
-      // values. Their keys remain discoverable without inventing candidates.
+      // The Event History completion contract does not provide tag values.
+      // The key remains discoverable without inventing candidates.
       return [];
   }
+}
+
+/** The parser treats `actor:agent:x` and `agent:x` as one actor. */
+function actorShortForm(actorId: string): string {
+  return actorId.replace(/^actor:/, "");
 }
 
 function suggestionForValue(
@@ -108,6 +119,14 @@ function suggestionForValue(
   negate: boolean,
 ): SearchSuggestion {
   const prefix = negate ? "-" : "";
+  if (canonicalField === "actor") {
+    // Mint the same clause the Timeline writer link does: the short form,
+    // quoted when it holds whitespace so it stays one field token.
+    const short = actorShortForm(value);
+    const clauseValue = /\s/.test(short) ? `"${short}"` : short;
+    const insertText = `${prefix}${typedField}:${clauseValue}`;
+    return { insertText, label: insertText, title: `${typedField}:${value}` };
+  }
   const insertText = `${prefix}${typedField}:${value}`;
   if (canonicalField !== "change" && canonicalField !== "revision") {
     return { insertText, label: insertText };

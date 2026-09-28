@@ -123,8 +123,11 @@ workflow-lint-assertions:
       scripts/finalize-cocogitto-release-tag.sh \
       scripts/finalize-cocogitto-release-tag-selftest.sh \
       scripts/run-release-plan.sh \
-      scripts/run-release-verification.sh
+      scripts/run-release-verification.sh \
+      scripts/project-sync-labels.sh \
+      scripts/project-sync-labels-selftest.sh
     ./scripts/assert-release-identity-selftest.sh
+    ./scripts/project-sync-labels-selftest.sh
     expected="$(cat <<'EOF'
     [
       {"archive":"tar.gz","builder":"cargo","executable":"pointbreak","os":"macos-latest","rust-target":"x86_64-apple-darwin","target":"darwin-x64"},

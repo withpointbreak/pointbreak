@@ -536,3 +536,26 @@ Change; the old association cannot retarget it. These rules supersede any earlie
 post-assessment commit alone may accrete arbitrary changed content onto one Revision. They also retire the
 2026-07-19 instruction to choose proposal-borne `supersedes`, `continues`, or independence: current writers
 advance an exact Change cursor as replacement or parallel work.
+
+## Amendment: Proof-Equivalent Landing Claims Are Rewrites, Not Divergence (2026-09-27)
+
+**Status: Accepted 2026-09-27 in [#747](https://github.com/withpointbreak/pointbreak/issues/747#issuecomment-5860668352). Not yet implemented.** This amendment accompanies the ADR-0042
+amendment of the same date. Until the implementation lands and its admission, drift, compatibility, readback
+and failure tests pass, the 2026-07-09 divergence rule still describes the as-built system. Acceptance is
+not evidence of implementation.
+
+The 2026-07-09 rule treats same-tree claims as rewrites. A rebase onto an advanced base changes the tree,
+so the original and rebased commits read as `divergent_commit_association` while both remain reachable,
+for example while an old PR branch still exists. The amended rule is narrow. Consider two or more
+maximal, incomparable, live-or-merged association claims with distinct trees. They are rewrites of one
+another only if every claim meets both conditions:
+
+- its association carries exactly one non-conflicting `RevisionRelationAttested` of `exact_materialization`
+  or `equivalent_rewrite`, backed by an available verified proof;
+- its proof's candidate entries, capture mode and path scope are identical to every other claim's.
+
+Such a set emits the informational `rewritten_commit_association` and no divergence claim. As for same-tree
+claims, the headline is `merged` if any claim is merged and otherwise `live`. Any claim without an available
+proof keeps the existing rule, and so does an extension, a provenance-only claim or a conflicting
+attestation. Nothing is stored or withdrawn. The per-commit matrix still lists every claim, and withdrawing a
+stale claim stays optional. Topology and proof decide the outcome; timestamps never do.

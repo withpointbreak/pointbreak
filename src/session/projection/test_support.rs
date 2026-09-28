@@ -215,3 +215,140 @@ pub(crate) fn user_response_event(
     event.source_ref = Some(SourceRef::new("claude_code", response_id.as_str()));
     event
 }
+
+/// A synthetic store that records replacement only as Change claims, the way
+/// Change capture does: Revision proposals carry no proposal-borne
+/// `supersedes`, and each replacement is a relation claim inside one Change.
+#[derive(Default)]
+pub(crate) struct ChangeStoreEvents {
+    pub(crate) events: Vec<ShoreEvent>,
+    next: u8,
+}
+
+impl ChangeStoreEvents {
+    fn nonce(&mut self) -> [u8; 32] {
+        self.next = self.next.checked_add(1).expect("fixture nonce space");
+        [self.next; 32]
+    }
+
+    fn occurred_at(&self) -> String {
+        let index = self.events.len();
+        format!("2026-09-01T00:{:02}:{:02}Z", index / 60, index % 60)
+    }
+
+    fn push<P: crate::session::event::EventPayload>(&mut self, payload: P) {
+        let key = format!("change-store-fixture:{}", self.events.len());
+        let occurred_at = self.occurred_at();
+        self.events.push(
+            ShoreEvent::new(
+                payload.event_type(),
+                key,
+                EventTarget::for_journal(JournalId::new("journal:default")),
+                writer_user(),
+                payload,
+                occurred_at,
+            )
+            .expect("fixture Change event"),
+        );
+    }
+
+    /// Capture a Revision (with a proposal-borne `supersedes`, which only a
+    /// store without Change claims honors) in `engagement`.
+    pub(crate) fn revision_superseding(
+        &mut self,
+        suffix: &str,
+        engagement: &str,
+        supersedes: Vec<RevisionId>,
+    ) -> crate::model::RevisionRefV1 {
+        let exact = crate::model::RevisionRefV1::new(
+            RevisionId::new(format!("rev:sha256:{suffix}")),
+            format!("sha256:{}", sha256_bytes_hex(suffix.as_bytes())),
+        )
+        .expect("fixture exact Revision");
+        let occurred_at = self.occurred_at();
+        self.events.push(
+            ShoreEvent::new(
+                EventType::WorkObjectProposed,
+                format!("work_object_proposed:{}", exact.revision_id.as_str()),
+                EventTarget::for_revision(
+                    JournalId::new("journal:default"),
+                    exact.revision_id.clone(),
+                    None,
+                )
+                .expect("fixture proposal target"),
+                writer_user(),
+                WorkObjectProposedPayload {
+                    engagement_id: EngagementId::new(format!("engagement:sha256:{engagement}")),
+                    work_object: WorkObjectProposal::Revision {
+                        revision: crate::session::event::Revision {
+                            id: exact.revision_id.clone(),
+                            object_id: crate::model::ObjectId::new(format!("obj:sha256:{suffix}")),
+                            git_provenance: None,
+                        },
+                        summary: None,
+                        object_artifact_content_hash: exact.object_artifact_content_hash.clone(),
+                        supersedes,
+                    },
+                },
+                occurred_at,
+            )
+            .expect("fixture Revision proposal"),
+        );
+        exact
+    }
+
+    pub(crate) fn revision(
+        &mut self,
+        suffix: &str,
+        engagement: &str,
+    ) -> crate::model::RevisionRefV1 {
+        self.revision_superseding(suffix, engagement, Vec::new())
+    }
+
+    /// Declare a Change holding `members`.
+    pub(crate) fn change(
+        &mut self,
+        members: &[&crate::model::RevisionRefV1],
+    ) -> crate::model::ChangeId {
+        let descriptor = crate::model::ChangeIdentityDescriptorV1::opaque_nonce(self.nonce());
+        let nonce = self.nonce();
+        let declared = crate::session::event::build_change_declared(descriptor, nonce)
+            .expect("fixture Change declaration");
+        let change_id = declared.change_id.clone();
+        self.push(declared);
+        for member in members {
+            self.join(&change_id, member);
+        }
+        change_id
+    }
+
+    pub(crate) fn join(
+        &mut self,
+        change: &crate::model::ChangeId,
+        member: &crate::model::RevisionRefV1,
+    ) {
+        let nonce = self.nonce();
+        let payload =
+            crate::session::event::build_membership_asserted(change, &member.revision_id, nonce)
+                .expect("fixture membership claim");
+        self.push(payload);
+    }
+
+    /// Record in `change` that `successor` replaces `predecessor`.
+    pub(crate) fn replace(
+        &mut self,
+        change: &crate::model::ChangeId,
+        successor: &crate::model::RevisionRefV1,
+        predecessor: &crate::model::RevisionRefV1,
+    ) {
+        let nonce = self.nonce();
+        let payload = crate::session::event::build_revision_relation_asserted(
+            change,
+            successor.clone(),
+            predecessor.clone(),
+            nonce,
+        )
+        .expect("fixture relation claim");
+        self.push(payload);
+    }
+}

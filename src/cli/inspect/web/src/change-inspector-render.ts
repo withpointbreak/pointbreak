@@ -18,6 +18,10 @@ import {
 import type { InspectorIdentity } from "./change-inspector-identity";
 import { createLensHeading } from "./change-inspector-lens";
 import type { ChangeInspectorReading } from "./change-inspector-reading";
+import {
+  bindReferenceChips,
+  recordingEventTargets,
+} from "./change-inspector-references";
 import type { ChangeInspectorRoute } from "./change-inspector-router";
 import {
   eventAnnotatedDiffRoute,
@@ -26,6 +30,7 @@ import {
   parseChangeInspectorRoute,
   queryForExactNavigation,
   queryForLens,
+  recordingEventRoute,
   showChangeInTimelineRoute,
   showRevisionInTimelineRoute,
 } from "./change-inspector-router";
@@ -39,6 +44,7 @@ import type {
   EventHistoryEntry,
   EventHistoryQuery,
   FactContent,
+  FactRelation,
   FactRelationshipEdge,
   FactRelationshipGraphPresentation,
   FactTarget,
@@ -883,11 +889,79 @@ function appendDefinition(
   return definition;
 }
 
+/**
+ * One activation to the Timeline event that recorded a referenced fact. The
+ * event id is server-supplied; the control deliberately avoids `data-fact-id`,
+ * which the exact focus resolver matches.
+ */
+function recordingEventControl(
+  factId: string,
+  eventId: string,
+  activate: (eventId: string) => void,
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ghost mono";
+  button.textContent = shortRef(factId);
+  button.title = factId;
+  button.setAttribute(
+    "aria-label",
+    `Open the Timeline event that recorded ${factId}`,
+  );
+  button.dataset.relationFactId = factId;
+  button.addEventListener("click", () => activate(eventId));
+  return button;
+}
+
+/** A referenced fact id with no resolvable target: plain text, never a chip. */
+function plainFactReference(factId: string): HTMLElement {
+  const named = document.createElement("code");
+  named.textContent = shortRef(factId);
+  named.title = factId;
+  return named;
+}
+
+/** The recording events an Event History entry's relation targets name. */
+function relationTargetMap(event: EventHistoryEntry): Map<string, string> {
+  return new Map(
+    (event.relationTargets ?? []).map((target) => [
+      target.factId,
+      target.eventId,
+    ]),
+  );
+}
+
+function appendRelationDefinition(
+  list: HTMLDListElement,
+  label: string,
+  factIds: readonly string[],
+  targets: ReadonlyMap<string, string>,
+  activate: (eventId: string) => void,
+): void {
+  const term = document.createElement("dt");
+  term.textContent = label;
+  const definition = document.createElement("dd");
+  factIds.forEach((factId, index) => {
+    if (index > 0) definition.append(document.createTextNode("; "));
+    const eventId = targets.get(factId);
+    definition.append(
+      eventId === undefined
+        ? plainFactReference(factId)
+        : recordingEventControl(factId, eventId, activate),
+    );
+  });
+  list.append(term, definition);
+}
+
 function renderEventDetail(
   event: EventHistoryEntry,
+  route: Extract<ChangeInspectorRoute, { kind: "event" }>,
   actions: ChangeInspectorRenderActions,
 ): Node[] {
   const presentation = presentEvent(event);
+  const targets = relationTargetMap(event);
+  const openRecordingEvent = (eventId: string): void =>
+    actions.navigate(recordingEventRoute(eventId, route));
   const heading = detailHeading(presentation.title);
   const identity = detailLine(event.eventId, "mono");
   identity.title = event.eventId;
@@ -904,12 +978,23 @@ function renderEventDetail(
       presentation.body,
       presentation.bodyContentType ?? "text/plain",
     );
+    bindReferenceChips(body, targets, route, actions.navigate);
     summary.append(body);
   }
   const summaryFacts = document.createElement("dl");
   summaryFacts.className = "kv";
   for (const item of presentation.fields) {
-    appendDefinition(summaryFacts, item.label, item.value);
+    if (item.factIds) {
+      appendRelationDefinition(
+        summaryFacts,
+        item.label,
+        item.factIds,
+        targets,
+        openRecordingEvent,
+      );
+    } else {
+      appendDefinition(summaryFacts, item.label, item.value);
+    }
   }
   if (presentation.fields.length) summary.append(summaryFacts);
 
@@ -1180,6 +1265,7 @@ function exactRevisionIdentity(
 function renderedFactBody(
   content: FactContent,
   contentType: "text/plain" | "text/markdown",
+  bindReferences: (body: HTMLElement) => void,
 ): HTMLElement {
   const body = document.createElement("div");
   body.className = "anno-body";
@@ -1192,7 +1278,10 @@ function renderedFactBody(
   // Fact prose is supplied by the server after exact contextual validation.
   // This uses the retained pure Markdown renderer, not the retired Inspector
   // composition, so exact contextual selection remains the only reader state.
-  if (text) body.innerHTML = renderBodyContent(text, contentType);
+  if (text) {
+    body.innerHTML = renderBodyContent(text, contentType);
+    bindReferences(body);
+  }
   return body;
 }
 
@@ -1203,6 +1292,7 @@ function renderedFactBody(
  */
 function renderedInputRequestResponses(
   content: FactContent,
+  bindReferences: (body: HTMLElement) => void,
 ): HTMLElement | null {
   if (content.kind !== "input_request") return null;
   const responses = content.responses ?? [];
@@ -1231,6 +1321,7 @@ function renderedInputRequestResponses(
         response.reason,
         response.contentType,
       );
+      bindReferences(reason);
       entry.append(reason);
     }
     nest.append(entry);
@@ -1292,19 +1383,22 @@ function factTargetLine(
 }
 
 /**
- * Inline relation lines for one fact, read only from the fact graph this exact
- * response carries. An identity absent from this response is named but never
- * activated.
+ * Inline relation lines for one fact, read only from the fact graph and the
+ * recorded relation edges this exact response carries. An identity absent
+ * from this response is named but never activated.
  */
 function factRelationLines(
   factId: string,
   graph: FactRelationshipGraphPresentation | undefined,
+  relations: readonly FactRelation[],
   present: ReadonlySet<string>,
   activate: (factId: string) => void,
 ): HTMLParagraphElement[] {
-  if (!graph) return [];
   const lines: HTMLParagraphElement[] = [];
-  const relate = (label: string, edges: FactRelationshipEdge[]): void => {
+  const relate = (
+    label: string,
+    edges: ReadonlyArray<Pick<FactRelationshipEdge, "fromFactId" | "toFactId">>,
+  ): void => {
     for (const edge of edges) {
       if (edge.fromFactId !== factId) continue;
       const line = detailLine(`${label} `, "fact-rel");
@@ -1325,8 +1419,18 @@ function factRelationLines(
       lines.push(line);
     }
   };
-  relate("supersedes", graph.observationSupersedes);
-  relate("replaces", graph.assessmentReplaces);
+  if (graph) {
+    relate("supersedes", graph.observationSupersedes);
+    relate("replaces", graph.assessmentReplaces);
+  }
+  relate(
+    "responds to",
+    relations.filter((edge) => edge.kind === "responds_to"),
+  );
+  relate(
+    "relates to",
+    relations.filter((edge) => edge.kind === "relates"),
+  );
   return lines;
 }
 
@@ -1366,6 +1470,11 @@ function renderFacts(
     groups.set(fact.family, family);
   }
   const presentFactIds = documentFactIds(reading.document.factPresentations);
+  const recordingEvents = recordingEventTargets(
+    reading.document.factPresentations,
+  );
+  const bindReferences = (body: HTMLElement): void =>
+    bindReferenceChips(body, recordingEvents, route, actions.navigate);
   const focusFact = (factId: string): void =>
     actions.navigate({
       kind: route.kind,
@@ -1431,6 +1540,7 @@ function renderFacts(
         ...factRelationLines(
           fact.factId,
           reading.document.inspectorPresentation?.factGraph,
+          fact.relations ?? [],
           presentFactIds,
           focusFact,
         ),
@@ -1455,12 +1565,19 @@ function renderFacts(
         );
       }
       if (content) {
-        const responses = renderedInputRequestResponses(content.content);
+        const responses = renderedInputRequestResponses(
+          content.content,
+          bindReferences,
+        );
         card.append(
           detailLine(
             `body: ${content.bodyContentState.replaceAll("_", " ")} · ${content.contentType}`,
           ),
-          renderedFactBody(content.content, content.contentType),
+          renderedFactBody(
+            content.content,
+            content.contentType,
+            bindReferences,
+          ),
           ...(responses ? [responses] : []),
         );
       }
@@ -2180,7 +2297,7 @@ function renderDetail(
     );
     replaceDetailWith(
       ...(event
-        ? renderEventDetail(event, actions)
+        ? renderEventDetail(event, route, actions)
         : [
             detailHeading("Event"),
             message(
@@ -2531,6 +2648,12 @@ export function renderChangeInspector(
       cardHeading.className = "change-card-heading";
       cardHeading.append(primary);
       element.append(cardHeading);
+      if (card.absentSummaryCue !== undefined) {
+        const cue = document.createElement("p");
+        cue.className = "change-card-summary-absent";
+        cue.textContent = card.absentSummaryCue;
+        element.append(cue);
+      }
 
       if (card.attention) {
         const attention = document.createElement("section");
@@ -2642,7 +2765,18 @@ export function renderChangeInspector(
           const choose = document.createElement("button");
           choose.type = "button";
           choose.className = "ghost change-card-peer-open";
-          choose.textContent = `Open · ${peer.label} · ${peer.visibleIdentity}`;
+          // Each peer is named once: its label and short exact id, or the id
+          // alone with the server's muted absent-summary cue.
+          choose.textContent =
+            peer.label === undefined
+              ? `Open · ${peer.visibleIdentity}`
+              : `Open · ${peer.label} · ${peer.visibleIdentity}`;
+          if (peer.absentSummaryCue !== undefined) {
+            const cue = document.createElement("span");
+            cue.className = "change-card-summary-absent";
+            cue.textContent = ` · ${peer.absentSummaryCue}`;
+            choose.append(cue);
+          }
           choose.title = peer.title;
           choose.setAttribute(
             "aria-label",

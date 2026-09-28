@@ -1,13 +1,23 @@
 name: Project sync
 
 # Labels are the single writable source of planning state: priority:*, effort:*,
-# status:*, research, tracking. This workflow mirrors them one way into the
-# fields of the org project board (https://github.com/orgs/withpointbreak/projects/2)
-# that its views sort and group on, and enforces the two invariants labels
-# cannot enforce by themselves: at most one priority:* and one effort:* label
-# per issue (newest wins), and planning labels changed only by people with
-# write access to this repository. Theme is board-only and hand-set; the sync
-# never touches it.
+# status:*, research, tracking. This workflow is a convenience mirror, not an
+# enforcement point: it copies the labels one way into the fields of the org
+# project board (https://github.com/orgs/withpointbreak/projects/2) that its
+# views sort and group on, and it tidies label events as they arrive. The label
+# set on the issue stays authoritative; a missed or failed run leaves the board
+# stale until the next run, never the labels wrong. Theme is board-only and
+# hand-set; the sync never touches it.
+#
+# On a label event the guard re-reads the issue's current labels and label
+# history before acting, so a stale event (the set already moved on) does
+# nothing. It reverts planning labels changed by people without write access,
+# and keeps the priority:*/effort:* label added last when a namespace gains a
+# second one, for bot events too. Removing the only priority:* or effort:*
+# label is reported on the issue. Reconciliation never resolves conflicting
+# labels by picking one: it clears that field, keeps the item out of Ready, and
+# warns. The decisions live in scripts/project-sync-labels.sh and are tested by
+# scripts/project-sync-labels-selftest.sh (just workflow-lint).
 #
 # An issue event syncs that one issue. The daily run and workflow_dispatch
 # reconcile every open issue, so a missed webhook or a renamed label heals
@@ -43,12 +53,22 @@ env:
 jobs:
   sync:
     name: sync
-    # A label the guard reverts fires this workflow again as github-actions[bot];
-    # the run that reverted it already synced, so the echo run is skipped.
-    if: github.event_name != 'issues' || github.actor != 'github-actions[bot]'
     timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
+      - name: fetch the decision script
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # One file at the triggering commit; no checkout action needed.
+          gh api "repos/${REPO}/contents/scripts/project-sync-labels.sh?ref=${SHA}" \
+            -H "Accept: application/vnd.github.raw" > "$RUNNER_TEMP/project-sync-labels.sh"
+          chmod +x "$RUNNER_TEMP/project-sync-labels.sh"
+
       - name: guard planning labels
         if: github.event_name == 'issues' && (github.event.action == 'labeled' || github.event.action == 'unlabeled')
         shell: bash
@@ -58,56 +78,51 @@ jobs:
           ISSUE: ${{ github.event.issue.number }}
           ACTION: ${{ github.event.action }}
           LABEL: ${{ github.event.label.name }}
-          ACTOR: ${{ github.actor }}
+          ACTOR: ${{ github.event.sender.login }}
           ACTOR_TYPE: ${{ github.event.sender.type }}
+          EVENT_AT: ${{ github.event.issue.updated_at }}
         run: |
           set -euo pipefail
           case "$LABEL" in
             priority:*|effort:*|status:*|research|tracking) ;;
             *) echo "not a planning label: $LABEL"; exit 0 ;;
           esac
-          if [ "$ACTOR_TYPE" = "Bot" ]; then
-            echo "bot actor ($ACTOR); guard skipped"
-            exit 0
-          fi
-          encoded="$(jq -rn --arg s "$LABEL" '$s | @uri')"
           # Repository role of the person who changed the label. Triage-level
           # collaborators can label but may not set planning state; outsiders
           # cannot label at all, so this mostly guards templates and future
-          # collaborators.
-          role="$(gh api "repos/${REPO}/collaborators/${ACTOR}/permission" --jq '.role_name // .permission' 2>/dev/null || echo none)"
-          case "$role" in
-            admin|maintain|write) ;;
-            *)
-              if [ "$ACTION" = "labeled" ]; then
-                gh api -X DELETE "repos/${REPO}/issues/${ISSUE}/labels/${encoded}" --silent
-                verb="Reverted"
-              else
-                gh api -X POST "repos/${REPO}/issues/${ISSUE}/labels" -f "labels[]=${LABEL}" --silent
-                verb="Restored"
-              fi
-              body="${verb} \`${LABEL}\`: planning labels (\`priority:*\`, \`effort:*\`, \`status:*\`, \`research\`, \`tracking\`) are set by maintainers with write access. See CONTRIBUTING.md, \"Planning labels\"."
-              gh api -X POST "repos/${REPO}/issues/${ISSUE}/comments" -f body="$body" --silent
-              echo "${verb} ${ACTION} of ${LABEL} by ${ACTOR} (role: ${role})"
-              exit 0
-              ;;
+          # collaborators. Bots have no collaborator role and skip the role
+          # check, not the namespace rules.
+          role="bot"
+          if [ "$ACTOR_TYPE" != "Bot" ]; then
+            role="$(gh api "repos/${REPO}/collaborators/${ACTOR}/permission" --jq '.role_name // .permission' 2>/dev/null || echo none)"
+          fi
+          # Re-read the current labels and the label history: the event may be
+          # stale by the time this run starts.
+          labels="$(gh api --paginate "repos/${REPO}/issues/${ISSUE}/labels?per_page=100" --jq '[.[].name]' | jq -cs 'add // []')"
+          history="$(gh api --paginate "repos/${REPO}/issues/${ISSUE}/events?per_page=100" \
+            --jq '[.[] | select(.event == "labeled" or .event == "unlabeled")
+                   | {event, label: .label.name, actor: .actor.login, at: .created_at, id}]' \
+            | jq -cs 'add // []')"
+          decision="$(jq -cn --arg action "$ACTION" --arg label "$LABEL" --arg actor "$ACTOR" --arg at "$EVENT_AT" \
+              --arg type "$ACTOR_TYPE" --arg role "$role" --argjson labels "$labels" --argjson history "$history" \
+              '{action: $action, label: $label, actor: $actor, at: $at, actorType: $type, role: $role, labels: $labels, history: $history}' \
+            | "$RUNNER_TEMP/project-sync-labels.sh" guard)"
+          echo "decision: $decision"
+          jq -r '.notes[]' <<<"$decision"
+          encoded="$(jq -rn --arg s "$LABEL" '$s | @uri')"
+          case "$(jq -r '.revert // ""' <<<"$decision")" in
+            remove) gh api -X DELETE "repos/${REPO}/issues/${ISSUE}/labels/${encoded}" --silent ;;
+            restore) gh api -X POST "repos/${REPO}/issues/${ISSUE}/labels" -f "labels[]=${LABEL}" --silent ;;
           esac
-          # Mutual exclusivity inside priority:* and effort:*: the label just
-          # added wins, every other label in the same namespace is removed.
-          if [ "$ACTION" = "labeled" ]; then
-            case "$LABEL" in
-              priority:*|effort:*)
-                ns="${LABEL%%:*}:"
-                gh api "repos/${REPO}/issues/${ISSUE}/labels" --jq '.[].name' \
-                  | jq -rR --arg ns "$ns" --arg keep "$LABEL" 'select(startswith($ns) and . != $keep)' \
-                  | while IFS= read -r other; do
-                      [ -n "$other" ] || continue
-                      other_encoded="$(jq -rn --arg s "$other" '$s | @uri')"
-                      gh api -X DELETE "repos/${REPO}/issues/${ISSUE}/labels/${other_encoded}" --silent
-                      echo "removed ${other}: superseded by ${LABEL}"
-                    done
-                ;;
-            esac
+          jq -r '.remove[]' <<<"$decision" | while IFS= read -r other; do
+            [ -n "$other" ] || continue
+            other_encoded="$(jq -rn --arg s "$other" '$s | @uri')"
+            gh api -X DELETE "repos/${REPO}/issues/${ISSUE}/labels/${other_encoded}" --silent
+            echo "removed ${other}: superseded by ${LABEL}"
+          done
+          body="$(jq -r '.comment // ""' <<<"$decision")"
+          if [ -n "$body" ]; then
+            gh api -X POST "repos/${REPO}/issues/${ISSUE}/comments" -f body="$body" --silent
           fi
 
       - name: sync board fields from labels
@@ -193,30 +208,14 @@ jobs:
           for n in $numbers; do
             issue="$(GH_TOKEN="$REPO_TOKEN" gh api "repos/${REPO}/issues/${n}")"
             node_id="$(jq -r '.node_id' <<<"$issue")"
-            labels="$(jq -r '.labels[].name' <<<"$issue")"
-            has() { grep -qxF -- "$1" <<<"$labels"; }
-
-            priority=""
-            has "priority:P0-release-blocker" && priority="P0 blocker"
-            has "priority:P1-1.0-candidate" && priority="P1 1.0 candidate"
-            has "priority:P2-backlog" && priority="P2 backlog"
-            has "priority:P3-later" && priority="P3 later"
-
-            effort=""
-            has "effort:low" && effort="Low"
-            has "effort:medium" && effort="Medium"
-            has "effort:high" && effort="High"
-
-            # Precedence when several apply: an umbrella is Tracking whatever
-            # else it carries; a study is Research; a gated item is parked
-            # before it is a decision; needs-triage clears the field.
-            workflow="Ready"
-            if has "tracking"; then workflow="Tracking"
-            elif has "research"; then workflow="Research"
-            elif has "status:demand-gated"; then workflow="Demand-gated"
-            elif has "status:needs-decision"; then workflow="Needs decision"
-            elif has "status:needs-triage"; then workflow=""
-            fi
+            # Board values from the current labels. Conflicting or missing
+            # priority:/effort: labels clear that field and are reported here,
+            # never resolved by picking one.
+            fields="$(jq -c '[.labels[].name]' <<<"$issue" | "$RUNNER_TEMP/project-sync-labels.sh" fields)"
+            priority="$(jq -r '.priority' <<<"$fields")"
+            effort="$(jq -r '.effort' <<<"$fields")"
+            workflow="$(jq -r '.workflow' <<<"$fields")"
+            jq -r --arg n "$n" '.problems[] | "::warning::#\($n): \(.)"' <<<"$fields"
 
             # addProjectV2ItemById is idempotent: it returns the existing item
             # when the issue is already on the board.

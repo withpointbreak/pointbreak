@@ -3118,6 +3118,10 @@ pub struct LongitudinalCountersV1 {
     pub timeline_sqlite_window_rows: u64,
     #[serde(default, skip_serializing_if = "u64_is_zero")]
     pub timeline_sqlite_facet_rows: u64,
+    /// Representative rows read to resolve Timeline relation targets: at most
+    /// one per distinct referenced fact on the selected page.
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub timeline_relation_target_rows: u64,
     #[serde(default, skip_serializing_if = "u64_is_zero")]
     pub timeline_selected_carriers: u64,
     #[serde(default, skip_serializing_if = "u64_is_zero")]

@@ -385,7 +385,8 @@ pub struct ChangeCaptureRevisionV1 {
     pub id: RevisionId,
     pub revision_id: RevisionId,
     pub object_id: ObjectId,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Always serialized: an absent summary is an explicit `null`, never an omitted field.
+    #[serde(default)]
     pub summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base: Option<ReviewEndpoint>,

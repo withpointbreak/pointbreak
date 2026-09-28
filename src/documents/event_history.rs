@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::crypto::{EventVerificationStatus, SignerId};
 use crate::model::{
-    ChangeId, ChangeLinkClaimId, ChangeMembershipClaimId, ChangeRevisionRelationClaimId, EventId,
-    JournalId, ReviewFactPortId, ReviewTargetRef, RevisionId, RevisionRefV1,
+    ActorId, ChangeId, ChangeLinkClaimId, ChangeMembershipClaimId, ChangeRevisionRelationClaimId,
+    EventId, JournalId, ReviewFactPortId, ReviewTargetRef, RevisionId, RevisionRefV1,
     RevisionRelationAttestationId, TrackId,
 };
 use crate::session::AuthorityCursorV2;
@@ -125,6 +125,24 @@ pub struct EventHistoryEntryV1 {
     pub revision_refs: Vec<RevisionRefV1>,
     pub unresolved_revision_ids: Vec<RevisionId>,
     pub summary: EventHistorySummaryV1,
+    /// Server-resolved navigation targets for the fact ids this entry's
+    /// relationship fields name. Each target is the referenced fact's
+    /// representative recording event: of every event that records the fact
+    /// id in its family, the one with the smallest event id. It is a target
+    /// only when that event is a Timeline entry recorded against the same
+    /// Revision as this entry's review subject. A referenced id without a
+    /// target here has no resolvable recording event, and readers render it as
+    /// plain text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relation_targets: Vec<EventHistoryRelationTargetV1>,
+}
+
+/// One referenced fact id and the Timeline event that recorded it.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventHistoryRelationTargetV1 {
+    pub fact_id: String,
+    pub event_id: EventId,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -135,6 +153,23 @@ pub struct EventHistoryCompletionV1 {
     pub change_ids: Vec<ChangeId>,
     pub revision_refs: Vec<RevisionRefV1>,
     pub unresolved_revision_ids: Vec<RevisionId>,
+    /// Writer actor ids of the entries on this page only, sorted and unique.
+    /// Page scope keeps the set bounded by the page limit; the served document
+    /// binds it after the page window is selected (see
+    /// [`event_history_page_actor_ids`]).
+    #[serde(default)]
+    pub actor_ids: Vec<ActorId>,
+}
+
+/// The bounded `completion.actorIds` value for one page: the distinct writer
+/// actor ids of exactly these entries, in sorted order.
+pub fn event_history_page_actor_ids(entries: &[EventHistoryEntryV1]) -> Vec<ActorId> {
+    entries
+        .iter()
+        .map(|entry| entry.writer.actor_id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

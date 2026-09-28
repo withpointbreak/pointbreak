@@ -155,3 +155,17 @@ The unchanged `.v1` manifests use their as-built canonical members. `RelationPro
 `candidate`, `result`, and `evidenceSha256`. `AuxiliaryDocumentManifestV1` carries `schema`, `version`,
 `revision: RevisionRefV1`, `retentionPolicy`, `entries`, `childContentHashes`, `retainedDecodedBytes`, and
 `manifestSha256`. These lists supersede the earlier split generation-id/artifact fields.
+
+## Amendment: Caller-Bound Candidate Base (2026-09-27)
+
+**Status: Accepted 2026-09-27 in [#747](https://github.com/withpointbreak/pointbreak/issues/747#issuecomment-5860668352). Not yet implemented.** This amendment accompanies the ADR-0042
+amendment of the same date. Until the implementation lands and its admission, drift, compatibility, readback
+and failure tests pass, D1's as-built paragraph still describes the as-built system. Acceptance is not
+evidence of implementation.
+
+In `RelationProofManifestV1`, `candidate.baseOrParent` becomes the caller-bound comparison base B of a
+first-parent-linear range B..C′. It is no longer only the candidate's sole parent. `source` still retains
+the captured base A. The manifest, the canonical inputs and `canonical-equivalent-rewrite-v1` are
+unchanged. B and C′ are immutable commit identities, so together they determine the range, and the proof
+needs no range field. The rewrite route admits no extension. Stable patch ID, ancestry and clean rebase
+status remain candidate signals only.

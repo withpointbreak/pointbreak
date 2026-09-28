@@ -2108,11 +2108,13 @@ mod tests {
             context_change_id: None,
             presented_in_revision: None,
             port_relation: None,
+            relations: Vec::new(),
             actor_id: crate::model::ActorId::new("actor:test"),
             track_id: None,
             family_state: crate::documents::FactFamilyStateV1::Current,
             revision_currency: crate::documents::ChangeRevisionCurrencyV1::Current,
             availability: crate::session::ContentAvailabilityV1::Available,
+            recording_event_id: None,
         };
         let replacement = facade
             .contextual_revision_document(

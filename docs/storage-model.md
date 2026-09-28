@@ -404,6 +404,16 @@ worktree (`pointbreak store mode ephemeral`) instead pins its writes to a discar
 `.pointbreak/data/` store — the privacy escape hatch for sensitive or throwaway work whose bytes should
 disappear when the worktree is removed.
 
+**Store-mode flips are audited by git history, not by an event or a manifest.** Flipping a worktree
+between shared and ephemeral is privacy-relevant, because it decides whether captured bytes land in the
+clone's shared store or in a discardable one. The mode is configuration, like `delegates.json`, not a
+shared review fact, so it is never recorded as an event. For the committed `.pointbreak/store.json`, the
+file's git history (`git log -p .pointbreak/store.json`) is the audit trail for shared ↔ ephemeral flips.
+The git-excluded `.pointbreak/store.local.json` override is deliberately unaudited: it is a private,
+per-worktree choice that leaves no durable trace when it changes or when the worktree is removed. Commit
+the mode to `store.json` when a flip needs to be reviewable later. (Owner decision on
+[issue #216](https://github.com/withpointbreak/pointbreak/issues/216), 2026-09-25.)
+
 A pre-flip worktree-local `.pointbreak/data/` store on a non-ephemeral worktree (data written before the
 shared common-dir default) is detected on any read or write. The retained `pointbreak store migrate`
 contract folds that legacy store into the shared common-dir store
@@ -657,6 +667,14 @@ mirrored to another store cannot be un-sent** — privacy is something you secur
 already-mirrored case is a documented limitation, not something removal can repair. GC is deliberately
 not an event: "I deleted my local bytes" is a local maintenance fact, not a shared review fact, so it
 is never converged to peers.
+
+Compaction also leaves no local record after it exits: its result (the swept hashes, bytes reclaimed,
+and skipped removals) is reported to the caller and not persisted, so nothing on disk records which
+sweep erased which bytes, or when.
+A local, unsigned maintenance manifest for compaction runs is deliberately deferred until a consumer
+needs it, such as a diagnostic-bundle command like the still-future `pointbreak doctor`
+([issue #9](https://github.com/withpointbreak/pointbreak/issues/9)); see
+[issue #216](https://github.com/withpointbreak/pointbreak/issues/216).
 
 ## Event Files
 

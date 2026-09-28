@@ -970,13 +970,15 @@ main {
   color: var(--fg-dim);
   font-variant-numeric: tabular-nums;
 }
-/* An expanded group is a labelled container whose children are ordinary
-   option rows; it adds no box of its own so each member stays one row tall. */
-.timeline-group-members,
-.timeline-group-members > ol {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+.timeline-group-tally,
+.timeline-group-range {
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+/* An expanded group splices its members flat into the listbox, one row each.
+   A tinted left edge marks the run without adding a box or changing height. */
+.timeline-group-member {
+  box-shadow: inset 3px 0 0 var(--border);
 }
 .event-summary,
 .event-context {
@@ -1558,6 +1560,14 @@ html.compact .unit-card {
 .change-card-current,
 .change-card-unavailable {
   margin: 8px 0 0;
+}
+/* Server-owned absent-summary cue (#752): a muted state line under a headline
+   that is the exact Revision id, and a muted suffix on a peer button. */
+.change-card-summary-absent {
+  margin: 3px 0 0;
+  color: var(--fg-dim);
+  font-size: var(--fs-xs);
+  font-style: italic;
 }
 .change-card-unavailable {
   color: var(--warning);
@@ -2862,6 +2872,15 @@ html.compact .unit-card {
   border-radius: var(--r-sm);
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+/* A resolved reference chip is a real button; it keeps the chip's inline look. */
+button.ref {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  font-family: var(--mono);
 }
 .ref-commit,
 .ref-hash {
