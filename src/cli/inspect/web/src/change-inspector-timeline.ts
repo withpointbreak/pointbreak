@@ -326,6 +326,8 @@ function rowSpacer(height: number): HTMLLIElement {
 
 // The writer is a query clause, not a scope param: appending composes with the
 // existing query text and leaves the `track` param free for an explicit track.
+// A writer id the search grammar cannot express gets plain text instead of a
+// link, so a click never resets paging without applying a filter.
 function appendActorFilterLink(
   parent: HTMLElement,
   actorId: string,
@@ -336,6 +338,14 @@ function appendActorFilterLink(
     actorId,
     "change-timeline",
   );
+  if (q === null) {
+    const writer = document.createElement("span");
+    writer.dataset.timelineUnfilterableWriter = actorId;
+    writer.textContent = actorId;
+    writer.title = `writer ${actorId} · no filter link: Timeline search cannot express an id containing a double quote (")`;
+    parent.append(writer);
+    return;
+  }
   const link = appendTimelineLink(
     parent,
     actorId,

@@ -42,9 +42,10 @@ pub(super) struct DiffArgs {
     /// Color theme for the diff body: auto (detect the terminal background
     /// and pick the light or dark palette), light, dark, or the name of a
     /// bundled syntax theme, case-insensitively (for example "Monokai
-    /// Extended" or "onehalflight"). Themes apply on truecolor terminals; the 16-color
-    /// palette follows the terminal's own theme. Overrides POINTBREAK_THEME and
-    /// BAT_THEME.
+    /// Extended" or "onehalflight"). Themes apply on truecolor terminals
+    /// (COLORTERM=truecolor|24bit) and, downsampled, on 256-color terminals
+    /// (TERM=*-256color); the 16-color palette follows the terminal's own
+    /// theme. Overrides POINTBREAK_THEME and BAT_THEME.
     #[arg(long)]
     theme: Option<String>,
 }
@@ -122,7 +123,7 @@ pub(super) fn run(
     let lane: Option<ColorLane> = if resolve_color(args.color) && !args.stat {
         Some(match color_depth() {
             ColorDepth::Named => ColorLane::Named,
-            ColorDepth::Truecolor => {
+            depth @ (ColorDepth::Ansi256 | ColorDepth::Truecolor) => {
                 let selection = theme::theme_selection_from_env(args.theme.as_deref());
                 // The terminal gate; the Auto-only condition lives inside
                 // resolve_truecolor_palette, which invokes the detector at
@@ -130,7 +131,7 @@ pub(super) fn run(
                 let gate = theme::detection_allowed(
                     true, // color already resolved on in this branch
                     std::io::stdout().is_terminal(),
-                    true, // truecolor in this arm
+                    true, // a themed (256-color or truecolor) lane in this arm
                 );
                 let choice = theme::resolve_truecolor_palette(&selection, || {
                     if gate { theme::detect_mode() } else { None }
@@ -138,7 +139,11 @@ pub(super) fn run(
                 if let Some(warning) = &choice.warning {
                     eprintln!("warning: {warning}");
                 }
-                ColorLane::Truecolor(Box::new(choice.palette))
+                let palette = match depth {
+                    ColorDepth::Ansi256 => choice.palette.into_ansi256(choice.mode),
+                    _ => choice.palette,
+                };
+                ColorLane::Themed(Box::new(palette))
             }
         })
     } else {
@@ -271,30 +276,42 @@ const SGR_RESET: &str = "\x1b[0m";
 const SGR_UNDERLINE: &str = "\x1b[4m";
 
 /// Terminal color capability.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ColorDepth {
     Truecolor,
+    Ansi256,
     Named,
 }
 
-/// Truecolor only when the terminal advertises it via `COLORTERM`; otherwise the
-/// named-ANSI 16-color palette, which degrades cleanly on limited terminals. No new
-/// dependency — just the `COLORTERM` convention.
-fn color_depth() -> ColorDepth {
-    match std::env::var("COLORTERM").ok().as_deref() {
+/// Pure capability core. Truecolor when `COLORTERM` advertises it
+/// (`truecolor` / `24bit`); else 256 colors when `TERM` follows the
+/// `*-256color` convention (`xterm-256color`, `tmux-256color`, ...); otherwise
+/// the named-ANSI 16-color palette, which degrades cleanly on limited
+/// terminals and follows the terminal's own theme.
+fn color_depth_core(colorterm: Option<&str>, term: Option<&str>) -> ColorDepth {
+    match colorterm {
         Some("truecolor") | Some("24bit") => ColorDepth::Truecolor,
+        _ if term.is_some_and(|term| term.ends_with("-256color")) => ColorDepth::Ansi256,
         _ => ColorDepth::Named,
     }
 }
 
+/// Reads `COLORTERM` and `TERM` once and delegates to [`color_depth_core`].
+fn color_depth() -> ColorDepth {
+    let colorterm = std::env::var("COLORTERM").ok();
+    let term = std::env::var("TERM").ok();
+    color_depth_core(colorterm.as_deref(), term.as_deref())
+}
+
 /// Which colored lane the render uses: the named-ANSI table (the terminal's
-/// own theme colors it, byte-frozen) or a truecolor palette (theme-aware —
-/// built-in light/dark or derived from an embedded theme).
+/// own theme colors it, byte-frozen) or a themed palette (built-in light/dark
+/// or derived from an embedded theme), carrying truecolor SGR or, on the
+/// 256-color lane, its downsampled form.
 pub(super) enum ColorLane {
     Named,
     // Boxed: the palette is ~12 Cow fields and the lane is built once per
     // run, so the indirection is free and keeps the enum small (clippy).
-    Truecolor(Box<DiffPalette>),
+    Themed(Box<DiffPalette>),
 }
 
 /// `TokenKind` → named-ANSI SGR foreground, the 16-color lane's frozen table —
@@ -322,7 +339,7 @@ fn named_sgr_for_kind(kind: TokenKind) -> &'static str {
 /// OUTSIDE any colored segment. Code segments come from
 /// `attributed_segments(text, tokens, emphasis)` (offsets into the bare text), each
 /// wrapped in its lane's foreground. Intraline emphasis renders per lane: the
-/// named lane underlines; the truecolor lane paints the palette's add/del
+/// named lane underlines; a themed lane paints the palette's add/del
 /// background tint by row kind (context rows never carry emphasis — the
 /// intraline pass pairs removed/added blocks only — so they defensively get no
 /// tint). Empty `tokens`/`emphasis` leaves the bare text after the gutter, so
@@ -336,7 +353,7 @@ fn render_row_ansi(
 ) -> String {
     let emph_sgr = match lane {
         ColorLane::Named => SGR_UNDERLINE,
-        ColorLane::Truecolor(palette) => match kind {
+        ColorLane::Themed(palette) => match kind {
             DiffRowKind::Added => palette.emph_add_bg.as_ref(),
             DiffRowKind::Removed => palette.emph_del_bg.as_ref(),
             DiffRowKind::Context => "",
@@ -350,7 +367,7 @@ fn render_row_ansi(
             .kind
             .map(|k| match lane {
                 ColorLane::Named => named_sgr_for_kind(k),
-                ColorLane::Truecolor(palette) => palette.sgr_for(k),
+                ColorLane::Themed(palette) => palette.sgr_for(k),
             })
             .unwrap_or("");
         let emph = if seg.emphasized { emph_sgr } else { "" };
@@ -726,7 +743,7 @@ mod tests {
         let snapshot = snapshot_with(vec![added, deleted]);
         let colored = render_unified_diff_colored(
             &snapshot,
-            &ColorLane::Truecolor(Box::new(DiffPalette::builtin_light())),
+            &ColorLane::Themed(Box::new(DiffPalette::builtin_light())),
         );
         assert_eq!(strip_ansi(&colored), render_unified_diff(&snapshot));
     }
@@ -897,7 +914,7 @@ mod tests {
                 vec![row(DiffRowKind::Added, "let x = 2;")],
             )],
         )]);
-        let lane = ColorLane::Truecolor(Box::new(DiffPalette::builtin_light()));
+        let lane = ColorLane::Themed(Box::new(DiffPalette::builtin_light()));
         let colored = render_body(&snapshot, Some(&lane));
         assert!(colored.contains("\x1b[38;2;122;68;212m")); // light keyword
         let plain = render_body(&snapshot, None);
@@ -914,7 +931,7 @@ mod tests {
             DiffRowKind::Added,
             &[],
             &emphasis,
-            &ColorLane::Truecolor(Box::new(DiffPalette::builtin_dark())),
+            &ColorLane::Themed(Box::new(DiffPalette::builtin_dark())),
         );
         assert!(added.contains("\x1b[48;2;0;96;0m")); // dark add tint
         assert!(!added.contains("\x1b[4m")); // underline retired on truecolor
@@ -923,9 +940,53 @@ mod tests {
             DiffRowKind::Removed,
             &[],
             &emphasis,
-            &ColorLane::Truecolor(palette),
+            &ColorLane::Themed(palette),
         );
         assert!(removed.contains("\x1b[48;2;144;16;17m")); // dark del tint
+    }
+
+    #[test]
+    fn color_depth_detects_truecolor_then_256_then_named() {
+        use ColorDepth::*;
+        assert_eq!(color_depth_core(Some("truecolor"), None), Truecolor);
+        assert_eq!(color_depth_core(Some("24bit"), Some("xterm")), Truecolor);
+        // COLORTERM truecolor still wins over a 256-color TERM.
+        assert_eq!(
+            color_depth_core(Some("truecolor"), Some("xterm-256color")),
+            Truecolor
+        );
+        assert_eq!(color_depth_core(None, Some("xterm-256color")), Ansi256);
+        assert_eq!(color_depth_core(None, Some("tmux-256color")), Ansi256);
+        assert_eq!(
+            color_depth_core(Some("yes"), Some("screen-256color")),
+            Ansi256
+        );
+        // No 256-color advertisement → the terminal-themed named-16 lane.
+        assert_eq!(color_depth_core(None, None), Named);
+        assert_eq!(color_depth_core(None, Some("xterm")), Named);
+        assert_eq!(color_depth_core(None, Some("xterm-16color")), Named);
+        assert_eq!(color_depth_core(Some(""), Some("dumb")), Named);
+    }
+
+    #[test]
+    fn ansi256_lane_paints_downsampled_fg_and_fixed_emph_tint() {
+        let tokens = vec![TokenSpan {
+            start: 0,
+            end: 3,
+            kind: TokenKind::Keyword,
+        }];
+        let emphasis = vec![EmphSpan { start: 0, end: 3 }];
+        let lane = ColorLane::Themed(Box::new(
+            DiffPalette::builtin_dark().into_ansi256(theme::DiffMode::Dark),
+        ));
+        let added = render_row_ansi("let x", DiffRowKind::Added, &tokens, &emphasis, &lane);
+        assert!(added.contains("\x1b[38;5;141m")); // downsampled keyword
+        assert!(added.contains("\x1b[48;5;28m")); // delta dark 256 add tint
+        assert!(!added.contains("38;2") && !added.contains("48;2"));
+        assert!(!added.contains("\x1b[4m"));
+        let removed = render_row_ansi("let x", DiffRowKind::Removed, &tokens, &emphasis, &lane);
+        assert!(removed.contains("\x1b[48;5;124m")); // delta dark 256 del tint
+        assert_eq!(strip_ansi(&added), "+let x\n");
     }
 
     #[test]
@@ -964,7 +1025,7 @@ mod tests {
         )]);
         let colored = render_unified_diff_colored(
             &snapshot,
-            &ColorLane::Truecolor(Box::new(DiffPalette::builtin_light())),
+            &ColorLane::Themed(Box::new(DiffPalette::builtin_light())),
         );
         assert_eq!(strip_ansi(&colored), render_unified_diff(&snapshot));
     }

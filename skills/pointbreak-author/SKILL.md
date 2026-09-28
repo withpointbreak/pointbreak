@@ -109,6 +109,11 @@ pointbreak input-request open \
   --mode advisory --body "<why another actor must decide>"
 ```
 
+On a recapture, do not re-open a request that is still open on the prior Revision. It stays
+answerable whether or not its anchor is current, and attention already marks it `superseded`, so a
+duplicate on the new Revision only leaves the original dangling. Open a new request only for a new
+decision.
+
 Use file/range anchors when a fact is local. Use Markdown content types when bodies name code. Do
 not paste transcripts, record checks you did not run, or convert a pre-implementation Red result
 into validation for the final Revision; record that Red result as an observation.

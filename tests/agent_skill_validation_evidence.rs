@@ -45,6 +45,19 @@ fn agent_skills_and_docs_adopt_validation_evidence_workflow() {
 }
 
 #[test]
+fn author_skills_do_not_reopen_an_open_input_request_on_recapture() {
+    // #448: an open request stays answerable on its superseded anchor, so a
+    // recapture must not re-open a verbatim duplicate that leaves it dangling.
+    for skill in [
+        "skills/pointbreak-author/SKILL.md",
+        "skills/pointbreak-author-response/SKILL.md",
+    ] {
+        assert_contains(skill, "re-open a request that is still open");
+        assert_contains(skill, "attention already marks it `superseded`");
+    }
+}
+
+#[test]
 fn repo_owned_agent_skills_use_only_the_flat_pointbreak_cli() {
     for skill in [
         "skills/pointbreak-author/SKILL.md",

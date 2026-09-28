@@ -328,7 +328,9 @@ const DARK_ADD_TINT: &str = "\x1b[48;2;0;96;0m";
 const LIGHT_ADD_TINT: &str = "\x1b[48;2;160;239;160m";
 
 /// Run `pointbreak diff --color always` against `path` with extra args and env.
-/// Every caller pins `COLORTERM` explicitly (CI environments differ).
+/// Every caller pins `COLORTERM` explicitly (CI environments differ); callers
+/// that expect the named-16 or 256-color lane also pin `TERM`, since CI hosts
+/// (the Windows runners among them) set `TERM=xterm-256color`.
 fn diff_env(path: &Path, extra_args: &[&str], envs: &[(&str, &str)]) -> Output {
     let mut args = vec![
         "diff",
@@ -520,22 +522,47 @@ fn shore_diff_unknown_bat_theme_warns_and_falls_back() {
 fn shore_diff_named16_lane_ignores_theme_selection() {
     let repo = modified_repo();
     capture(repo.path());
-    // Empty COLORTERM is not truecolor/24bit, forcing the named lane even
-    // when the CI ambience sets it.
-    let with_theme = diff_env(repo.path(), &["--theme", "light"], &[("COLORTERM", "")]);
-    let without = diff_env(repo.path(), &[], &[("COLORTERM", "")]);
+    // Empty COLORTERM is not truecolor/24bit and a plain TERM advertises no
+    // 256 colors, forcing the named lane even when the CI ambience sets either.
+    let named = [("COLORTERM", ""), ("TERM", "xterm")];
+    let with_theme = diff_env(repo.path(), &["--theme", "light"], &named);
+    let without = diff_env(repo.path(), &[], &named);
     assert!(with_theme.status.success() && without.status.success());
     let text = out_text(&with_theme);
     assert_eq!(text, out_text(&without));
     assert!(text.contains("\x1b[35m")); // named keyword magenta, unchanged
     assert!(!text.contains("38;2")); // no truecolor on the named lane
     // No validation off the truecolor lane: a bogus name is inert here.
-    let bogus = diff_env(
-        repo.path(),
-        &["--theme", "no-such-theme"],
-        &[("COLORTERM", "")],
-    );
+    let bogus = diff_env(repo.path(), &["--theme", "no-such-theme"], &named);
     assert!(bogus.status.success());
+}
+
+#[test]
+fn shore_diff_256color_lane_downsamples_the_selected_theme() {
+    let repo = modified_repo();
+    capture(repo.path());
+    let ansi256 = [("COLORTERM", ""), ("TERM", "xterm-256color")];
+    let light = diff_env(repo.path(), &["--theme", "light"], &ansi256);
+    let dark = diff_env(repo.path(), &["--theme", "dark"], &ansi256);
+    assert!(light.status.success() && dark.status.success());
+    let (light, dark) = (out_text(&light), out_text(&dark));
+    // Themes apply on the 256-color lane, downsampled: no truecolor SGR, no
+    // named-lane underline, and delta's hand-picked 256-color add tints.
+    for text in [&light, &dark] {
+        assert!(text.contains("\x1b[38;5;"));
+        assert!(!text.contains("38;2") && !text.contains("48;2"));
+        assert!(!text.contains("\x1b[4m"));
+    }
+    assert_ne!(light, dark);
+    assert!(light.contains("\x1b[48;5;157m"));
+    assert!(dark.contains("\x1b[48;5;28m"));
+    // COLORTERM=truecolor still wins over a 256-color TERM.
+    let truecolor = diff_env(
+        repo.path(),
+        &["--theme", "light"],
+        &[("COLORTERM", "truecolor"), ("TERM", "xterm-256color")],
+    );
+    assert!(out_text(&truecolor).contains(LIGHT_KEYWORD));
 }
 
 #[test]

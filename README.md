@@ -54,7 +54,8 @@ platforms, manual downloads, and checksum verification.
 ## Quick Start
 
 Make a real change in a Git repository — modify a tracked file — then capture it with a useful
-summary and open Review:
+summary and open Review. The `--summary` text is the label shown on Inspector Change cards; without
+it, cards and receipts show only the exact Revision id:
 
 ```bash
 cd path/to/git-worktree

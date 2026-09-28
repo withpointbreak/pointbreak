@@ -141,6 +141,33 @@ fn load_store_wide_read(read_store: &ReadStore, read_for_display: bool) -> Resul
     })
 }
 
+/// Diagnostic code for the redirect `revision show` carries on a store that
+/// holds Change authority: its supersession facets do not follow Change
+/// replacement, and the Change surfaces are the reader for it.
+pub const CHANGE_REPLACEMENT_NOT_FOLLOWED_CODE: &str = "change_replacement_not_followed";
+
+/// The redirect `revision show` adds on a Change-aware store.
+///
+/// The composite view retains legacy proposal-supersession selection and
+/// facets (the `[REVISION]` head seed, `validationChecks[].supersededByRevisions`
+/// and `stale_by_superseding_revision`), which read the proposal-borne
+/// `supersedes` list only. It deliberately does not learn a second replacement
+/// model (#790): Change-scoped replacement is read through `change show` and
+/// `change revision`, which this diagnostic names. The shared projection never
+/// emits it, so `change revision`, which reuses that projection, is unchanged.
+pub fn change_replacement_redirect_diagnostic() -> ProjectionDiagnostic {
+    ProjectionDiagnostic {
+        code: CHANGE_REPLACEMENT_NOT_FOLLOWED_CODE.to_owned(),
+        message: "revision show retains legacy proposal-supersession selection and facets and \
+                  does not follow Change replacement: the [REVISION] head seed, \
+                  validationChecks[].supersededByRevisions and stale_by_superseding_revision read \
+                  proposal-borne supersedes only. Read the current set with `pointbreak change \
+                  show <change-id>` and an exact Revision with `pointbreak change revision \
+                  <change-id> <revision-id> --artifact-hash <sha256>`"
+            .to_owned(),
+    }
+}
+
 pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult> {
     let read_store = resolve_read_store(&options.repo)?;
     show_revision_from_read_store(options, &read_store)
