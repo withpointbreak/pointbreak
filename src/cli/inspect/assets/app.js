@@ -2927,7 +2927,9 @@
     timelineShell: "timeline-shell",
     timelineNewPill: "timeline-new-pill",
     timelineGroup: "timeline-group",
-    timelineGroupMembers: "timeline-group-members",
+    timelineGroupMember: "timeline-group-member",
+    timelineGroupTally: "timeline-group-tally",
+    timelineGroupRange: "timeline-group-range",
     lensHeading: "lens-heading",
     lensMeta: "lens-meta",
     lensCount: "lens-count",
@@ -3236,6 +3238,35 @@
   __name(createLensHeading, "createLensHeading");
 
   // src/change-inspector-timeline-grouping.ts
+  var VALIDATION_STATUS_ORDER = [
+    "passed",
+    "failed",
+    "errored",
+    "skipped"
+  ];
+  function summarizeTimelineGroup(group) {
+    const first = group.members[0];
+    const last = group.members[group.members.length - 1];
+    if (first === void 0 || last === void 0) {
+      throw new Error("Timeline group has no members");
+    }
+    const counts = /* @__PURE__ */ new Map();
+    for (const member of group.members) {
+      if (member.summary?.kind !== "validation_check_recorded") continue;
+      const status = member.summary.details.status;
+      counts.set(status, (counts.get(status) ?? 0) + 1);
+    }
+    return {
+      count: group.members.length,
+      firstOccurredAt: first.occurredAt,
+      lastOccurredAt: last.occurredAt,
+      statusTally: VALIDATION_STATUS_ORDER.flatMap((status) => {
+        const count = counts.get(status) ?? 0;
+        return count > 0 ? [{ status, count }] : [];
+      })
+    };
+  }
+  __name(summarizeTimelineGroup, "summarizeTimelineGroup");
   var GROUP_MIN_RUN = 3;
   function groupTimelineEntries(entries, minRun) {
     const rows = [];
@@ -3965,33 +3996,44 @@
     row.append(rail);
   }
   __name(appendRail, "appendRail");
+  var GROUP_COLLAPSED_HINT = "collapsed run, press Enter to expand";
   function groupName(group) {
     const first = group.members[0];
     if (first === void 0) throw new Error("Timeline group has no members");
-    return `${eventGroupLabel(first)}, ${group.members.length} events`;
+    const summary = summarizeTimelineGroup(group);
+    const tally = summary.statusTally.map(
+      ({ status, count }) => `${count} ${status}`
+    );
+    return [
+      eventGroupLabel(first),
+      `${summary.count} events`,
+      ...tally,
+      `${summary.firstOccurredAt} to ${summary.lastOccurredAt}`
+    ].join(", ");
   }
   __name(groupName, "groupName");
-  function groupContainer(group) {
-    const item = document.createElement("li");
-    item.className = CLASS.timelineGroupMembers;
-    item.dataset.timelineGroupMembers = group.eventType;
-    item.setAttribute("role", "group");
-    item.setAttribute("aria-label", groupName(group));
-    const members = document.createElement("ol");
-    members.setAttribute("role", "none");
-    item.append(members);
-    return { item, members };
+  function clockText(occurredAt) {
+    const occurred = new Date(occurredAt);
+    return Number.isNaN(occurred.valueOf()) ? occurredAt : occurred.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit"
+    });
   }
-  __name(groupContainer, "groupContainer");
+  __name(clockText, "clockText");
   function groupRow(group, selectedEventId) {
     const first = group.members[0];
     if (first === void 0) throw new Error("Timeline group has no members");
     const presentation = presentEvent(first);
+    const summary = summarizeTimelineGroup(group);
     const row = optionRow(first.eventId, selectedEventId);
     row.classList.add(CLASS.timelineGroup);
     row.dataset.timelineGroup = group.eventType;
     row.dataset.timelineGroupSize = String(group.members.length);
-    row.setAttribute("aria-label", `${groupName(group)}, collapsed`);
+    row.setAttribute(
+      "aria-label",
+      `${groupName(group)}, ${GROUP_COLLAPSED_HINT}`
+    );
     appendOccurredAt(row, first.occurredAt);
     appendRail(row, group.eventType);
     const body = document.createElement("div");
@@ -4009,8 +4051,19 @@
     eventType.style.color = eventTypeColor(group.eventType);
     const count = document.createElement("span");
     count.className = CLASS.typeCount;
-    count.textContent = String(group.members.length);
+    count.textContent = String(summary.count);
     meta.append(eventType, count);
+    if (summary.statusTally.length) {
+      const tally = document.createElement("span");
+      tally.className = CLASS.timelineGroupTally;
+      tally.textContent = summary.statusTally.map(({ status, count: count2 }) => `${count2} ${status}`).join(" · ");
+      meta.append(tally);
+    }
+    const range = document.createElement("span");
+    range.className = CLASS.timelineGroupRange;
+    range.title = `${summary.firstOccurredAt} to ${summary.lastOccurredAt}`;
+    range.textContent = `${clockText(summary.firstOccurredAt)} – ${clockText(summary.lastOccurredAt)}`;
+    meta.append(range);
     body.append(heading, meta);
     row.append(body);
     return row;
@@ -4182,25 +4235,17 @@
     const top = rowSpacer(localStart * rowHeight);
     const bottom = rowSpacer(Math.max(0, rows.length - localEnd) * rowHeight);
     const painted = [];
-    const containers = /* @__PURE__ */ new Map();
     for (const row of rows.slice(localStart, localEnd)) {
       if (row.kind === "group") {
         painted.push(groupRow(row, view.selectedEventId));
         continue;
       }
-      const member = entryRow(row.entry, view.selectedEventId, view.route);
-      if (row.ofGroup === void 0) {
-        painted.push(member);
-        continue;
+      const item = entryRow(row.entry, view.selectedEventId, view.route);
+      if (row.ofGroup !== void 0) {
+        item.classList.add(CLASS.timelineGroupMember);
+        item.dataset.timelineGroupMember = groupKey(row.ofGroup);
       }
-      let members = containers.get(row.ofGroup);
-      if (members === void 0) {
-        const created = groupContainer(row.ofGroup);
-        members = created.members;
-        containers.set(row.ofGroup, members);
-        painted.push(created.item);
-      }
-      members.append(member);
+      painted.push(item);
     }
     list.replaceChildren(top, ...painted, bottom);
     const activeOption = view.selectedEventId ? Array.from(list.querySelectorAll("[data-event-id]")).find(
@@ -5779,7 +5824,8 @@
           }
           return;
         }
-        if (event.key === "Enter" && !isNativeActionControl(event.target) || event.key === "ArrowRight" && isTimelineListTarget(event.target)) {
+        const space = event.key === " " && route.kind === "timeline" && isTimelineListTarget(event.target) && !isNativeActionControl(event.target);
+        if (event.key === "Enter" && !isNativeActionControl(event.target) || space || event.key === "ArrowRight" && isTimelineListTarget(event.target)) {
           const group = changeInspectorTimelineGroupAt(selectedTimelineEventId);
           if (group !== null) {
             event.preventDefault();
@@ -5791,7 +5837,7 @@
           }
           if (event.key === "ArrowRight") return;
         }
-        if (event.key === "ArrowLeft" && isTimelineListTarget(event.target)) {
+        if (space || event.key === "ArrowLeft" && isTimelineListTarget(event.target)) {
           const owner = changeInspectorTimelineGroupAt(selectedTimelineEventId, {
             includeExpanded: true
           });

@@ -140,11 +140,19 @@ function selectGroupByKeyboard(): void {
   expect(selectedTimelineEventId()).toBe("ev:b2");
 }
 
-function selectedRowLabel(): string | null {
+/**
+ * Whether the selected row is a collapsed group row. The state is in the
+ * accessible name: WAI-ARIA 1.2 does not support aria-expanded on option.
+ */
+function selectedRowCollapsed(): boolean {
+  const row = document.querySelector<HTMLElement>(
+    '#timeline [aria-selected="true"]',
+  );
+  expect(row?.hasAttribute("aria-expanded")).toBe(false);
   return (
-    document
-      .querySelector<HTMLElement>('#timeline [aria-selected="true"]')
-      ?.getAttribute("aria-label") ?? null
+    row
+      ?.getAttribute("aria-label")
+      ?.endsWith(", collapsed run, press Enter to expand") ?? false
   );
 }
 
@@ -199,7 +207,9 @@ describe("grouped Timeline navigation", () => {
 
     // Enter on a collapsed group expands; it does not descend to detail.
     expect(navigate).toHaveBeenCalledTimes(navigatedBefore);
-    expect(document.querySelector("#timeline [role='group']")).not.toBeNull();
+    expect(
+      document.querySelector("#timeline [data-timeline-group-member]"),
+    ).not.toBeNull();
     expect(selectedTimelineEventId()).toBe("ev:b2");
     pressKey("j");
     expect(selectedTimelineEventId()).toBe("ev:c3");
@@ -235,14 +245,18 @@ describe("grouped Timeline navigation", () => {
 
     selectGroupByKeyboard();
     pressKey("ArrowRight");
-    expect(document.querySelector("#timeline [role='group']")).not.toBeNull();
+    expect(
+      document.querySelector("#timeline [data-timeline-group-member]"),
+    ).not.toBeNull();
     clickRow("ev:d4");
     expect(selectedTimelineEventId()).toBe("ev:d4");
 
     pressKey("ArrowLeft");
 
     expect(selectedTimelineEventId()).toBe("ev:b2");
-    expect(document.querySelector("#timeline [role='group']")).toBeNull();
+    expect(
+      document.querySelector("#timeline [data-timeline-group-member]"),
+    ).toBeNull();
     pressKey("j");
     expect(selectedTimelineEventId()).toBe("ev:e5");
   });
@@ -257,7 +271,9 @@ describe("grouped Timeline navigation", () => {
     pressKey("ArrowLeft");
 
     expect(selectedTimelineEventId()).toBe("ev:a1");
-    expect(document.querySelector("#timeline [role='group']")).toBeNull();
+    expect(
+      document.querySelector("#timeline [data-timeline-group-member]"),
+    ).toBeNull();
     expect(navigate).toHaveBeenCalledTimes(1);
   });
 
@@ -266,7 +282,9 @@ describe("grouped Timeline navigation", () => {
 
     expect(revealChangeInspectorTimelineEvent("ev:d4")).toBe(true);
 
-    expect(document.querySelector("#timeline [role='group']")).not.toBeNull();
+    expect(
+      document.querySelector("#timeline [data-timeline-group-member]"),
+    ).not.toBeNull();
     const revealed = document.querySelector<HTMLElement>(
       '#timeline [data-event-id="ev:d4"]',
     );
@@ -292,7 +310,7 @@ describe("grouped Timeline navigation", () => {
     );
     expect(selected?.getAttribute("aria-selected")).toBe("true");
     expect(list?.getAttribute("aria-activedescendant")).toBe(selected?.id);
-    expect(list?.querySelector("[role='group']")).not.toBeNull();
+    expect(list?.querySelector("[data-timeline-group-member]")).not.toBeNull();
   });
 
   it("refreshes the cursor sequence after a reveal expands a group", () => {
@@ -310,17 +328,71 @@ describe("grouped Timeline navigation", () => {
     expect(selectedTimelineEventId()).toBe("ev:c3");
   });
 
+  it("toggles a group with Space: open on the group row, closed from a member", () => {
+    const { controller, navigate } = install();
+    controller.sync(snapshot(), renderGroupedTimeline());
+
+    selectGroupByKeyboard();
+    const navigatedBefore = navigate.mock.calls.length;
+    pressKey(" ");
+
+    expect(
+      document.querySelector("#timeline [data-timeline-group-member]"),
+    ).not.toBeNull();
+    expect(selectedTimelineEventId()).toBe("ev:b2");
+    pressKey("j");
+    expect(selectedTimelineEventId()).toBe("ev:c3");
+
+    pressKey(" ");
+
+    expect(navigate).toHaveBeenCalledTimes(navigatedBefore);
+    expect(
+      document.querySelector("#timeline [data-timeline-group-member]"),
+    ).toBeNull();
+    expect(selectedTimelineEventId()).toBe("ev:b2");
+    expect(selectedRowCollapsed()).toBe(true);
+  });
+
+  it("walks the keyboard cursor in exactly DOM order, collapsed and expanded", () => {
+    const { controller } = install();
+    controller.sync(snapshot(), renderGroupedTimeline());
+    const domOrder = (): string[] =>
+      Array.from(
+        document.querySelectorAll<HTMLElement>("#timeline [data-event-id]"),
+      ).map((row) => row.dataset.eventId ?? "");
+    const walk = (): string[] => {
+      clickRow("ev:a1");
+      const seen = [selectedTimelineEventId() ?? ""];
+      for (let step = 1; step < domOrder().length; step += 1) {
+        pressKey("j");
+        seen.push(selectedTimelineEventId() ?? "");
+      }
+      return seen;
+    };
+
+    expect(walk()).toEqual(domOrder());
+    expect(domOrder()).toEqual(["ev:a1", "ev:b2", "ev:e5"]);
+
+    clickRow("ev:b2");
+    expect(walk()).toEqual(domOrder());
+    expect(domOrder()).toEqual(["ev:a1", "ev:b2", "ev:c3", "ev:d4", "ev:e5"]);
+  });
+
   it("resets expansion when the render key changes", () => {
     const { controller } = install();
     controller.sync(snapshot(), renderGroupedTimeline());
 
     selectGroupByKeyboard();
     pressKey("ArrowRight");
-    expect(document.querySelector("#timeline [role='group']")).not.toBeNull();
+    expect(
+      document.querySelector("#timeline [data-timeline-group-member]"),
+    ).not.toBeNull();
 
     controller.sync(snapshot(), renderGroupedTimeline("sha256:timeline-2"));
 
-    expect(document.querySelector("#timeline [role='group']")).toBeNull();
+    expect(
+      document.querySelector("#timeline [data-timeline-group-member]"),
+    ).toBeNull();
     expect(
       Array.from(
         document.querySelectorAll<HTMLElement>("#timeline [data-event-id]"),
@@ -347,9 +419,11 @@ describe("grouped Timeline navigation", () => {
     clickRow("ev:b2");
 
     expect(navigate).not.toHaveBeenCalled();
-    expect(document.querySelector("#timeline [role='group']")).not.toBeNull();
+    expect(
+      document.querySelector("#timeline [data-timeline-group-member]"),
+    ).not.toBeNull();
     expect(selectedTimelineEventId()).toBe("ev:b2");
-    expect(selectedRowLabel()).not.toContain("collapsed");
+    expect(selectedRowCollapsed()).toBe(false);
     pressKey("j");
     expect(selectedTimelineEventId()).toBe("ev:c3");
   });
@@ -376,8 +450,10 @@ describe("grouped Timeline navigation", () => {
 
     selectGroupByKeyboard();
 
-    expect(document.querySelector("#timeline [role='group']")).toBeNull();
-    expect(selectedRowLabel()).toContain("collapsed");
+    expect(
+      document.querySelector("#timeline [data-timeline-group-member]"),
+    ).toBeNull();
+    expect(selectedRowCollapsed()).toBe(true);
   });
 
   it("lands a deep link on the FIRST member as an event row, not the summary", () => {
@@ -393,10 +469,10 @@ describe("grouped Timeline navigation", () => {
     );
 
     const list = document.querySelector<HTMLOListElement>("#timeline");
-    expect(list?.querySelector("[role='group']")).not.toBeNull();
+    expect(list?.querySelector("[data-timeline-group-member]")).not.toBeNull();
     const selected = list?.querySelector<HTMLElement>('[aria-selected="true"]');
     expect(selected?.dataset.eventId).toBe("ev:b2");
-    expect(selected?.getAttribute("aria-label")).not.toContain("collapsed");
+    expect(selected?.hasAttribute("aria-expanded")).toBe(false);
     expect(selected?.getAttribute("aria-label")).toContain("ev:b2");
     expect(list?.getAttribute("aria-activedescendant")).toBe(selected?.id);
   });
@@ -411,7 +487,9 @@ describe("grouped Timeline navigation", () => {
       { navigate: vi.fn() },
       route,
     );
-    expect(document.querySelector("#timeline [role='group']")).toBeNull();
+    expect(
+      document.querySelector("#timeline [data-timeline-group-member]"),
+    ).toBeNull();
 
     renderChangeInspectorTimeline(
       master,
@@ -421,7 +499,9 @@ describe("grouped Timeline navigation", () => {
       "ev:b2",
     );
 
-    expect(document.querySelector("#timeline [role='group']")).not.toBeNull();
-    expect(selectedRowLabel()).not.toContain("collapsed");
+    expect(
+      document.querySelector("#timeline [data-timeline-group-member]"),
+    ).not.toBeNull();
+    expect(selectedRowCollapsed()).toBe(false);
   });
 });
