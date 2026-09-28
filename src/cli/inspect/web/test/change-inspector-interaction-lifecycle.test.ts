@@ -94,6 +94,7 @@ function timelineDocument(eventIds: string[]): EventHistoryDocument {
       changeIds: [],
       revisionRefs: [],
       unresolvedRevisionIds: [],
+      actorIds: [],
     },
     diagnostics: [],
     queryNotices: [],

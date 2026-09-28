@@ -154,6 +154,94 @@ fn sgr_fg_for_color(color: syntect::highlighting::Color) -> String {
     }
 }
 
+/// Nearest xterm-256 palette index for an RGB color: the closer (squared
+/// Euclidean distance) of the nearest 6x6x6 cube entry and the nearest
+/// grayscale-ramp entry. The same shape as bat's and delta's
+/// `ansi_colours::ansi256_from_rgb`, implemented here because that crate's
+/// LGPL-3.0-or-later license is outside the `cargo deny` allowlist.
+pub(super) fn ansi256_from_rgb(r: u8, g: u8, b: u8) -> u8 {
+    const CUBE: [u8; 6] = [0x00, 0x5f, 0x87, 0xaf, 0xd7, 0xff];
+    fn cube_index(v: u8) -> u8 {
+        match v {
+            0..48 => 0,
+            48..115 => 1,
+            _ => (v - 35) / 40,
+        }
+    }
+    fn dist(a: (u8, u8, u8), b: (u8, u8, u8)) -> u32 {
+        let d = |x: u8, y: u8| (i32::from(x) - i32::from(y)).unsigned_abs().pow(2);
+        d(a.0, b.0) + d(a.1, b.1) + d(a.2, b.2)
+    }
+    let (qr, qg, qb) = (cube_index(r), cube_index(g), cube_index(b));
+    let cube = (
+        CUBE[usize::from(qr)],
+        CUBE[usize::from(qg)],
+        CUBE[usize::from(qb)],
+    );
+    let cube_idx = 16 + 36 * qr + 6 * qg + qb;
+    // Grayscale ramp 232..=255 covers 8, 18, ..., 238.
+    let avg = ((u16::from(r) + u16::from(g) + u16::from(b)) / 3) as u8;
+    let gray_step = if avg > 238 {
+        23
+    } else {
+        avg.saturating_sub(3) / 10
+    };
+    let gray = 8 + 10 * gray_step;
+    if dist((gray, gray, gray), (r, g, b)) < dist(cube, (r, g, b)) {
+        232 + gray_step
+    } else {
+        cube_idx
+    }
+}
+
+/// Downsample one truecolor foreground SGR (`ESC[38;2;R;G;Bm`) to its
+/// 256-color form (`ESC[38;5;Nm`). Anything else — the `a==0` palette-index
+/// forms the `ansi`/`base16` themes produce, the `a==1` empty default — is
+/// already terminal-palette-relative and passes through unchanged.
+fn downsample_fg_sgr(sgr: Cow<'static, str>) -> Cow<'static, str> {
+    let rgb = sgr
+        .strip_prefix("\x1b[38;2;")
+        .and_then(|rest| rest.strip_suffix('m'))
+        .and_then(|rest| {
+            let mut parts = rest.split(';').map(str::parse::<u8>);
+            match (parts.next(), parts.next(), parts.next(), parts.next()) {
+                (Some(Ok(r)), Some(Ok(g)), Some(Ok(b)), None) => Some((r, g, b)),
+                _ => None,
+            }
+        });
+    match rgb {
+        Some((r, g, b)) => Cow::Owned(format!("\x1b[38;5;{}m", ansi256_from_rgb(r, g, b))),
+        None => sgr,
+    }
+}
+
+impl DiffPalette {
+    /// The 256-color lane's form of this palette: every truecolor foreground
+    /// downsampled through [`ansi256_from_rgb`] (as bat and delta do), and the
+    /// emphasis tints replaced by hand-picked `Fixed(n)` constants for `mode`
+    /// rather than downsampled (delta's `*_EMPH_COLOR_256`).
+    pub(super) fn into_ansi256(self, mode: DiffMode) -> DiffPalette {
+        let (emph_add_bg, emph_del_bg) = match mode {
+            DiffMode::Dark => ("\x1b[48;5;28m", "\x1b[48;5;124m"), // delta dark 28 / 124
+            DiffMode::Light => ("\x1b[48;5;157m", "\x1b[48;5;217m"), // delta light 157 / 217
+        };
+        DiffPalette {
+            keyword: downsample_fg_sgr(self.keyword),
+            string: downsample_fg_sgr(self.string),
+            comment: downsample_fg_sgr(self.comment),
+            number: downsample_fg_sgr(self.number),
+            r#type: downsample_fg_sgr(self.r#type),
+            function: downsample_fg_sgr(self.function),
+            constant: downsample_fg_sgr(self.constant),
+            operator: downsample_fg_sgr(self.operator),
+            punctuation: downsample_fg_sgr(self.punctuation),
+            variable: downsample_fg_sgr(self.variable),
+            emph_add_bg: Cow::Borrowed(emph_add_bg),
+            emph_del_bg: Cow::Borrowed(emph_del_bg),
+        }
+    }
+}
+
 impl DiffPalette {
     /// Derive a palette from an embedded theme: per-kind foreground from the
     /// theme's style for a representative scope; emph tints from `mode`
@@ -194,14 +282,14 @@ impl DiffPalette {
 
 /// Terminal gate: the terminal may be queried for its background only when
 /// ANSI color is actually being emitted, stdout is a real TTY (piped output
-/// must stay deterministic and non-interactive), and the truecolor lane is
-/// active (the named-16 lane has nothing to select). Deliberately stricter
+/// must stay deterministic and non-interactive), and a themed lane (truecolor
+/// or 256-color) is active (the named-16 lane has nothing to select). Deliberately stricter
 /// than bat, which queries even when `NO_COLOR` has turned colors off. The
 /// caller additionally requires the resolved preference to be `Auto` — an
 /// explicit mode or theme-name choice never queries, while an explicitly
 /// requested `auto` detects like the default (bat semantics).
-pub(super) fn detection_allowed(colored: bool, stdout_is_tty: bool, truecolor: bool) -> bool {
-    colored && stdout_is_tty && truecolor
+pub(super) fn detection_allowed(colored: bool, stdout_is_tty: bool, themed: bool) -> bool {
+    colored && stdout_is_tty && themed
 }
 
 /// Look up an embedded theme by its bat-compatible name, case-insensitively
@@ -258,6 +346,9 @@ pub(super) fn classify_theme_mode(theme: &syntect::highlighting::Theme) -> Optio
 #[derive(Debug)]
 pub(super) struct PaletteChoice {
     pub(super) palette: DiffPalette,
+    /// The mode whose emphasis pair the palette carries — the 256-color lane
+    /// picks its hand-picked tints by it.
+    pub(super) mode: DiffMode,
     pub(super) warning: Option<String>,
 }
 
@@ -284,8 +375,10 @@ pub(super) fn resolve_truecolor_palette(
     detect: impl FnOnce() -> Option<DiffMode>,
 ) -> Result<PaletteChoice, Box<dyn std::error::Error>> {
     fn auto_choice(detected: Option<DiffMode>) -> PaletteChoice {
+        let mode = detected.unwrap_or(DiffMode::Dark);
         PaletteChoice {
-            palette: DiffPalette::builtin_for(detected.unwrap_or(DiffMode::Dark)),
+            palette: DiffPalette::builtin_for(mode),
+            mode,
             warning: None,
         }
     }
@@ -293,6 +386,7 @@ pub(super) fn resolve_truecolor_palette(
         ThemePreference::Auto => Ok(auto_choice(detect())),
         ThemePreference::Mode(mode) => Ok(PaletteChoice {
             palette: DiffPalette::builtin_for(*mode),
+            mode: *mode,
             warning: None,
         }),
         ThemePreference::Named(name) => match theme_by_name(name) {
@@ -302,6 +396,7 @@ pub(super) fn resolve_truecolor_palette(
                 let mode = classify_theme_mode(&theme).unwrap_or(DiffMode::Dark);
                 Ok(PaletteChoice {
                     palette: DiffPalette::from_theme(&theme, mode),
+                    mode,
                     warning: None,
                 })
             }
@@ -639,6 +734,83 @@ mod tests {
         // The emph pair comes from the passed mode (delta's dark constants).
         assert_eq!(p.emph_add_bg, "\x1b[48;2;0;96;0m");
         assert_eq!(p.emph_del_bg, "\x1b[48;2;144;16;17m");
+    }
+
+    #[test]
+    fn ansi256_from_rgb_picks_the_nearest_cube_or_gray_entry() {
+        // Exact cube corners and interior entries.
+        assert_eq!(ansi256_from_rgb(0, 0, 0), 16);
+        assert_eq!(ansi256_from_rgb(255, 255, 255), 231);
+        assert_eq!(ansi256_from_rgb(255, 0, 0), 196);
+        assert_eq!(ansi256_from_rgb(0x5f, 0x87, 0xaf), 67);
+        // Mid gray lands on the grayscale ramp, not the coarser cube.
+        assert_eq!(ansi256_from_rgb(128, 128, 128), 244);
+        assert_eq!(ansi256_from_rgb(8, 8, 8), 232);
+        assert_eq!(ansi256_from_rgb(238, 238, 238), 255);
+        // Off-grid colors snap to their nearest cube entry.
+        assert_eq!(ansi256_from_rgb(179, 136, 255), 141); // builtin dark keyword
+        assert_eq!(ansi256_from_rgb(0, 96, 0), 22);
+    }
+
+    #[test]
+    fn ansi256_palette_downsamples_foregrounds_and_uses_fixed_emph_tints() {
+        let dark = DiffPalette::builtin_dark().into_ansi256(DiffMode::Dark);
+        assert_eq!(dark.sgr_for(TokenKind::Keyword), "\x1b[38;5;141m");
+        assert_eq!(dark.sgr_for(TokenKind::Plain), "");
+        // delta's hand-picked 256-color emph constants, not downsampled RGB.
+        assert_eq!(dark.emph_add_bg, "\x1b[48;5;28m");
+        assert_eq!(dark.emph_del_bg, "\x1b[48;5;124m");
+        let light = DiffPalette::builtin_light().into_ansi256(DiffMode::Light);
+        assert_eq!(light.emph_add_bg, "\x1b[48;5;157m");
+        assert_eq!(light.emph_del_bg, "\x1b[48;5;217m");
+        // Every colored foreground is a 256-color SGR; none stays truecolor.
+        for palette in [&dark, &light] {
+            for (kind, _) in REPRESENTATIVE_SCOPES {
+                assert!(palette.sgr_for(kind).starts_with("\x1b[38;5;"), "{kind:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn ansi256_downsampling_leaves_palette_index_sentinels_unchanged() {
+        // The a==0 / a==1 encodings are already terminal-palette-relative.
+        assert_eq!(downsample_fg_sgr(Cow::Borrowed("\x1b[35m")), "\x1b[35m");
+        assert_eq!(
+            downsample_fg_sgr(Cow::Borrowed("\x1b[38;5;42m")),
+            "\x1b[38;5;42m"
+        );
+        assert_eq!(downsample_fg_sgr(Cow::Borrowed("")), "");
+        assert_eq!(
+            downsample_fg_sgr(Cow::Borrowed("\x1b[38;2;255;0;0m")),
+            "\x1b[38;5;196m"
+        );
+        // The embedded `ansi` theme's foregrounds pass through byte-for-byte.
+        let ansi = theme_by_name("ansi").expect("embedded ansi theme");
+        let truecolor = DiffPalette::from_theme(&ansi, DiffMode::Dark);
+        let downsampled =
+            DiffPalette::from_theme(&ansi, DiffMode::Dark).into_ansi256(DiffMode::Dark);
+        for (kind, _) in REPRESENTATIVE_SCOPES {
+            assert_eq!(
+                truecolor.sgr_for(kind),
+                downsampled.sgr_for(kind),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolved_choice_reports_the_mode_its_emph_pair_follows() {
+        let sel = selection(ThemePreference::Auto, ThemeSource::Default);
+        let light = resolve_truecolor_palette(&sel, || Some(DiffMode::Light)).unwrap();
+        assert_eq!(light.mode, DiffMode::Light);
+        let fallback = resolve_truecolor_palette(&sel, || None).unwrap();
+        assert_eq!(fallback.mode, DiffMode::Dark);
+        let named = selection(
+            ThemePreference::Named("OneHalfLight".to_string()),
+            ThemeSource::Explicit,
+        );
+        let choice = resolve_truecolor_palette(&named, || panic!("must not detect")).unwrap();
+        assert_eq!(choice.mode, DiffMode::Light);
     }
 
     #[test]

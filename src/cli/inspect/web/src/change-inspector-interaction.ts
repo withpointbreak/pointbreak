@@ -1758,13 +1758,19 @@ export function installChangeInspectorInteraction(
         }
         return;
       }
-      // Collapsed same-type groups use the treeview idiom: Enter or ArrowRight
-      // opens the group under the cursor and keeps selection on its first
-      // member; ArrowLeft closes the group the cursor is inside and returns
-      // selection to the group row. Enter on a plain event row keeps its
-      // descend-to-detail meaning below.
+      // Collapsed same-type groups use the treeview idiom: Enter, Space, or
+      // ArrowRight opens the group under the cursor and keeps selection on its
+      // first member; ArrowLeft, or Space on a member, closes the group the
+      // cursor is inside and returns selection to the group row. Enter on a
+      // plain event row keeps its descend-to-detail meaning below.
+      const space =
+        event.key === " " &&
+        route.kind === "timeline" &&
+        isTimelineListTarget(event.target) &&
+        !isNativeActionControl(event.target);
       if (
         (event.key === "Enter" && !isNativeActionControl(event.target)) ||
+        space ||
         (event.key === "ArrowRight" && isTimelineListTarget(event.target))
       ) {
         const group = changeInspectorTimelineGroupAt(selectedTimelineEventId);
@@ -1778,7 +1784,10 @@ export function installChangeInspectorInteraction(
         }
         if (event.key === "ArrowRight") return;
       }
-      if (event.key === "ArrowLeft" && isTimelineListTarget(event.target)) {
+      if (
+        space ||
+        (event.key === "ArrowLeft" && isTimelineListTarget(event.target))
+      ) {
         const owner = changeInspectorTimelineGroupAt(selectedTimelineEventId, {
           includeExpanded: true,
         });

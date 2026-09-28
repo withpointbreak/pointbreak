@@ -1825,6 +1825,13 @@ fn change_aware_timeline_is_bounded_exact_and_stale_safe_without_widening_profil
             .unwrap()
             .starts_with("sha256:")
     );
+    // Actor completion is page-scoped: exactly the writers of the returned
+    // entries, never a store-wide enumeration.
+    assert_eq!(
+        first["completion"]["actorIds"],
+        serde_json::json!([first["entries"][0]["writer"]["actorId"]]),
+        "actor completion must name only this page's writers: {first}"
+    );
     let entry = &first["entries"][0];
     assert!(
         entry.get("payload").is_none(),

@@ -718,19 +718,26 @@ fn revision_list_filter_by_is_superseded() {
     let repo = modified_repo();
     let path = repo.path().to_str().unwrap();
     let first = parse_json(&pointbreak(["capture", "--repo", path]).stdout);
+    let first_id = first["revision"]["id"].as_str().unwrap().to_owned();
     let cursor = first["reviewCursor"]["token"].as_str().unwrap();
     // A successor must carry different content or it collapses to the same snapshot id.
     repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
-    pointbreak([
-        "capture",
-        "--repo",
-        path,
-        "--review-cursor",
-        cursor,
-        "--advance",
-        "replace",
-    ]);
+    let second = parse_json(
+        &pointbreak([
+            "capture",
+            "--repo",
+            path,
+            "--review-cursor",
+            cursor,
+            "--advance",
+            "replace",
+        ])
+        .stdout,
+    );
+    let second_id = second["revision"]["id"].as_str().unwrap().to_owned();
 
+    // Replacement lives only in the Change relation, and classification reads
+    // it: the replaced capture is superseded, its successor is not.
     let json = parse_json(
         &pointbreak([
             "revision",
@@ -748,11 +755,91 @@ fn revision_list_filter_by_is_superseded() {
         .iter()
         .map(|e| e["revisionId"].as_str().unwrap())
         .collect();
-    assert!(
-        ids.is_empty(),
-        "legacy proposal supersession must not infer Change-scoped replacement: {ids:?}"
+    assert_eq!(ids, [first_id.as_str()]);
+    assert_eq!(json["revisionCount"], 1);
+    assert_eq!(
+        unit_list_ids(&repo, &["--filter=-is:superseded"]),
+        [second_id]
     );
-    assert_eq!(json["revisionCount"], 0);
+}
+
+#[test]
+fn revision_list_filter_follows_the_per_store_rule_across_changes() {
+    // Change x: A replaced by B. Change y: C, then A joins as a second current
+    // member. A is still current in y, so it is not superseded; once y replaces
+    // it too, it is superseded in every Change that holds it. Two Changes that
+    // each replace A do not make anything contested.
+    let repo = modified_repo();
+    let path = repo.path().to_str().unwrap();
+    let a = parse_json(&pointbreak(["capture", "--repo", path]).stdout);
+    let a_id = a["revision"]["id"].as_str().unwrap().to_owned();
+    let a_hash = a["revision"]["objectArtifactContentHash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let a_cursor = a["reviewCursor"]["token"].as_str().unwrap().to_owned();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    let replaced = pointbreak([
+        "capture",
+        "--repo",
+        path,
+        "--review-cursor",
+        &a_cursor,
+        "--advance",
+        "replace",
+    ]);
+    assert!(replaced.status.success());
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 4 }\n");
+    let c = parse_json(&pointbreak(["capture", "--repo", path]).stdout);
+    let c_id = c["revision"]["id"].as_str().unwrap().to_owned();
+    let c_hash = c["revision"]["objectArtifactContentHash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let change_y = c["changeId"].as_str().unwrap().to_owned();
+    let joined = pointbreak([
+        "change",
+        "join",
+        &change_y,
+        &a_id,
+        "--repo",
+        path,
+        "--operation-id",
+        "change-operation:revision-list-shared-join",
+    ]);
+    assert!(
+        joined.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&joined.stderr)
+    );
+
+    assert!(
+        unit_list_ids(&repo, &["--filter", "is:superseded"]).is_empty(),
+        "still current in another Change"
+    );
+
+    let replaced_in_y = pointbreak([
+        "change",
+        "assert-relation",
+        &change_y,
+        &c_id,
+        &a_id,
+        "--successor-artifact-hash",
+        &c_hash,
+        "--predecessor-artifact-hash",
+        &a_hash,
+        "--repo",
+        path,
+        "--operation-id",
+        "change-operation:revision-list-shared-replace",
+    ]);
+    assert!(
+        replaced_in_y.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&replaced_in_y.stderr)
+    );
+    assert_eq!(unit_list_ids(&repo, &["--filter", "is:superseded"]), [a_id]);
+    assert!(unit_list_ids(&repo, &["--filter", "is:contested"]).is_empty());
 }
 
 #[test]

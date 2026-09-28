@@ -138,17 +138,27 @@ except Theme.
 | `status:` | `needs-decision`, `demand-gated`, `needs-triage` | Zero or more. `needs-decision`: an owner must choose among enumerated options before work starts. `demand-gated`: a named trigger has to fire first, and the issue says which. `needs-triage`: no maintainer has set planning labels yet. |
 | kinds | `research`, `tracking` | `research` issues deliver a recommendation or design, not code. `tracking` issues are umbrellas for sub-issues and carry no priority or effort of their own. |
 
-An issue with none of `status:needs-decision`, `status:demand-gated`, `research`, or `tracking` is
-ready to be picked up:
+An issue with none of `status:needs-triage`, `status:needs-decision`, `status:demand-gated`,
+`research`, or `tracking` is ready to be picked up:
 
 ```text
-is:open -label:status:needs-decision -label:status:demand-gated -label:research -label:tracking
+is:open -label:status:needs-triage -label:status:needs-decision -label:status:demand-gated -label:research -label:tracking
 ```
 
 Planning labels are set by maintainers with write access. Issue templates apply only `bug`,
-`enhancement`, or `status:needs-triage`, never a planning label. The workflow reverts a planning
-label set or removed by anyone else and comments once, and it keeps exactly one label per
-`priority:` and `effort:` namespace (the label added last wins).
+`enhancement`, or `status:needs-triage`, never a planning label.
+
+The project-sync workflow is a convenience mirror, not an enforcement point: the labels on the issue
+stay authoritative, and a missed or failed run leaves only the board stale until the next run. On a
+label event it re-reads the issue's current labels and label history first, so an event the label
+set has already moved past does nothing. It reverts a planning label set or removed by anyone
+without write access and comments once. When a `priority:` or `effort:` namespace gains a second
+label it keeps the one added last, for bot events too, and when a removal leaves a namespace empty
+it says so on the issue. Reconciliation never picks a winner: an issue with conflicting labels, or
+a work item without exactly one `priority:` and one `effort:` label, gets that board field cleared,
+drops out of Ready on the board, and is reported as a warning in the run. The decisions live in
+`scripts/project-sync-labels.sh`, with behavioral tests in `scripts/project-sync-labels-selftest.sh`
+(`just workflow-lint`).
 
 When a comment re-triages an issue, change the label in the same action. The board follows within
 a minute, or at the next daily reconcile.

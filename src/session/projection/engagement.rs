@@ -59,10 +59,21 @@ pub enum EngagementLifecycle {
 }
 
 impl EngagementGrouping {
+    /// Groups the store's captures into threads of the replacement graph thread
+    /// readers share ([`SupersessionView::replacement_from_events`]): once the
+    /// store holds any Change claim, a multi-round Change reads as one thread
+    /// rather than one thread per captured Revision.
     pub fn from_events(events: &[ShoreEvent]) -> Result<Self> {
+        let view = SupersessionView::replacement_from_events(events)?;
+        Self::from_view(events, &view)
+    }
+
+    /// Groups the captures in `events` over an already-derived replacement
+    /// `view` (a scoped reader derives it over its dependency closure with the
+    /// store-wide Change projection, then narrows it to the scope's threads).
+    pub(crate) fn from_view(events: &[ShoreEvent], view: &SupersessionView) -> Result<Self> {
         #[cfg(any(test, feature = "longitudinal-counting"))]
         crate::bench_support::longitudinal::record_projection_rebuild();
-        let view = SupersessionView::from_events(events)?;
         let captures = revision_captures(events)?;
 
         // Echo the supersession diagnostics (a dangling target / a cycle); they
@@ -417,6 +428,42 @@ mod tests {
         assert_eq!(
             grouping.engagements[0].lifecycle,
             EngagementLifecycle::InProgress
+        );
+    }
+
+    #[test]
+    fn a_multi_round_change_groups_into_one_engagement_across_hints() {
+        use crate::session::projection::test_support::ChangeStoreEvents;
+
+        let mut store = ChangeStoreEvents::default();
+        let a = store.revision("a", "one");
+        let b = store.revision("b", "two");
+        let lone = store.revision("lone", "three");
+        let change = store.change(&[&a, &b]);
+        store.replace(&change, &b, &a);
+        store.change(&[&lone]);
+
+        let grouping = EngagementGrouping::from_events(&store.events).unwrap();
+        assert_eq!(grouping.engagements.len(), 2, "{grouping:?}");
+        let round = grouping
+            .engagements
+            .iter()
+            .find(|view| view.revisions.contains(&a.revision_id))
+            .unwrap();
+        assert_eq!(
+            round.revisions,
+            [a.revision_id.clone(), b.revision_id.clone()]
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(round.heads, [b.revision_id.clone()].into_iter().collect());
+        // The two rounds carried different write-time hints; the replacement
+        // relation bridges them.
+        assert!(
+            grouping
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == ENGAGEMENTS_MERGED_CODE)
         );
     }
 }

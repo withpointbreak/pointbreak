@@ -2103,6 +2103,7 @@ fn query_global_projection(
             change_ids,
             revision_refs,
             unresolved_revision_ids,
+            actor_ids: Vec::new(),
         },
         diagnostics,
     })

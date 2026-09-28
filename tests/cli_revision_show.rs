@@ -1407,3 +1407,95 @@ fn ambiguous_current_revision_error_names_valid_recovery_forms() {
         "flag recovery named: {add_err}"
     );
 }
+
+fn has_change_redirect(document: &Value) -> bool {
+    document["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|diagnostic| diagnostic["code"] == "change_replacement_not_followed")
+}
+
+#[test]
+fn revision_show_redirects_supersession_to_the_change_surfaces() {
+    let repo = modified_repo();
+    let repo_arg = repo.path().to_str().unwrap();
+    let first = parse_json(&pointbreak(["capture", "--repo", repo_arg]).stdout);
+    let first_id = first["revision"]["id"].as_str().unwrap().to_owned();
+    let first_hash = first["revision"]["objectArtifactContentHash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let change_id = first["changeId"].as_str().unwrap().to_owned();
+    let cursor = first["reviewCursor"]["token"].as_str().unwrap().to_owned();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    let replaced = pointbreak([
+        "capture",
+        "--repo",
+        repo_arg,
+        "--review-cursor",
+        &cursor,
+        "--advance",
+        "replace",
+    ]);
+    assert!(
+        replaced.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&replaced.stderr)
+    );
+
+    // The head seed keeps legacy proposal-supersession selection: the replaced
+    // Revision resolves to itself, and both lanes say so and redirect to the
+    // Change surfaces instead of reading a second replacement model.
+    for env in [
+        [("POINTBREAK_DERIVED_ACCESS", "off")],
+        [("POINTBREAK_DERIVED_ACCESS", "sqlite-wal-bodyless-v1")],
+    ] {
+        let output = pointbreak_env(["revision", "show", "--repo", repo_arg, &first_id], &env);
+        assert!(
+            output.status.success(),
+            "stderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let document = parse_json(&output.stdout);
+        assert_eq!(document["revision"]["id"], first_id, "{env:?}");
+        let redirect = document["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|diagnostic| diagnostic["code"] == "change_replacement_not_followed")
+            .unwrap_or_else(|| panic!("{env:?}: {document:#}"));
+        let message = redirect["message"].as_str().unwrap();
+        assert!(message.contains("pointbreak change show"), "{message}");
+        assert!(message.contains("pointbreak change revision"), "{message}");
+    }
+
+    let text = pointbreak([
+        "revision", "show", "--repo", repo_arg, &first_id, "--format", "text",
+    ]);
+    assert!(text.status.success());
+    assert!(
+        String::from_utf8_lossy(&text.stdout)
+            .contains("for Change replacement read `pointbreak change show <change-id>`"),
+        "{}",
+        String::from_utf8_lossy(&text.stdout)
+    );
+
+    // The Change surface shares the projection but not the redirect.
+    let exact = pointbreak([
+        "change",
+        "revision",
+        &change_id,
+        &first_id,
+        "--artifact-hash",
+        &first_hash,
+        "--repo",
+        repo_arg,
+    ]);
+    assert!(
+        exact.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&exact.stderr)
+    );
+    assert!(!has_change_redirect(&parse_json(&exact.stdout)));
+}

@@ -133,7 +133,7 @@
       "path": "change-inspector-timeline-grouping.ts",
       "classification": "adapted",
       "activeImport": true,
-      "reason": "Owns the pure page-local Timeline grouping projection: adjacent same-type runs of one `/api/v2/history` document become visual rows, and the navigable id sequence is derived from those same rows. It holds no state, never spans a continuation boundary, and never merges, renames, or synthesizes events."
+      "reason": "Owns the pure page-local Timeline grouping projection: adjacent same-type runs of one `/api/v2/history` document become visual rows, and the navigable id sequence is derived from those same rows. It holds no state, never spans a continuation boundary, and never merges, renames, or synthesizes events. A group heading summary is composed only from its members' server-supplied fields."
     },
     {
       "path": "change-inspector-timeline-navigation.ts",

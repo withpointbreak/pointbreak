@@ -374,6 +374,17 @@ pub(crate) fn apply_resolved_signer<O: SignableOptions>(
     }
 }
 
+/// The one-line notice a capture prints when no `--summary` was supplied (#754).
+/// Capture still succeeds; the notice only names what readers will see instead.
+pub(crate) const MISSING_SUMMARY_NOTICE: &str = "notice: no --summary supplied; Inspector cards and receipts will show only the exact Revision id";
+
+/// Print [`MISSING_SUMMARY_NOTICE`] to `stderr` when a capture has no summary.
+pub(crate) fn surface_missing_summary(summary: Option<&str>, stderr: &mut dyn Write) {
+    if summary.is_none() {
+        let _ = writeln!(stderr, "{MISSING_SUMMARY_NOTICE}");
+    }
+}
+
 /// Surface a best-effort sign-time degrade after a write: if the skip sink recorded
 /// a reason, print `signing_agent_sign_failed: <reason>` advisorily (the write
 /// already succeeded, exit 0).
