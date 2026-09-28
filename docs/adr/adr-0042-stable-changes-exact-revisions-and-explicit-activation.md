@@ -243,3 +243,64 @@ defines and stops being current only when such a claim replaces it. Pointbreak a
 `published` state, no stored flag or pointer, and no publish, verdict, or acknowledge command; the removed
 publish/draft boundary stays removed. Revisit only if a workflow needs to distinguish a deliberately
 unfinished review from a current one in a way these facts cannot express.
+
+## Amendment: Caller-Bound Rewrite Base for Unchanged Scoped Deltas (2026-09-27)
+
+**Status: Accepted 2026-09-27 in [#747](https://github.com/withpointbreak/pointbreak/issues/747#issuecomment-5860668352). Not yet implemented.** Until the implementation lands and its
+admission, drift, compatibility, readback and failure tests pass, D3 and D4 above still describe the as-built
+system. Acceptance is not evidence of implementation. This amendment implements the owner decision recorded
+on #747 (2026-09-25) and does not reopen it.
+
+**D3, extended.** Two cases keep the same Revision: an unchanged state becoming a commit on its captured
+base A, and a delta with identical canonical raw entries replayed onto an explicitly bound descendant base
+B. In both cases the Revision gains a commit association only after D4's proof succeeds. A rebase whose
+net scoped B..C′ delta leaves every canonical entry unchanged does not advance the Revision; that equality
+does not show that the range has no reverted intermediate commits, or that A..B was reviewed. A rebase
+that changes any entry does advance it: a different blob, mode, path, status, content kind, rename pairing,
+capture mode or included scope. This covers conflict resolution and same-file upstream context changes.
+The author then captures a replacement Revision.
+
+**D4, rewrite route.** The caller selects the candidate base B and binds it into the commit-bound cursor
+(`CommitMatchV1.comparisonBase`). Pointbreak never infers it. The intended range is B..C′. Its commits
+must form a single-parent, first-parent-linear chain from B to the candidate C′, and a squash to one commit
+is admitted. A must be an ancestor of B, and B must be an ancestor of C′. The source must be a combined
+worktree or commit-range capture whose base is a Git commit. Selection, write-time revalidation and the
+landing proof all compare B..C′ with the frozen entries under the captured mode and path scope. Recording
+requires the expected proof hash from a read-only preview and recomputes the proof immediately before
+publication. Refusals fall into three classes:
+
+- **unsupported input**: the shape or ancestry is not admitted;
+- **indeterminate proof**: required Git objects are unavailable;
+- **refuted relation**: the inputs are admitted but the entries differ, and the refusal names the
+  differing entries.
+
+Extension and provenance-only options cannot be combined with a rewrite base. `--candidate-parent`
+remains a deprecated single-commit alias. Its base is the candidate's sole parent, which binds only
+through the required expected-proof hash, so it is not extended to ranges.
+
+**Evidence.** A verified equivalent rewrite qualifies one association. It is not validation or acceptance
+of the candidate. Fresh candidate validation is required before any claim that the candidate is ready,
+and until stored candidate validation exists it is retained as an external receipt. The receipt names:
+
+- the candidate commit, tree and bound base;
+- the Revision reference;
+- the association id and proof hash;
+- the environment and tool identities;
+- the commands, exit codes and result;
+- the attempt identity.
+
+Historical validation on the Revision is never presented as validation of the candidate. Storing
+candidate validation bound to an association would add an event kind. Current capable readers reject
+unknown event kinds, so that step needs a successor reader profile under D5 and its own amendment.
+
+**Presentation.** Readers keep four facts separate and never merge them into one headline:
+
+- the original assessment and validation, which describe the captured bytes on base A;
+- the verified relation, with its proof status, both bases and whether proof is available;
+- candidate validation, which is external until stored;
+- landing reachability, from association liveness.
+
+**Compatibility.** Nothing new is stored: no event kind, payload field, proof manifest schema, algorithm
+version, capability or reader profile. `comparisonBase` generalizes from "captured base" to "bound
+comparison base". A binary built before this change recomputes that axis from the captured base and
+refuses such a cursor rather than misreading it. Read documents grow only additive soft-shell fields.
