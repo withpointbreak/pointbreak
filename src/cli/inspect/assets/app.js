@@ -1286,7 +1286,7 @@
     const authorityCursor = decodeAuthorityCursorV2(document2.authorityCursor);
     if (document2.schema !== "pointbreak.inspect-event-history" || document2.version !== 1 || !nonEmptyString2(document2.sourceChangeProjectionStamp) || !nonEmptyString2(document2.timelineProjectionStamp) || document2.order !== "asc" && document2.order !== "desc" || !Number.isSafeInteger(document2.eventCount) || document2.eventCount < 0 || document2.eventCount !== authorityCursor.eventCount || !Number.isSafeInteger(document2.matchCount) || document2.matchCount < 0 || !Number.isSafeInteger(document2.offset) || document2.offset < 0 || document2.matchIndex !== void 0 && (!Number.isSafeInteger(document2.matchIndex) || document2.matchIndex < 0) || !isRecord(document2.facets) || !Object.entries(document2.facets).every(
       ([eventType, count]) => isEventHistoryEventType(eventType) && typeof count === "number" && Number.isSafeInteger(count) && count >= 0
-    ) || !isRecord(completion) || !isStringArray(completion.eventTypes) || !completion.eventTypes.every(isEventHistoryEventType) || new Set(completion.eventTypes).size !== completion.eventTypes.length || !isStringArray(completion.trackIds) || !isStringArray(completion.changeIds) || !Array.isArray(completion.revisionRefs) || !completion.revisionRefs.every(isEventHistoryRevisionRef) || !isStringArray(completion.unresolvedRevisionIds) || !isStringArray(document2.diagnostics) || !isStringArray(document2.queryNotices) || !Array.isArray(document2.entries) || document2.entries.length > 100 || !document2.entries.every(isEventHistoryEntry) || document2.matchCount > document2.eventCount || document2.offset > document2.matchCount || document2.offset + document2.entries.length > document2.matchCount || document2.previous !== void 0 && !nonEmptyString2(document2.previous) || document2.next !== void 0 && !nonEmptyString2(document2.next)) {
+    ) || !isRecord(completion) || !isStringArray(completion.eventTypes) || !completion.eventTypes.every(isEventHistoryEventType) || new Set(completion.eventTypes).size !== completion.eventTypes.length || !isStringArray(completion.trackIds) || !isStringArray(completion.changeIds) || !Array.isArray(completion.revisionRefs) || !completion.revisionRefs.every(isEventHistoryRevisionRef) || !isStringArray(completion.unresolvedRevisionIds) || !isStringArray(completion.actorIds) || new Set(completion.actorIds).size !== completion.actorIds.length || !isStringArray(document2.diagnostics) || !isStringArray(document2.queryNotices) || !Array.isArray(document2.entries) || document2.entries.length > 100 || !document2.entries.every(isEventHistoryEntry) || document2.matchCount > document2.eventCount || document2.offset > document2.matchCount || document2.offset + document2.entries.length > document2.matchCount || document2.previous !== void 0 && !nonEmptyString2(document2.previous) || document2.next !== void 0 && !nonEmptyString2(document2.next)) {
       throw new Error("invalid event history DTO");
     }
     if (document2.offset + document2.entries.length > document2.matchCount) {
@@ -10527,13 +10527,27 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           ) ?? [],
           ...completion?.unresolvedRevisionIds ?? []
         ]);
+      case "actor":
+        return (completion?.actorIds ?? []).filter(
+          (actorId) => !actorShortForm(actorId).includes('"')
+        );
       default:
         return [];
     }
   }
   __name(completionValues, "completionValues");
+  function actorShortForm(actorId) {
+    return actorId.replace(/^actor:/, "");
+  }
+  __name(actorShortForm, "actorShortForm");
   function suggestionForValue(typedField, canonicalField, value, negate) {
     const prefix = negate ? "-" : "";
+    if (canonicalField === "actor") {
+      const short = actorShortForm(value);
+      const clauseValue = /\s/.test(short) ? `"${short}"` : short;
+      const insertText2 = `${prefix}${typedField}:${clauseValue}`;
+      return { insertText: insertText2, label: insertText2, title: `${typedField}:${value}` };
+    }
     const insertText = `${prefix}${typedField}:${value}`;
     if (canonicalField !== "change" && canonicalField !== "revision") {
       return { insertText, label: insertText };

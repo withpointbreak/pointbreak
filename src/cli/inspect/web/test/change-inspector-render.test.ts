@@ -279,6 +279,7 @@ function eventHistory(): EventHistoryDocument {
       changeIds: ["change:sha256:one"],
       revisionRefs: [revision],
       unresolvedRevisionIds: [],
+      actorIds: [],
     },
     diagnostics: [],
     queryNotices: [],

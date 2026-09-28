@@ -39,6 +39,7 @@ function documentValue(): EventHistoryDocument {
         },
       ],
       unresolvedRevisionIds: ["rev:sha256:unresolved"],
+      actorIds: [],
     },
     diagnostics: ["one legacy event has no exact Revision artifact"],
     queryNotices: ["search was normalized to lowercase"],
