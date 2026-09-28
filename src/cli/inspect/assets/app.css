@@ -128,6 +128,21 @@ body {
   padding-top: 8px;
   border-top: 1px solid var(--border);
 }
+/* The server-supplied family-split advisory (issue #404): a warning mark on the
+   chip and the advisory's own text in the popover, both absent unless the
+   identity document carries `familyLinkAdvisory`. */
+.store-identity-advisory {
+  color: var(--warning);
+}
+.store-identity-advisory-note {
+  margin: 8px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  max-width: 260px;
+  color: var(--warning);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+}
 /* The trust-model footnote — replaces the persistent "read-only · advisory" badge. */
 .store-identity-note {
   margin: 8px 0 0;

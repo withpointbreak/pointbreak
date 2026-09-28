@@ -42,6 +42,23 @@ pub(super) struct ChangeArgs {
 }
 
 impl ChangeArgs {
+    /// The repository whose write store this invocation resolves, or `None` for
+    /// a read. Feeds the shared CLI write seam (`cli::write_store_repo`).
+    pub(super) fn write_store_repo(&self) -> Option<&std::path::Path> {
+        match &self.command {
+            ChangeCommand::Create(args) => Some(&args.repo),
+            ChangeCommand::Join(args) => Some(&args.repo),
+            ChangeCommand::WithdrawMembership(args) => Some(&args.repo),
+            ChangeCommand::AssertRelation(args) => Some(&args.repo),
+            ChangeCommand::WithdrawRelation(args) => Some(&args.repo),
+            ChangeCommand::Link(args) => Some(&args.repo),
+            ChangeCommand::Capture(args) => Some(&args.repo),
+            _ => None,
+        }
+    }
+}
+
+impl ChangeArgs {
     /// The counted-harness recognizer for exactly the eight approved
     /// change-read shapes (explicit JSON format). The two exact-read shapes
     /// also return their positional Revision selector and exclude body

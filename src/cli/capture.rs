@@ -97,6 +97,14 @@ pub(super) struct CaptureArgs {
     format_args: output::FormatArgs,
 }
 
+impl CaptureArgs {
+    /// The repository whose write store this invocation resolves (always: every
+    /// form writes). Feeds the shared CLI write seam (`cli::write_store_repo`).
+    pub(super) fn write_store_repo(&self) -> Option<&std::path::Path> {
+        Some(&self.repo)
+    }
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 #[value(rename_all = "kebab-case")]
 enum CaptureAdvanceArg {
@@ -158,11 +166,6 @@ pub(super) fn run(
     debug_assert_eq!(capture.schema, CHANGE_CAPTURE_RECEIPT_SCHEMA);
     crate::cli::common::surface_best_effort_skip(&skip, stderr);
     crate::cli::common::surface_missing_summary(capture.revision.summary.as_deref(), stderr);
-    // Best-effort: if this worktree is splitting off from a family store a sibling
-    // worktree is linked to, say so on stderr. Never fails the capture.
-    if let Ok(Some(advisory)) = pointbreak::session::family_link_advisory(&args.repo) {
-        let _ = writeln!(stderr, "{advisory}");
-    }
     let format = output::resolve_format(args.format_args.explicit(), output::OutputFormat::Json)?;
     let text = render_change_capture_text(&capture);
     output::write_document(stdout, format, &capture, || text)

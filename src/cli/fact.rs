@@ -16,6 +16,15 @@ pub(super) struct FactArgs {
     command: FactCommand,
 }
 
+impl FactArgs {
+    /// The repository whose write store this invocation resolves (always: every
+    /// form writes). Feeds the shared CLI write seam (`cli::write_store_repo`).
+    pub(super) fn write_store_repo(&self) -> Option<&std::path::Path> {
+        let FactCommand::Port(args) = &self.command;
+        Some(&args.repo)
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum FactCommand {
     /// Record explicit context continuity from one exact Revision to another.

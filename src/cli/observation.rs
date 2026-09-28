@@ -22,6 +22,17 @@ pub(super) struct ObservationArgs {
 }
 
 impl ObservationArgs {
+    /// The repository whose write store this invocation resolves, or `None` for
+    /// a read. Feeds the shared CLI write seam (`cli::write_store_repo`).
+    pub(super) fn write_store_repo(&self) -> Option<&std::path::Path> {
+        match &self.command {
+            ObservationCommand::Add(args) => Some(&args.repo),
+            _ => None,
+        }
+    }
+}
+
+impl ObservationArgs {
     pub(super) fn qualified_invocation_read_v1(
         &self,
     ) -> Option<super::QualifiedInvocationReadV1<'_>> {

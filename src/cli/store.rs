@@ -31,6 +31,18 @@ pub(super) struct StoreArgs {
 }
 
 impl StoreArgs {
+    /// The repository whose write store this invocation resolves, or `None` for
+    /// a read. Feeds the shared CLI write seam (`cli::write_store_repo`).
+    pub(super) fn write_store_repo(&self) -> Option<&std::path::Path> {
+        match &self.command {
+            StoreCommand::Remove(args) => Some(&args.repo),
+            StoreCommand::Gc(args) | StoreCommand::Compact(args) => Some(&args.repo),
+            _ => None,
+        }
+    }
+}
+
+impl StoreArgs {
     pub(super) fn is_capability_exempt(&self) -> bool {
         matches!(
             self.command,

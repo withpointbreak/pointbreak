@@ -2417,6 +2417,73 @@ describe("Change-first composition", () => {
     expect(requests.filter((path) => path === "/api/identity")).toHaveLength(1);
   });
 
+  it("paints the server-supplied family-split advisory near the store chip", async () => {
+    const advisory =
+      "a sibling worktree is linked to family store served-family; run pointbreak store link served-family";
+    const identity = {
+      schema: "pointbreak.inspect-identity",
+      storeIdentity: "store:sha256:served",
+      contextIdentity: "context:sha256:served",
+      repository: "served-pointbreak",
+      placement: { tier: "clone", label: "clone store" },
+      familyLinkAdvisory: advisory,
+    };
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/identity")
+        return new Response(JSON.stringify(identity));
+      if (path === "/api/v2/profile")
+        return new Response(JSON.stringify(profile));
+      if (path.startsWith("/api/v2/changes?"))
+        return new Response(JSON.stringify(page("changes")));
+      if (path.startsWith("/api/v2/attention?"))
+        return new Response(JSON.stringify(page("attention")));
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+
+    await bootstrapChangeInspector();
+
+    const mark = document.querySelector<HTMLElement>("#store-chip-advisory");
+    const note = document.querySelector<HTMLElement>(
+      "#store-identity-advisory",
+    );
+    expect(mark?.classList.contains("hidden")).toBe(false);
+    expect(mark?.title).toBe(advisory);
+    expect(note?.classList.contains("hidden")).toBe(false);
+    expect(note?.textContent).toBe(advisory);
+    expect(
+      document.querySelector("#store-chip")?.getAttribute("aria-label"),
+    ).toBe(
+      `repository served-pointbreak, store clone store, advisory ${advisory}`,
+    );
+  });
+
+  it("keeps the advisory hidden when the identity carries none", async () => {
+    const { renderChangeInspectorIdentity } = await import(
+      "../src/change-inspector-render"
+    );
+    renderChangeInspectorIdentity({
+      schema: "pointbreak.inspect-identity",
+      storeIdentity: "store:sha256:served",
+      contextIdentity: "context:sha256:served",
+      repository: "served-pointbreak",
+      placement: { tier: "clone", label: "clone store" },
+    });
+    expect(
+      document
+        .querySelector("#store-chip-advisory")
+        ?.classList.contains("hidden"),
+    ).toBe(true);
+    expect(
+      document
+        .querySelector("#store-identity-advisory")
+        ?.classList.contains("hidden"),
+    ).toBe(true);
+  });
+
   it("does not let a hung identity request gate semantic paint or poll installation", async () => {
     vi.useFakeTimers();
     let identityResolve!: (response: Response) => void;

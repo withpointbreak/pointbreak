@@ -11,6 +11,8 @@ export interface InspectorIdentity {
     label: "clone store" | "family store" | "ephemeral store";
   };
   family?: { id: string };
+  /** Server-supplied family-split advisory text (issue #404), shown verbatim. */
+  familyLinkAdvisory?: string;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -72,12 +74,15 @@ export function decodeInspectorIdentity(value: unknown): InspectorIdentity {
       "worktree",
       "placement",
       "family",
+      "familyLinkAdvisory",
     ]) ||
     document.schema !== "pointbreak.inspect-identity" ||
     !nonEmptyString(document.storeIdentity) ||
     !nonEmptyString(document.contextIdentity) ||
     !basename(document.repository) ||
     (document.worktree !== undefined && !basename(document.worktree)) ||
+    (document.familyLinkAdvisory !== undefined &&
+      !nonEmptyString(document.familyLinkAdvisory)) ||
     placement === null ||
     !hasOnlyKeys(placement, ["tier", "label"]) ||
     expectedLabel === null ||
@@ -101,5 +106,8 @@ export function decodeInspectorIdentity(value: unknown): InspectorIdentity {
       label: expectedLabel,
     },
     ...(family === undefined ? {} : { family: { id: family.id as string } }),
+    ...(document.familyLinkAdvisory === undefined
+      ? {}
+      : { familyLinkAdvisory: document.familyLinkAdvisory }),
   };
 }

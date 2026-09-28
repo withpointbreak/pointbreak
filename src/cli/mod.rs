@@ -1425,6 +1425,7 @@ fn run_cli(
     pointbreak::git::validate_backend_selector()?;
     crate::cli_tracing::init_tracing(&cli.tracing)?;
     let mut public_read_context = preflight_public_store_capability(&cli, raw_args)?;
+    let advisory_repo = write_store_repo(&cli.command).map(std::path::Path::to_path_buf);
 
     let result = match cli.command {
         Command::Assessment(args) => match public_read_context.take() {
@@ -1468,7 +1469,146 @@ fn run_cli(
     for diagnostic in pointbreak::session::take_derived_write_diagnostics() {
         let _ = writeln!(stderr, "advisory: {}", diagnostic.message);
     }
+    if result.is_ok() {
+        emit_family_link_advisory(
+            advisory_repo.as_deref(),
+            |repo| pointbreak::session::family_link_advisory(repo),
+            stderr,
+        );
+    }
     result
+}
+
+/// The shared CLI write seam: the repository whose write store this invocation
+/// resolves, or `None` for a read (or a store verb that works without one).
+/// Every verb that lands events through the resolved write store answers here,
+/// so write-path signals such as the family-split advisory cover them all
+/// without per-command wiring that could drift. Classification only — store
+/// resolution and writer targeting stay with each command's library call.
+fn write_store_repo(command: &Command) -> Option<&std::path::Path> {
+    match command {
+        Command::Assessment(args) => args.write_store_repo(),
+        Command::Association(args) => args.write_store_repo(),
+        Command::Capture(args) => args.write_store_repo(),
+        Command::Change(args) => args.write_store_repo(),
+        Command::Endorse(args) => args.write_store_repo(),
+        Command::Fact(args) => args.write_store_repo(),
+        Command::InputRequest(args) => args.write_store_repo(),
+        Command::Observation(args) => args.write_store_repo(),
+        Command::Store(args) => args.write_store_repo(),
+        Command::Validation(args) => args.write_store_repo(),
+        Command::Attention(_)
+        | Command::Diff(_)
+        | Command::History(_)
+        | Command::Identity(_)
+        | Command::Inspect(_)
+        | Command::Key(_)
+        | Command::Revision(_)
+        | Command::Summary(_)
+        | Command::Version(_) => None,
+    }
+}
+
+/// Best-effort family-split advisory after a successful write (ADR-0033): when
+/// the written worktree is splitting off from a family store a sibling worktree
+/// is linked to, say so as one stderr line. Never fails the command — a lookup
+/// error is swallowed, and a read (`repo == None`) never looks.
+fn emit_family_link_advisory(
+    repo: Option<&std::path::Path>,
+    advise: impl FnOnce(&std::path::Path) -> pointbreak::error::Result<Option<String>>,
+    stderr: &mut dyn Write,
+) {
+    let Some(repo) = repo else { return };
+    if let Ok(Some(advisory)) = advise(repo) {
+        let _ = writeln!(stderr, "{advisory}");
+    }
+}
+
+#[cfg(test)]
+mod write_seam_tests {
+    use std::path::Path;
+
+    use super::*;
+
+    fn seam_repo(argv: &[&str]) -> Option<std::path::PathBuf> {
+        let cli = Cli::try_parse_from(argv).unwrap_or_else(|err| panic!("{argv:?}: {err}"));
+        write_store_repo(&cli.command).map(Path::to_path_buf)
+    }
+
+    #[test]
+    fn write_verbs_answer_the_shared_seam_with_their_repo() {
+        for argv in [
+            vec!["pointbreak", "capture", "--repo", "/w"],
+            vec![
+                "pointbreak",
+                "store",
+                "remove",
+                "--repo",
+                "/w",
+                "--unreachable",
+            ],
+            vec!["pointbreak", "store", "gc", "--repo", "/w"],
+            vec!["pointbreak", "store", "compact", "--repo", "/w"],
+            vec!["pointbreak", "endorse", "evt:abc", "--repo", "/w"],
+        ] {
+            assert_eq!(
+                seam_repo(&argv).as_deref(),
+                Some(Path::new("/w")),
+                "{argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reads_and_repo_less_store_verbs_stay_off_the_seam() {
+        for argv in [
+            vec!["pointbreak", "store", "status", "--repo", "/w"],
+            vec!["pointbreak", "store", "list"],
+            vec!["pointbreak", "store", "forget", "fam"],
+            vec!["pointbreak", "observation", "list", "--repo", "/w"],
+            vec!["pointbreak", "validation", "list", "--repo", "/w"],
+            vec!["pointbreak", "association", "list", "--repo", "/w"],
+            vec!["pointbreak", "input-request", "list", "--repo", "/w"],
+            vec!["pointbreak", "change", "list", "--repo", "/w"],
+            vec!["pointbreak", "diff", "--repo", "/w"],
+            vec!["pointbreak", "history", "--repo", "/w"],
+            vec!["pointbreak", "version"],
+        ] {
+            assert_eq!(seam_repo(&argv), None, "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn advisory_is_one_stderr_line_and_never_fails_the_command() {
+        let mut stderr = Vec::new();
+        emit_family_link_advisory(
+            Some(Path::new("/w")),
+            |repo| {
+                assert_eq!(repo, Path::new("/w"));
+                Ok(Some("family store \"fam\" is linked elsewhere".to_owned()))
+            },
+            &mut stderr,
+        );
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "family store \"fam\" is linked elsewhere\n"
+        );
+
+        // No advisory, a lookup error, or a read: nothing on stderr.
+        let mut stderr = Vec::new();
+        emit_family_link_advisory(Some(Path::new("/w")), |_| Ok(None), &mut stderr);
+        emit_family_link_advisory(
+            Some(Path::new("/w")),
+            |_| {
+                Err(pointbreak::error::ShoreError::Message(
+                    "unresolvable".to_owned(),
+                ))
+            },
+            &mut stderr,
+        );
+        emit_family_link_advisory(None, |_| panic!("a read never looks"), &mut stderr);
+        assert!(stderr.is_empty());
+    }
 }
 
 #[cfg(test)]
