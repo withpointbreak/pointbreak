@@ -169,4 +169,3 @@ the captured base A. The manifest, the canonical inputs and `canonical-equivalen
 unchanged. B and C′ are immutable commit identities, so together they determine the range, and the proof
 needs no range field. The rewrite route admits no extension. Stable patch ID, ancestry and clean rebase
 status remain candidate signals only.
-

@@ -559,4 +559,3 @@ claims, the headline is `merged` if any claim is merged and otherwise `live`. An
 proof keeps the existing rule, and so does an extension, a provenance-only claim or a conflicting
 attestation. Nothing is stored or withdrawn. The per-commit matrix still lists every claim, and withdrawing a
 stale claim stays optional. Topology and proof decide the outcome; timestamps never do.
-
