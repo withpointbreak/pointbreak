@@ -2666,10 +2666,37 @@ mod tests {
             }
         }
 
+        /// Wait until the runtime's background worker is idle. A derived read
+        /// (`runtime.current()`, a Timeline page) can request that worker, and
+        /// its maintenance holds the store writer lock; an append that races it
+        /// gets `derived-access writer is busy` and leaves the derived writer
+        /// degraded. Only this test thread requests work, so once the worker is
+        /// idle the next append takes the lock uncontended. Call it (through
+        /// `record` or an `append_*` helper) before every fixture append that
+        /// follows a derived read.
+        fn settle_background_worker(&self) {
+            let started = std::time::Instant::now();
+            let deadline = started + crate::test_timing::HANG_GUARD;
+            while self.runtime.maintenance_in_flight() {
+                self.runtime.assert_background_worker_before_deadline_with(
+                    "fixture append settle",
+                    started,
+                    deadline,
+                    String::new,
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+
+        /// Record one fixture event after the background worker settles.
+        fn record(&self, event: ShoreEvent) {
+            self.settle_background_worker();
+            record_fixture_event(&self.store, event);
+        }
+
         fn append_unrelated(&self, suffix: &str) {
             let journal_id = JournalId::new(format!("journal:change-endpoint:{suffix}"));
-            record_fixture_event(
-                &self.store,
+            self.record(
                 ShoreEvent::new(
                     EventType::ReviewInitialized,
                     ReviewInitializedPayload::idempotency_key(&journal_id),
@@ -2694,7 +2721,7 @@ mod tests {
                 "2026-08-10T02:01:00Z",
             )
             .expect("build removal support");
-            record_fixture_event(&self.store, removal.clone());
+            self.record(removal.clone());
 
             let signer = TestEd25519Signer::from_seed([91; 32]);
             let to_be_signed = EventToBeSigned::from_event(&removal, signer.signer_id())
@@ -2727,7 +2754,7 @@ mod tests {
                 "2026-08-10T02:01:01Z",
             )
             .expect("build detached removal signature");
-            record_fixture_event(&self.store, carrier.clone());
+            self.record(carrier.clone());
             (removal, carrier)
         }
 
@@ -2747,7 +2774,7 @@ mod tests {
                 "2026-08-10T02:02:00Z",
             )
             .expect("build historical membership event");
-            record_fixture_event(&self.store, membership_event.clone());
+            self.record(membership_event.clone());
 
             let withdrawal = build_membership_withdrawn(&membership.membership_claim_id, [122; 32])
                 .expect("build historical membership withdrawal");
@@ -2760,7 +2787,7 @@ mod tests {
                 "2026-08-10T02:02:01Z",
             )
             .expect("build historical membership withdrawal event");
-            record_fixture_event(&self.store, withdrawal_event.clone());
+            self.record(withdrawal_event.clone());
             (membership_event, withdrawal_event)
         }
 
@@ -2795,7 +2822,7 @@ mod tests {
                 "2026-08-10T02:03:00Z",
             )
             .expect("build conflicting proposal event");
-            record_fixture_event(&self.store, event.clone());
+            self.record(event.clone());
             event
         }
 
@@ -2831,7 +2858,7 @@ mod tests {
                 "2026-08-10T02:03:01Z",
             )
             .expect("build duplicate proposal event");
-            record_fixture_event(&self.store, event.clone());
+            self.record(event.clone());
             event
         }
 
@@ -2871,7 +2898,7 @@ mod tests {
                 event.signature.as_mut().expect("attached signature").alg = "invalid".to_owned();
             }
             let signer_id = signer.signer_id().as_str().to_owned();
-            record_fixture_event(&self.store, event.clone());
+            self.record(event.clone());
             (event, signer_id)
         }
 
@@ -2893,7 +2920,7 @@ mod tests {
                 "2026-08-10T02:05:00Z",
             )
             .expect("build historical Revision relation event");
-            record_fixture_event(&self.store, relation_event.clone());
+            self.record(relation_event.clone());
             let withdrawal =
                 build_revision_relation_withdrawn(&relation.relation_claim_id, [124; 32])
                     .expect("build historical Revision relation withdrawal");
@@ -2906,7 +2933,7 @@ mod tests {
                 "2026-08-10T02:05:01Z",
             )
             .expect("build historical Revision relation withdrawal event");
-            record_fixture_event(&self.store, withdrawal_event.clone());
+            self.record(withdrawal_event.clone());
             (relation_event, withdrawal_event)
         }
 
@@ -7593,14 +7620,14 @@ mod tests {
         let root = relation_fixture_observation(&revision_id, "root", &[], "2026-08-11T00:00:00Z");
         let root_id: crate::model::ObservationId =
             serde_json::from_value(root.payload["observationId"].clone()).unwrap();
-        record_fixture_event(&fixture.store, root.clone());
+        fixture.record(root.clone());
         let reply = relation_fixture_observation(
             &revision_id,
             "reply",
             &[&root_id],
             "2026-08-12T00:00:00Z",
         );
-        record_fixture_event(&fixture.store, reply.clone());
+        fixture.record(reply.clone());
         let request = crate::session::DerivedTimelinePageRequestV1::new(
             1,
             crate::session::DerivedTimelineOrderV1::Desc,
@@ -7643,15 +7670,12 @@ mod tests {
         // Unrelated facts accumulate on the same referenced Revision, all
         // earlier than the reply so the one-entry page is unchanged.
         for index in 0..24 {
-            record_fixture_event(
-                &fixture.store,
-                relation_fixture_observation(
-                    &revision_id,
-                    &format!("unrelated{index}"),
-                    &[],
-                    &format!("2026-08-11T01:{index:02}:00Z"),
-                ),
-            );
+            fixture.record(relation_fixture_observation(
+                &revision_id,
+                &format!("unrelated{index}"),
+                &[],
+                &format!("2026-08-11T01:{index:02}:00Z"),
+            ));
         }
         let (after, after_counters) = counted_read('c');
         assert_eq!(after[0].event_id, reply.event_id);
@@ -7677,7 +7701,7 @@ mod tests {
         )
         .expect("build duplicate root carrier");
         assert_ne!(duplicate.event_id, root.event_id);
-        record_fixture_event(&fixture.store, duplicate.clone());
+        fixture.record(duplicate.clone());
         let representative = root.event_id.clone().min(duplicate.event_id.clone());
         let (after, _) = counted_read('d');
         assert_eq!(
