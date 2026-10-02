@@ -363,6 +363,12 @@ pub struct ChangeDetailV1 {
     pub operative_obligations: Vec<InputRequestId>,
     pub diagnostics: Vec<String>,
     pub projection_stamp: String,
+    /// Presentation entries for `current_revision_refs`, in the same order and
+    /// built by the same server fold as the Change list route's
+    /// `presentations[].currentRevisions[]` (#755). Additive and optional, so
+    /// the document stays version 1 and an older server's detail still parses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_revision_presentations: Option<Vec<CurrentRevisionPresentationV1>>,
 }
 
 /// Inspector-only explanation for why one non-accepted Change appears in the
@@ -1462,12 +1468,41 @@ impl ChangeDocumentFacadeV1 {
             operative_obligations: view.operative_obligations.iter().cloned().collect(),
             diagnostics: view.diagnostics.clone(),
             projection_stamp: self.projection_stamp.clone(),
+            current_revision_presentations: self
+                .presentations
+                .as_ref()
+                .and_then(|presentations| presentations.get(change_id))
+                .map(|presentation| presentation.current_revisions.clone()),
         };
         Ok(ChangeDetailDocumentV1 {
             schema: REVIEW_CHANGE_SCHEMA.to_owned(),
             version: 1,
             detail,
         })
+    }
+
+    /// Compose one Change detail whose current-Revision presentation entries
+    /// come from authoritatively hydrated proposal carriers, through the same
+    /// fold as a selected Change list page. The derived composition uses this
+    /// because its facade carries no complete presentation projection.
+    pub(crate) fn detail_document_with_hydrated_proposals(
+        &self,
+        change_id: &ChangeId,
+        hydrated_proposal_events: &[ShoreEvent],
+    ) -> Result<ChangeDetailDocumentV1> {
+        let mut document = self.detail_document(change_id)?;
+        let mut presentations = self.proposal_presentations_for_change_ids(
+            std::slice::from_ref(change_id),
+            hydrated_proposal_events,
+        )?;
+        let current_revisions = presentations.remove(change_id).ok_or_else(|| {
+            ShoreError::Message(format!(
+                "selected Change {} has no hydrated proposal presentation",
+                change_id.as_str()
+            ))
+        })?;
+        document.detail.current_revision_presentations = Some(current_revisions);
+        Ok(document)
     }
 
     pub fn contextual_revision_document(

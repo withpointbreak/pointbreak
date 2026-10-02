@@ -1,6 +1,9 @@
 /** DOM projection for the Change-first shell. It fetches nothing and owns no history. */
 
-import { changeCardPresentation } from "./change-inspector-cards";
+import {
+  changeCardPresentation,
+  currentRevisionPeer,
+} from "./change-inspector-cards";
 import {
   hideChangeInspectorDiffPage,
   renderChangeInspectorDiffPage,
@@ -1852,9 +1855,16 @@ function renderCapturedResource(
   return nodes;
 }
 
+/**
+ * The Change detail's exact current-Revision chooser. `presentations` is only
+ * ever the detail document's own `currentRevisionPresentations` member (#755);
+ * without it each choice shows its exact id alone and nothing is reconstructed
+ * from a list page.
+ */
 function renderCurrentRevisionChoices(
   changeId: string,
   revisions: RevisionRef[],
+  presentations: ChangeDetail["currentRevisionPresentations"],
   query: ChangePageQuery,
   actions: ChangeInspectorRenderActions,
 ): HTMLElement {
@@ -1865,15 +1875,38 @@ function renderCurrentRevisionChoices(
     choices.append(message("No current Revision is available."));
     return choices;
   }
-  for (const revision of revisions) {
+  for (const [index, revision] of revisions.entries()) {
+    // The decoder pins the member to `currentRevisionRefs` order.
+    const peer = currentRevisionPeer(revision, presentations?.[index]);
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "ghost mono";
-    button.textContent = shortExact(revision);
+    button.className = "ghost detail-current-revision";
+    const identity = document.createElement("code");
+    identity.className = "mono";
+    identity.textContent = shortExact(revision);
+    if (peer.label !== undefined) {
+      // Summary first, then the short exact id in monospace.
+      const label = document.createElement("span");
+      label.className = "detail-current-revision-summary";
+      label.textContent = peer.label;
+      button.append(label, " ", identity);
+    } else {
+      button.append(identity);
+      if (peer.absentSummaryCue !== undefined) {
+        const cue = document.createElement("span");
+        cue.className = "change-card-summary-absent";
+        cue.textContent = ` · ${peer.absentSummaryCue}`;
+        button.append(cue);
+      }
+    }
     button.title = exactRevisionAccessibleIdentity(revision);
     button.setAttribute(
       "aria-label",
-      `Current Revision: open ${exactRevisionAccessibleIdentity(revision)}; for Change ${changeId}`,
+      peer.label !== undefined
+        ? `Current Revision: ${peer.label}; open ${exactRevisionAccessibleIdentity(revision)}; for Change ${changeId}`
+        : peer.absentSummaryCue !== undefined
+          ? `Current Revision: open ${exactRevisionAccessibleIdentity(revision)}; ${peer.absentSummaryCue}; for Change ${changeId}`
+          : `Current Revision: open ${exactRevisionAccessibleIdentity(revision)}; for Change ${changeId}`,
     );
     button.dataset.changeId = changeId;
     button.dataset.revisionId = revision.revisionId;
@@ -1980,6 +2013,7 @@ function renderChangeDetail(
     renderCurrentRevisionChoices(
       route.changeId,
       detail.currentRevisionRefs,
+      detail.currentRevisionPresentations,
       route.query,
       actions,
     ),
@@ -2388,6 +2422,8 @@ function renderDetail(
       renderCurrentRevisionChoices(
         changeRoute.changeId,
         snapshot.selected.currentRevisionRefs,
+        // A loading placeholder has no detail document, so no presentation.
+        undefined,
         changeRoute.query,
         actions,
       ),
