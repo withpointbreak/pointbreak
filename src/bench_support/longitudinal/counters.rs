@@ -1570,6 +1570,7 @@ fn counter_delta(
         change_projection_constructions: delta!(change_projection_constructions),
         change_candidates: delta!(change_candidates),
         change_candidate_current_revisions: delta!(change_candidate_current_revisions),
+        rejected_carrier_opens: delta!(rejected_carrier_opens),
         change_capability_carriers_opened: delta!(change_capability_carriers_opened),
         change_proposal_carriers_opened: delta!(change_proposal_carriers_opened),
         change_proposal_carriers_validated: delta!(change_proposal_carriers_validated),
@@ -1693,6 +1694,7 @@ change_counter!(
     record_change_capability_carriers_opened,
     change_capability_carriers_opened
 );
+change_counter!(record_rejected_carrier_opens, rejected_carrier_opens);
 change_counter!(
     record_change_proposal_carriers_opened,
     change_proposal_carriers_opened
@@ -2864,6 +2866,7 @@ mod tests {
                 change_projection_constructions: 1,
                 change_candidates: 71,
                 change_candidate_current_revisions: 73,
+                rejected_carrier_opens: 0,
                 change_capability_carriers_opened: 79,
                 change_proposal_carriers_opened: 83,
                 change_proposal_carriers_validated: 89,

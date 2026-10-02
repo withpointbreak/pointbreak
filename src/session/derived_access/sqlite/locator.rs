@@ -12,7 +12,7 @@ use super::{immutable_read_only_open_is_safe, sqlite_immutable_read_only_uri};
 #[cfg(any(test, feature = "longitudinal-counting"))]
 use crate::bench_support::longitudinal::{
     LongitudinalTimelineCarrierMismatchKindV1, record_chronological_sort_items,
-    record_timeline_carrier_mismatch_v1,
+    record_rejected_carrier_opens, record_timeline_carrier_mismatch_v1,
 };
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::session::EventStore;
@@ -997,6 +997,8 @@ fn hydrate_locator_row(
         })?;
     if sha256_bytes_hex(&bytes) != stored.validation_witness {
         #[cfg(any(test, feature = "longitudinal-counting"))]
+        record_rejected_carrier_opens(1);
+        #[cfg(any(test, feature = "longitudinal-counting"))]
         record_timeline_carrier_mismatch_v1(
             &stored.logical_reread_key,
             LongitudinalTimelineCarrierMismatchKindV1::ValidationWitness,
@@ -1008,13 +1010,20 @@ fn hydrate_locator_row(
         })?;
         return Err(SqliteLocatorError::CarrierMismatch(stored.cursor));
     }
+    // The carrier was opened and read; any failure from here on rejects it
+    // before classification.
+    let rejected = |error: SqliteLocatorError| {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        record_rejected_carrier_opens(1);
+        error
+    };
     let event = EventStore::decode_qualification_entry(stored.logical_reread_key.clone(), bytes)
-        .map_err(|error| SqliteLocatorError::Metadata(error.to_string()))?;
+        .map_err(|error| rejected(SqliteLocatorError::Metadata(error.to_string())))?;
     stored.logical_reread_key = event.idempotency_key.clone();
-    let observed =
-        LocatorRow::from_event(stored.cursor, &event, stored.validation_witness.clone())?;
+    let observed = LocatorRow::from_event(stored.cursor, &event, stored.validation_witness.clone())
+        .map_err(|error| rejected(error.into()))?;
     if observed != stored {
-        return Err(SqliteLocatorError::CarrierMismatch(stored.cursor));
+        return Err(rejected(SqliteLocatorError::CarrierMismatch(stored.cursor)));
     }
     Ok(HydratedLocatorRow { row: stored, event })
 }
