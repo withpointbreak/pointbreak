@@ -62,6 +62,7 @@ pub fn stage_enrollment(
     actor: &ActorId,
     signer_id: &SignerId,
 ) -> Result<EnrollmentDiff> {
+    crate::paths::require_plain_repository_control_write(path)?;
     let existing = if path.exists() {
         Some(TrustSet::from_allowed_signers_file(path)?)
     } else {

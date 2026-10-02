@@ -252,6 +252,7 @@ pub fn stage_actor_attributes(
     actor: &ActorId,
     attrs: &ActorAttributesWriteRecord,
 ) -> Result<ActorAttributesStageOutcome> {
+    crate::paths::require_plain_repository_control_write(path)?;
     if !is_valid_principal_actor_id(actor.as_str()) {
         return Err(invalid(format!(
             "actor key {} is not a valid actor id",

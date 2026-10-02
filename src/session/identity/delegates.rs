@@ -266,6 +266,7 @@ pub fn stage_delegation(
     agent: &ActorId,
     record: &DelegationWriteRecord,
 ) -> Result<DelegationStageOutcome> {
+    crate::paths::require_plain_repository_control_write(path)?;
     // Validate exactly as parse_record does at load. The targeted checks here give
     // precise errors on the NEW input; the whole-document re-validation below is the
     // round-trip guarantee.

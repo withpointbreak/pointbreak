@@ -199,6 +199,7 @@ pub(crate) fn pointbreak_generated_excluded_paths(worktree_root: &Path) -> Resul
 /// newline on existing content. Callers pass only not-yet-ignored lines.
 fn append_pointbreak_gitignore_lines(worktree_root: &Path, lines: &[&str]) -> Result<()> {
     let path = RepositoryPaths::from_worktree_root(worktree_root).gitignore();
+    crate::paths::require_plain_repository_control_write(&path)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| io_error("create .pointbreak directory", parent, error))?;

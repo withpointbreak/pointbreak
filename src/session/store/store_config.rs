@@ -385,6 +385,13 @@ pub(crate) fn set_family_binding_for_repo(repo: &Path, slug: &str, clone_ref: &s
     write_common_dir_binding(common.common_dir(), slug, clone_ref)?;
 
     let paths = RepositoryPaths::resolve(repo)?;
+    crate::paths::require_plain_repository_control_write(&paths.store_config_local()).map_err(
+        |error| {
+            ShoreError::Message(format!(
+                "common-dir binding was already written; local store config refused: {error}"
+            ))
+        },
+    )?;
     if resolve_store_mode(paths.worktree_root())? == StoreMode::Ephemeral {
         // The local file (covered by the `*.local.json` gitignore spec) needs the
         // committed `.pointbreak/.gitignore` before its first write — mirroring
@@ -409,6 +416,11 @@ pub(crate) fn clear_family_binding_for_repo(repo: &Path) -> Result<()> {
 
     let paths = RepositoryPaths::resolve(repo)?;
     let local_path = paths.store_config_local();
+    crate::paths::require_plain_repository_control_write(&local_path).map_err(|error| {
+        ShoreError::Message(format!(
+            "common-dir binding removal completed; local store config refused: {error}"
+        ))
+    })?;
     let Some(existing) = load_store_config(&local_path)? else {
         return Ok(());
     };
