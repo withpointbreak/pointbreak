@@ -116,6 +116,12 @@ pub(crate) fn require_plain_repository_control_write(path: &Path) -> Result<()> 
     require_plain_entry(path, false)
 }
 
+/// Check only the two canonical worktree-store directory entries before setup.
+pub(crate) fn require_plain_worktree_store_write_root(paths: &RepositoryPaths) -> Result<()> {
+    require_plain_entry(paths.config_dir(), true)?;
+    require_plain_entry(paths.worktree_store(), true)
+}
+
 fn require_plain_entry(path: &Path, directory: bool) -> Result<()> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,

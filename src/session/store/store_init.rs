@@ -61,9 +61,13 @@ pub(crate) fn prepare_store_writer_at(
     store_dir: &Path,
     worktree_root: &Path,
 ) -> Result<()> {
+    let paths = RepositoryPaths::from_worktree_root(worktree_root);
+    if store_dir == paths.worktree_store() {
+        crate::paths::require_plain_worktree_store_write_root(&paths)?;
+    }
     sweep_stale_temp_files(storage, store_dir)?;
     ensure_store_dirs(store_dir)?;
-    if store_dir.starts_with(RepositoryPaths::from_worktree_root(worktree_root).config_dir()) {
+    if store_dir.starts_with(paths.config_dir()) {
         ensure_pointbreak_gitignore(worktree_root)?;
     }
     Ok(())
