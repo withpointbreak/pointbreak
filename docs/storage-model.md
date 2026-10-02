@@ -118,6 +118,33 @@ already ignored by any standard source, so user-managed ignore files are respect
 write generates nothing and never touches the working tree (the shared store lives inside `.git/`,
 which git already ignores).
 
+### Repository control write paths
+
+Pointbreak checks pre-existing entries before writing the conventional `.pointbreak` controls:
+`store.json`, `store.local.json`, `.gitignore`, `delegates.json`, `delegates.local.json`,
+`actor-attributes.json`, `actor-attributes.local.json`, and `allowed-signers.json`. The `.pointbreak`
+entry must be an ordinary directory and an existing control leaf must be a regular file. Missing
+entries are allowed for normal creation. Symlinks, including dangling links, are refused with an
+error naming the guarded path; the link is retained for the operator to inspect. Aliases at or above
+the repository root remain supported. Low-level staging paths outside this directory/filename set
+remain under the caller's control, including custom filenames inside `.pointbreak`.
+
+Ordinary writer preparation also checks the `.pointbreak` and `data` directory entries before
+sweeping or creating the exact canonical worktree-local `.pointbreak/data` layout. Explicitly
+selected other store roots retain their existing behavior. On Windows, every reparse-tagged guarded
+directory or control leaf is refused, including junctions and non-link tags such as cloud-sync
+placeholders and deduplication entries. This conservative Windows policy has no runtime
+qualification from the Unix link fixtures; Windows compilation and existing-suite compatibility
+checks are separate evidence.
+
+These checks cover static entries prepared before invocation. Concurrent pathname replacement,
+nested store entries such as `events` and `artifacts`, derived/SQLite/authority writes, and direct
+store administration remain outside this protection. Reader resolution retains its existing
+behavior. A refused local family-config update can follow a completed common-directory binding
+write or removal; its error reports that completed action. Other workflows can already have
+maintained a safe `.gitignore` before a later control refusal, so an error does not imply rollback
+of the whole operation.
+
 Clones that predate the committed `.pointbreak/.gitignore` may still carry the retired mechanism's
 narrow entries (`.pointbreak/data/`, `.pointbreak/*.local.json`-style lines) in `.git/info/exclude`; those
 are harmless — redundant with the committed file — and can be removed by hand. A legacy
