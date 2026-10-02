@@ -158,3 +158,84 @@ fn text_store_mode_digest_reports_mode_and_source() {
     assert!(stdout.contains("shared"), "resolved mode: {stdout}");
     assert!(stdout.contains("default"), "mode source: {stdout}");
 }
+
+#[cfg(unix)]
+fn assert_shared_mode_refuses_control_link(
+    repo: &GitRepo,
+    link: &std::path::Path,
+    target: &std::path::Path,
+    expected: Option<&[u8]>,
+) {
+    let output = support::pointbreak_unprepared([
+        "store",
+        "mode",
+        "shared",
+        "--repo",
+        repo.path().to_str().unwrap(),
+    ]);
+    let actual = match std::fs::read(target) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => panic!("read sentinel: {error}"),
+    };
+    assert_eq!(
+        actual.as_deref(),
+        expected,
+        "external sentinel changed; child status: {}; stdout: {}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(!output.status.success(), "linked control write succeeded");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("link or reparse point"), "{stderr}");
+    let guarded = repo
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join(link.strip_prefix(repo.path()).unwrap());
+    assert!(stderr.contains(guarded.to_str().unwrap()), "{stderr}");
+    assert!(
+        std::fs::symlink_metadata(link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn store_mode_shared_rejects_leaf_link() {
+    let repo = GitRepo::new();
+    let external = tempfile::tempdir().unwrap();
+    let target = external.path().join("sentinel");
+    std::fs::write(&target, b"external sentinel\n").unwrap();
+    std::fs::create_dir(repo.path().join(".pointbreak")).unwrap();
+    let link = repo.path().join(".pointbreak/store.json");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    assert_shared_mode_refuses_control_link(&repo, &link, &target, Some(b"external sentinel\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn store_mode_shared_rejects_directory_link() {
+    let repo = GitRepo::new();
+    let external = tempfile::tempdir().unwrap();
+    let target = external.path().join("store.json");
+    std::fs::write(&target, b"external sentinel\n").unwrap();
+    let link = repo.path().join(".pointbreak");
+    std::os::unix::fs::symlink(external.path(), &link).unwrap();
+    assert_shared_mode_refuses_control_link(&repo, &link, &target, Some(b"external sentinel\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn store_mode_shared_rejects_dangling_leaf_link() {
+    let repo = GitRepo::new();
+    let external = tempfile::tempdir().unwrap();
+    let target = external.path().join("absent-sentinel");
+    std::fs::create_dir(repo.path().join(".pointbreak")).unwrap();
+    let link = repo.path().join(".pointbreak/store.json");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    assert_shared_mode_refuses_control_link(&repo, &link, &target, None);
+}
