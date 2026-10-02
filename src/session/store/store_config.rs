@@ -893,7 +893,7 @@ mod tests {
         std::fs::create_dir(paths.config_dir()).unwrap();
         std::os::unix::fs::symlink(&sentinel, paths.store_config_local()).unwrap();
         let result = set_family_binding_for_repo(repo.path(), "acme-web", "0123abcd4567ef89");
-        let binding = load_common_dir_binding(common.common_dir())
+        let binding = read_common_dir_binding(common.common_dir())
             .unwrap()
             .unwrap();
         assert_eq!(binding.family_ref, "acme-web");
