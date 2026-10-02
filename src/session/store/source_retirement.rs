@@ -895,6 +895,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn unlink_error_is_an_error_not_residue() {
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: permissions are not enforced for root");
+            return;
+        }
         let (_repo, source, _target_root, target) = folded_pair();
         let _read_only = ReadOnlyDir::new(source.join("artifacts/objects"));
 
@@ -1023,6 +1027,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn interrupted_after_artifacts_converges_on_rerun() {
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: permissions are not enforced for root");
+            return;
+        }
         let (_repo, source, _target_root, target) = folded_pair();
         let events_before = snapshot(&source.join("events"));
         assert!(!events_before.is_empty());

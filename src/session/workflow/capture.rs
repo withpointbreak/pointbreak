@@ -2240,6 +2240,11 @@ mod tests {
     fn auto_record_failure_never_blocks_capture() {
         use std::os::unix::fs::PermissionsExt;
 
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: permissions are not enforced for root");
+            return;
+        }
+
         let repo = committed_repo();
         repo.git(["branch", "-M", "main"]);
         repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
