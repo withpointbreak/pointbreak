@@ -797,4 +797,131 @@ mod tests {
                 .is_symlink()
         );
     }
+    #[cfg(unix)]
+    fn assert_preparation_refuses_root_link(ancestor: bool, dangling: bool) {
+        let repo = git_repo();
+        let paths = RepositoryPaths::resolve(repo.path()).unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let target = external.path().join("linked-root");
+        if !dangling {
+            fs::create_dir(&target).unwrap();
+            fs::write(target.join("sentinel"), b"external sentinel\n").unwrap();
+        }
+        let link = if ancestor {
+            paths.config_dir().to_path_buf()
+        } else {
+            fs::create_dir(paths.config_dir()).unwrap();
+            paths.worktree_store().to_path_buf()
+        };
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let storage = LocalStorage::new(paths.worktree_store());
+        let result =
+            prepare_store_writer_at(&storage, paths.worktree_store(), paths.worktree_root());
+        if dangling {
+            assert!(
+                !target.exists(),
+                "external dangling destination was created"
+            );
+        } else {
+            assert_eq!(
+                fs::read(target.join("sentinel")).unwrap(),
+                b"external sentinel\n"
+            );
+            let entries: Vec<_> = fs::read_dir(&target)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(
+                entries,
+                [std::ffi::OsString::from("sentinel")],
+                "external layout was created"
+            );
+        }
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("link or reparse point"), "{error}");
+        assert!(error.contains(&link.display().to_string()), "{error}");
+        assert!(fs::symlink_metadata(link).unwrap().file_type().is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_preparation_refuses_data_link_before_external_layout_creation() {
+        assert_preparation_refuses_root_link(false, false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_preparation_refuses_pointbreak_link_before_external_layout_creation() {
+        assert_preparation_refuses_root_link(true, false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_preparation_refuses_dangling_links() {
+        assert_preparation_refuses_root_link(false, true);
+        assert_preparation_refuses_root_link(true, true);
+    }
+
+    #[test]
+    fn root_preparation_refuses_wrong_directory_types() {
+        for ancestor in [true, false] {
+            let repo = git_repo();
+            let paths = RepositoryPaths::resolve(repo.path()).unwrap();
+            let wrong = if ancestor {
+                paths.config_dir()
+            } else {
+                fs::create_dir(paths.config_dir()).unwrap();
+                paths.worktree_store()
+            };
+            fs::write(wrong, b"ordinary file sentinel\n").unwrap();
+            let storage = LocalStorage::new(paths.worktree_store());
+            let error =
+                prepare_store_writer_at(&storage, paths.worktree_store(), paths.worktree_root())
+                    .unwrap_err()
+                    .to_string();
+            assert!(error.contains("must be a plain directory"), "{error}");
+            assert!(error.contains(&wrong.display().to_string()), "{error}");
+            assert_eq!(fs::read(wrong).unwrap(), b"ordinary file sentinel\n");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_preparation_accepts_alias_at_repository_anchor() {
+        let repo = git_repo();
+        let links = tempfile::tempdir().unwrap();
+        let alias = links.path().join("repo");
+        std::os::unix::fs::symlink(repo.path(), &alias).unwrap();
+        let paths = RepositoryPaths::from_worktree_root(alias);
+        let storage = LocalStorage::new(paths.worktree_store());
+        prepare_store_writer_at(&storage, paths.worktree_store(), paths.worktree_root()).unwrap();
+        assert!(paths.worktree_store().join("events").is_dir());
+        assert_eq!(
+            fs::read(paths.gitignore()).unwrap(),
+            b"data/\n*.local.json\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_preparation_keeps_explicit_other_roots_caller_owned() {
+        for inside_config in [false, true] {
+            let repo = git_repo();
+            let paths = RepositoryPaths::resolve(repo.path()).unwrap();
+            let external = tempfile::tempdir().unwrap();
+            let store = if inside_config {
+                fs::create_dir(paths.config_dir()).unwrap();
+                let link = paths.config_dir().join("custom-store");
+                std::os::unix::fs::symlink(external.path(), &link).unwrap();
+                link
+            } else {
+                external.path().to_path_buf()
+            };
+            let storage = LocalStorage::new(&store);
+            prepare_store_writer_at(&storage, &store, paths.worktree_root()).unwrap();
+            assert!(external.path().join("events").is_dir());
+            assert!(external.path().join("artifacts/objects").is_dir());
+            assert_eq!(paths.gitignore().exists(), inside_config);
+        }
+    }
 }
