@@ -299,6 +299,7 @@ pub(crate) fn write_store_config(worktree_root: &Path, mode: StoreMode) -> Resul
 /// Persist a store-config document to `path`, pretty-printed with a trailing
 /// newline (so a committed config diffs cleanly), creating the parent as needed.
 fn write_store_config_document(path: &Path, config: &StoreConfig) -> Result<()> {
+    crate::paths::require_plain_repository_control_write(path)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             ShoreError::Message(format!("create {}: {error}", parent.display()))

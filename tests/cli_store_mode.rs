@@ -239,3 +239,53 @@ fn store_mode_shared_rejects_dangling_leaf_link() {
     std::os::unix::fs::symlink(&target, &link).unwrap();
     assert_shared_mode_refuses_control_link(&repo, &link, &target, None);
 }
+
+#[test]
+fn store_mode_shared_rewrites_an_ordinary_malformed_config() {
+    let repo = GitRepo::new();
+    repo.write(".pointbreak/store.json", "malformed old config");
+    let output = support::pointbreak_unprepared([
+        "store",
+        "mode",
+        "shared",
+        "--repo",
+        repo.path().to_str().unwrap(),
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bytes = std::fs::read(repo.path().join(".pointbreak/store.json")).unwrap();
+    assert_eq!(parse_json(&bytes)["mode"], "shared");
+    assert!(bytes.ends_with(b"\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn store_mode_shared_accepts_a_symlinked_repository_invocation() {
+    let repo = GitRepo::new();
+    let links = tempfile::tempdir().unwrap();
+    let alias = links.path().join("repo");
+    std::os::unix::fs::symlink(repo.path(), &alias).unwrap();
+    let output = support::pointbreak_unprepared([
+        "store",
+        "mode",
+        "shared",
+        "--repo",
+        alias.to_str().unwrap(),
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bytes = std::fs::read(repo.path().join(".pointbreak/store.json")).unwrap();
+    assert_eq!(parse_json(&bytes)["mode"], "shared");
+    assert!(
+        std::fs::symlink_metadata(alias)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}

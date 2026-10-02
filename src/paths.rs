@@ -89,6 +89,75 @@ impl RepositoryPaths {
     }
 }
 
+/// Reject pre-existing links in canonical repository control write paths.
+/// This is a static check, not protection against concurrent path replacement.
+pub(crate) fn require_plain_repository_control_write(path: &Path) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if parent.file_name() != Some(std::ffi::OsStr::new(".pointbreak"))
+        || !matches!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(
+                "store.json"
+                    | "store.local.json"
+                    | ".gitignore"
+                    | "delegates.json"
+                    | "delegates.local.json"
+                    | "actor-attributes.json"
+                    | "actor-attributes.local.json"
+                    | "allowed-signers.json"
+            )
+        )
+    {
+        return Ok(());
+    }
+    require_plain_entry(parent, true)?;
+    require_plain_entry(path, false)
+}
+
+fn require_plain_entry(path: &Path, directory: bool) -> Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(ShoreError::Message(format!(
+                "inspect repository-controlled write path {}: {error}",
+                path.display()
+            )));
+        }
+    };
+    if is_link_or_reparse_point(&metadata) {
+        return Err(ShoreError::Message(format!(
+            "refuse repository-controlled write through link or reparse point {}",
+            path.display()
+        )));
+    }
+    if (directory && metadata.is_dir()) || (!directory && metadata.is_file()) {
+        return Ok(());
+    }
+    let expected = if directory {
+        "directory"
+    } else {
+        "regular file"
+    };
+    Err(ShoreError::Message(format!(
+        "repository-controlled write path {} must be a plain {expected}",
+        path.display()
+    )))
+}
+
+fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return true;
+        }
+    }
+    metadata.file_type().is_symlink()
+}
+
 /// Canonical store and binding paths rooted in one Git common directory.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommonDirPaths {
@@ -206,6 +275,114 @@ impl UserHomePaths {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_write_guard_allows_absent_and_regular_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = RepositoryPaths::from_worktree_root(root.path());
+        require_plain_repository_control_write(&paths.store_config()).unwrap();
+        std::fs::create_dir(paths.config_dir()).unwrap();
+        std::fs::write(paths.store_config(), "malformed old config").unwrap();
+        require_plain_repository_control_write(&paths.store_config()).unwrap();
+    }
+
+    #[test]
+    fn control_write_guard_rejects_wrong_entry_types() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = RepositoryPaths::from_worktree_root(root.path());
+        std::fs::write(paths.config_dir(), "file instead of directory").unwrap();
+        let error = require_plain_repository_control_write(&paths.store_config())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("must be a plain directory"), "{error}");
+        std::fs::remove_file(paths.config_dir()).unwrap();
+        std::fs::create_dir_all(paths.store_config()).unwrap();
+        let error = require_plain_repository_control_write(&paths.store_config())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("must be a plain regular file"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn control_write_guard_checks_exact_allowlist_before_following_links() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let paths = RepositoryPaths::from_worktree_root(root.path());
+        std::fs::create_dir(paths.config_dir()).unwrap();
+        let sentinel = external.path().join("sentinel");
+        std::fs::write(&sentinel, b"external sentinel\n").unwrap();
+        for name in [
+            "store.json",
+            "store.local.json",
+            ".gitignore",
+            "delegates.json",
+            "delegates.local.json",
+            "actor-attributes.json",
+            "actor-attributes.local.json",
+            "allowed-signers.json",
+        ] {
+            let path = paths.config_dir().join(name);
+            symlink(&sentinel, &path).unwrap();
+            let error = require_plain_repository_control_write(&path)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("link or reparse point"), "{error}");
+            assert!(error.contains(&path.display().to_string()), "{error}");
+            assert!(
+                std::fs::symlink_metadata(&path)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+        for path in [
+            paths.config_dir().join("custom.json"),
+            root.path().join("store.json"),
+        ] {
+            symlink(&sentinel, &path).unwrap();
+            require_plain_repository_control_write(&path).unwrap();
+        }
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"external sentinel\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn control_write_guard_rejects_dangling_parent() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let paths = RepositoryPaths::from_worktree_root(root.path());
+        let missing = root.path().join("missing");
+        symlink(&missing, paths.config_dir()).unwrap();
+        let error = require_plain_repository_control_write(&paths.store_config())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("link or reparse point"), "{error}");
+        assert!(
+            error.contains(&paths.config_dir().display().to_string()),
+            "{error}"
+        );
+        assert!(!missing.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn control_write_guard_allows_alias_at_repository_anchor() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let links = tempfile::tempdir().unwrap();
+        let alias = links.path().join("repo");
+        symlink(root.path(), &alias).unwrap();
+        let paths = RepositoryPaths::from_worktree_root(alias);
+        require_plain_repository_control_write(&paths.store_config()).unwrap();
+        std::fs::create_dir(paths.config_dir()).unwrap();
+        std::fs::write(paths.store_config(), "existing config").unwrap();
+        require_plain_repository_control_write(&paths.store_config()).unwrap();
+    }
 
     #[test]
     fn explicit_home_is_absolute_nonempty_and_owns_all_children() {
