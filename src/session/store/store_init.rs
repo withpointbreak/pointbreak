@@ -735,4 +735,65 @@ mod tests {
         );
         repo
     }
+    #[cfg(unix)]
+    #[test]
+    fn control_writer_gitignore_refuses_leaf_link_after_missing_probes() {
+        let repo = git_repo();
+        let paths = RepositoryPaths::resolve(repo.path()).unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let sentinel = external.path().join("gitignore");
+        let before = b"# external sentinel\n";
+        fs::write(&sentinel, before).unwrap();
+        fs::create_dir(paths.config_dir()).unwrap();
+        std::os::unix::fs::symlink(&sentinel, paths.gitignore()).unwrap();
+        assert!(
+            git_paths_are_ignored(
+                repo.path(),
+                &[".pointbreak/data/events", ".pointbreak/store.local.json"]
+            )
+            .unwrap()
+            .iter()
+            .all(|ignored| !ignored)
+        );
+        let result = ensure_pointbreak_gitignore(paths.worktree_root());
+        assert_eq!(fs::read(&sentinel).unwrap(), before);
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("link or reparse point"), "{error}");
+        assert!(
+            error.contains(&paths.gitignore().display().to_string()),
+            "{error}"
+        );
+        assert!(
+            fs::symlink_metadata(paths.gitignore())
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn control_writer_gitignore_refuses_ancestor_link_at_appender() {
+        let root = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let paths = RepositoryPaths::from_worktree_root(root.path());
+        let sentinel = external.path().join(".gitignore");
+        let before = b"# external sentinel\n";
+        fs::write(&sentinel, before).unwrap();
+        std::os::unix::fs::symlink(external.path(), paths.config_dir()).unwrap();
+        let result = append_pointbreak_gitignore_lines(root.path(), &["data/", "*.local.json"]);
+        assert_eq!(fs::read(&sentinel).unwrap(), before);
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("link or reparse point"), "{error}");
+        assert!(
+            error.contains(&paths.config_dir().display().to_string()),
+            "{error}"
+        );
+        assert!(
+            fs::symlink_metadata(paths.config_dir())
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
 }

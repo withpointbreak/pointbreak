@@ -205,4 +205,61 @@ mod tests {
         // And it is genuinely a no-op the second time.
         assert!(!stage_enrollment(&path, &did_actor, &signer).unwrap().added);
     }
+    #[cfg(unix)]
+    #[test]
+    fn control_writer_enrollment_refuses_canonical_leaf_links() {
+        for name in ["allowed-signers.json"] {
+            let root = tempfile::tempdir().unwrap();
+            let external = tempfile::tempdir().unwrap();
+            let path = root.path().join(".pointbreak").join(name);
+            let sentinel = external.path().join("sentinel.json");
+            let before = br#"{"allowedSigners":{}}"#;
+            std::fs::write(&sentinel, before).unwrap();
+            std::fs::create_dir(path.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&sentinel, &path).unwrap();
+            let result = stage_enrollment(
+                &path,
+                &ActorId::new(ACTOR),
+                &SignerId::parse(DID_A).unwrap(),
+            );
+            assert_eq!(std::fs::read(&sentinel).unwrap(), before);
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("link or reparse point"), "{error}");
+            assert!(error.contains(&path.display().to_string()), "{error}");
+            assert!(
+                std::fs::symlink_metadata(path)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn control_writer_enrollment_keeps_explicit_custom_links_caller_owned() {
+        for relative in ["explicit.json", ".pointbreak/custom.json"] {
+            let root = tempfile::tempdir().unwrap();
+            let external = tempfile::tempdir().unwrap();
+            let path = root.path().join(relative);
+            let sentinel = external.path().join("sentinel.json");
+            let before = br#"{"allowedSigners":{}}"#;
+            std::fs::write(&sentinel, before).unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&sentinel, &path).unwrap();
+            stage_enrollment(
+                &path,
+                &ActorId::new(ACTOR),
+                &SignerId::parse(DID_A).unwrap(),
+            )
+            .unwrap();
+            assert_ne!(std::fs::read(&sentinel).unwrap(), before);
+            assert!(
+                std::fs::symlink_metadata(path)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+    }
 }

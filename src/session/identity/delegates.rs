@@ -1025,4 +1025,61 @@ mod tests {
         assert_eq!(map.record_count_for(&agent), 2);
         assert_eq!(map.record_count_for(&actor("actor:agent:absent")), 0);
     }
+    #[cfg(unix)]
+    #[test]
+    fn control_writer_delegation_refuses_canonical_leaf_links() {
+        for name in ["delegates.json", "delegates.local.json"] {
+            let root = tempfile::tempdir().unwrap();
+            let external = tempfile::tempdir().unwrap();
+            let path = root.path().join(".pointbreak").join(name);
+            let sentinel = external.path().join("sentinel.json");
+            let before = br#"{"delegates":{}}"#;
+            std::fs::write(&sentinel, before).unwrap();
+            std::fs::create_dir(path.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&sentinel, &path).unwrap();
+            let result = stage_delegation(
+                &path,
+                &ActorId::new(AGENT),
+                &DelegationWriteRecord::new(ActorId::new(KEVIN), "2026-06-10T00:00:00Z".to_owned()),
+            );
+            assert_eq!(std::fs::read(&sentinel).unwrap(), before);
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("link or reparse point"), "{error}");
+            assert!(error.contains(&path.display().to_string()), "{error}");
+            assert!(
+                std::fs::symlink_metadata(path)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn control_writer_delegation_keeps_explicit_custom_links_caller_owned() {
+        for relative in ["explicit.json", ".pointbreak/custom.json"] {
+            let root = tempfile::tempdir().unwrap();
+            let external = tempfile::tempdir().unwrap();
+            let path = root.path().join(relative);
+            let sentinel = external.path().join("sentinel.json");
+            let before = br#"{"delegates":{}}"#;
+            std::fs::write(&sentinel, before).unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&sentinel, &path).unwrap();
+            stage_delegation(
+                &path,
+                &ActorId::new(AGENT),
+                &DelegationWriteRecord::new(ActorId::new(KEVIN), "2026-06-10T00:00:00Z".to_owned()),
+            )
+            .unwrap();
+            assert_ne!(std::fs::read(&sentinel).unwrap(), before);
+            assert!(
+                std::fs::symlink_metadata(path)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+    }
 }

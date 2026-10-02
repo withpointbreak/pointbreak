@@ -651,4 +651,63 @@ mod tests {
         );
         assert!(!path.exists(), "a rejected attest writes nothing");
     }
+    #[cfg(unix)]
+    #[test]
+    fn control_writer_actor_attributes_refuses_canonical_leaf_links() {
+        for name in ["actor-attributes.json", "actor-attributes.local.json"] {
+            let root = tempfile::tempdir().unwrap();
+            let external = tempfile::tempdir().unwrap();
+            let path = root.path().join(".pointbreak").join(name);
+            let sentinel = external.path().join("sentinel.json");
+            let before = br#"{"schema":"shore.actor-attributes.v1","actors":{}}"#;
+            std::fs::write(&sentinel, before).unwrap();
+            std::fs::create_dir(path.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&sentinel, &path).unwrap();
+            let result = stage_actor_attributes(
+                &path,
+                &ActorId::new("actor:git-email:kevin@swiber.dev"),
+                &ActorAttributesWriteRecord::new("human".to_owned())
+                    .with_roles(vec!["reviewer".to_owned()]),
+            );
+            assert_eq!(std::fs::read(&sentinel).unwrap(), before);
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("link or reparse point"), "{error}");
+            assert!(error.contains(&path.display().to_string()), "{error}");
+            assert!(
+                std::fs::symlink_metadata(path)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn control_writer_actor_attributes_keeps_explicit_custom_links_caller_owned() {
+        for relative in ["explicit.json", ".pointbreak/custom.json"] {
+            let root = tempfile::tempdir().unwrap();
+            let external = tempfile::tempdir().unwrap();
+            let path = root.path().join(relative);
+            let sentinel = external.path().join("sentinel.json");
+            let before = br#"{"schema":"shore.actor-attributes.v1","actors":{}}"#;
+            std::fs::write(&sentinel, before).unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&sentinel, &path).unwrap();
+            stage_actor_attributes(
+                &path,
+                &ActorId::new("actor:git-email:kevin@swiber.dev"),
+                &ActorAttributesWriteRecord::new("human".to_owned())
+                    .with_roles(vec!["reviewer".to_owned()]),
+            )
+            .unwrap();
+            assert_ne!(std::fs::read(&sentinel).unwrap(), before);
+            assert!(
+                std::fs::symlink_metadata(path)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+    }
 }

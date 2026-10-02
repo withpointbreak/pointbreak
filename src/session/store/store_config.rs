@@ -881,4 +881,89 @@ mod tests {
             crate::test_fixtures::naming_cutover_bytes("topology/git-common/shore.link.json")
         );
     }
+    #[cfg(unix)]
+    #[test]
+    fn control_writer_family_set_reports_published_binding_when_local_link_is_refused() {
+        let repo = git_repo();
+        let paths = RepositoryPaths::resolve(repo.path()).unwrap();
+        let common = CommonDirPaths::resolve(repo.path()).unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let sentinel = external.path().join("local.json");
+        std::fs::write(&sentinel, EPHEMERAL_DOC).unwrap();
+        std::fs::create_dir(paths.config_dir()).unwrap();
+        std::os::unix::fs::symlink(&sentinel, paths.store_config_local()).unwrap();
+        let result = set_family_binding_for_repo(repo.path(), "acme-web", "0123abcd4567ef89");
+        let binding = load_common_dir_binding(common.common_dir())
+            .unwrap()
+            .unwrap();
+        assert_eq!(binding.family_ref, "acme-web");
+        assert_eq!(binding.clone_ref, "0123abcd4567ef89");
+        assert_eq!(std::fs::read(&sentinel).unwrap(), EPHEMERAL_DOC.as_bytes());
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("common-dir binding was already written; local store config refused:"),
+            "{error}"
+        );
+        assert!(error.contains("link or reparse point"), "{error}");
+        assert!(
+            error.contains(&paths.store_config_local().display().to_string()),
+            "{error}"
+        );
+        assert!(
+            std::fs::symlink_metadata(paths.store_config_local())
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn control_writer_family_clear_reports_completed_removal_and_preserves_local_links() {
+        // Ancestor deletion, leaf rewrite, leaf deletion, and an already-absent binding.
+        for (ancestor, body, bound) in [
+            (true, SHARED_DOC, true),
+            (false, EPHEMERAL_DOC, true),
+            (false, SHARED_DOC, true),
+            (false, SHARED_DOC, false),
+        ] {
+            let repo = git_repo();
+            let paths = RepositoryPaths::resolve(repo.path()).unwrap();
+            let common = CommonDirPaths::resolve(repo.path()).unwrap();
+            if bound {
+                write_common_dir_binding(common.common_dir(), "acme-web", "0123abcd4567ef89")
+                    .unwrap();
+            }
+            let external = tempfile::tempdir().unwrap();
+            let sentinel = external.path().join("store.local.json");
+            std::fs::write(&sentinel, body).unwrap();
+            let link = if ancestor {
+                std::os::unix::fs::symlink(external.path(), paths.config_dir()).unwrap();
+                paths.config_dir().to_path_buf()
+            } else {
+                std::fs::create_dir(paths.config_dir()).unwrap();
+                std::os::unix::fs::symlink(&sentinel, paths.store_config_local()).unwrap();
+                paths.store_config_local()
+            };
+            let result = clear_family_binding_for_repo(repo.path());
+            assert!(!common.binding().exists(), "common-dir removal completed");
+            assert_eq!(
+                std::fs::read(&sentinel).ok().as_deref(),
+                Some(body.as_bytes())
+            );
+            let error = result.unwrap_err().to_string();
+            assert!(
+                error.contains("common-dir binding removal completed; local store config refused:"),
+                "{error}"
+            );
+            assert!(error.contains("link or reparse point"), "{error}");
+            assert!(error.contains(&link.display().to_string()), "{error}");
+            assert!(
+                std::fs::symlink_metadata(link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+    }
 }
