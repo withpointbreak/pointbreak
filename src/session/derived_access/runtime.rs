@@ -16,13 +16,15 @@ use super::generation::GenerationPublication;
 use super::layout::{DerivedStorageDiscovery, DerivedStorageLayout, NAMESPACE_CONFLICT_DETAIL};
 use super::lifecycle::{
     CurrentGeneration, DerivedAccessLifecycle, LifecycleControl, LifecycleError, LifecycleProgress,
-    PublicationBoundary, is_transient_lifecycle_error,
+    LifecycleStatus, PublicationBoundary, ReaderPublicationWitness, RebuildRequiredKey,
+    is_transient_lifecycle_error,
 };
 use super::product_contract::{DerivedAccessAvailability, DerivedAccessProfile};
 #[cfg(any(test, feature = "longitudinal-counting"))]
 use crate::bench_support::longitudinal::{InteractionActorV1, reserve_interaction_child_scope_v1};
 use crate::error::JournalUnavailable;
 use crate::session::store::backend::StoreBackend;
+use crate::session::store::capabilities::StoreCapabilityInspection;
 use crate::session::store::resolution::{ReadStore, opaque_path_identity};
 
 const BACKGROUND_REBUILD_RETRY_INTERVAL: Duration = Duration::from_millis(100);
@@ -433,10 +435,22 @@ pub(crate) struct DerivedAccessRuntime {
     background_rebuild_handle: Mutex<Option<JoinHandle<()>>>,
     /// Why the most recent worker run stopped before recovering, if it did.
     background_last_failure: Arc<Mutex<Option<BackgroundFailure>>>,
+    /// The last `rebuild_required` classification, remembered only for the
+    /// exact key it was proven under.
+    rebuild_required_verdict: Mutex<Option<RebuildRequiredVerdict>>,
     #[cfg(test)]
     background_worker_test_gate: Arc<(Mutex<bool>, Condvar)>,
     #[cfg(test)]
     background_worker_diagnostic: Arc<BackgroundWorkerDiagnostic>,
+}
+
+/// One remembered `rebuild_required` classification and the control-path
+/// capability inventory taken under the same key. The runtime owns the one
+/// slot for its store; lifecycle establishes the verdict and builds the key.
+struct RebuildRequiredVerdict {
+    key: RebuildRequiredKey,
+    status: LifecycleStatus,
+    control_capability: Option<StoreCapabilityInspection>,
 }
 
 pub(super) enum RuntimeCurrentRead {
@@ -503,6 +517,7 @@ impl DerivedAccessRuntime {
             background_rebuild_cancel: Arc::new(AtomicBool::new(false)),
             background_rebuild_handle: Mutex::new(None),
             background_last_failure: Arc::new(Mutex::new(None)),
+            rebuild_required_verdict: Mutex::new(None),
             #[cfg(test)]
             background_worker_test_gate: Arc::new((Mutex::new(false), Condvar::new())),
             #[cfg(test)]
@@ -802,6 +817,182 @@ impl DerivedAccessRuntime {
         self.current_with_publication_retry(true)
     }
 
+    /// The remembered `rebuild_required` status while lifecycle proves the
+    /// key it was recorded under still holds, observed through `cached` when
+    /// this process holds a generation (no new lease). Any other observation
+    /// discards it. With nothing remembered this is one uncontended lock and
+    /// no I/O.
+    fn remembered_rebuild_required(
+        &self,
+        lifecycle: &DerivedAccessLifecycle,
+        cached: Option<&CurrentGeneration>,
+    ) -> Option<LifecycleStatus> {
+        let remembered = lock(&self.rebuild_required_verdict)
+            .as_ref()
+            .map(|verdict| verdict.key.clone())?;
+        let holds = lifecycle.rebuild_required_key_holds(&remembered, cached);
+        let mut verdict = lock(&self.rebuild_required_verdict);
+        match verdict.as_ref() {
+            Some(current) if current.key == remembered && holds => Some(current.status.clone()),
+            Some(current) if current.key == remembered => {
+                *verdict = None;
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Classify read-only and remember a `rebuild_required` verdict only when
+    /// the key observed before the classification still holds after it,
+    /// the status names that key's generation, and the recorded authority is
+    /// definitely superseded. Transient and indeterminate failures are never
+    /// remembered.
+    fn classify_read_only_remembering(
+        &self,
+        lifecycle: &DerivedAccessLifecycle,
+        witness: Option<&ReaderPublicationWitness>,
+    ) -> Result<LifecycleStatus, LifecycleError> {
+        let before = lifecycle.rebuild_required_key();
+        let observed = lifecycle.status_read_only_witnessed(witness)?;
+        if let Some(before) = before
+            && DerivedAccessLifecycle::rebuild_required_key_names(&before, &observed)
+            && lifecycle.rebuild_required_is_definite(&before)
+            && lifecycle.rebuild_required_key_holds(&before, None)
+        {
+            *lock(&self.rebuild_required_verdict) = Some(RebuildRequiredVerdict {
+                key: before,
+                status: observed.clone(),
+                control_capability: None,
+            });
+        }
+        Ok(observed)
+    }
+
+    /// Remember the `rebuild_required` verdict a cached generation's own
+    /// revalidation just returned. The key is observed through that
+    /// generation, so this takes no new lease and runs no second classifier.
+    /// Recording needs the same proof as `classify_read_only_remembering`:
+    /// the key names the status, the recorded authority is definitely
+    /// superseded, and the key still holds after that check.
+    fn remember_cached_rebuild_required(
+        &self,
+        lifecycle: &DerivedAccessLifecycle,
+        cached: &CurrentGeneration,
+        detail: &str,
+    ) {
+        let Some(key) = lifecycle.rebuild_required_key_for_cached(cached) else {
+            return;
+        };
+        let status = DerivedAccessLifecycle::rebuild_required_status(&key, detail.to_owned());
+        if DerivedAccessLifecycle::rebuild_required_key_names(&key, &status)
+            && lifecycle.rebuild_required_is_definite(&key)
+            && lifecycle.rebuild_required_key_holds(&key, Some(cached))
+        {
+            *lock(&self.rebuild_required_verdict) = Some(RebuildRequiredVerdict {
+                key,
+                status,
+                control_capability: None,
+            });
+        }
+    }
+
+    /// The read-only lifecycle classification that status observers use:
+    /// served from a remembered `rebuild_required` verdict while its key holds,
+    /// otherwise classified (and remembered when it proves one).
+    pub(super) fn lifecycle_status_read_only(
+        &self,
+        lifecycle: &DerivedAccessLifecycle,
+    ) -> Result<LifecycleStatus, LifecycleError> {
+        let cached = self.cached_current();
+        if let Some(remembered) = self.remembered_rebuild_required(lifecycle, cached.as_deref()) {
+            return Ok(remembered);
+        }
+        self.classify_read_only_remembering(lifecycle, None)
+    }
+
+    /// The control-path capability inventory, reused from the remembered
+    /// `rebuild_required` verdict while its key holds. Without a remembered
+    /// verdict it runs `inspect` exactly as before and remembers nothing.
+    pub(super) fn control_capability_remembering<E>(
+        &self,
+        inspect: impl FnOnce() -> Result<StoreCapabilityInspection, E>,
+    ) -> Result<StoreCapabilityInspection, E> {
+        let Some((key, remembered)) = lock(&self.rebuild_required_verdict)
+            .as_ref()
+            .map(|verdict| (verdict.key.clone(), verdict.control_capability.clone()))
+        else {
+            return inspect();
+        };
+        let cached = self.cached_current();
+        let holds = || {
+            self.discovery_lifecycle().is_some_and(|lifecycle| {
+                lifecycle.rebuild_required_key_holds(&key, cached.as_deref())
+            })
+        };
+        if !holds() {
+            let mut verdict = lock(&self.rebuild_required_verdict);
+            if verdict.as_ref().is_some_and(|verdict| verdict.key == key) {
+                *verdict = None;
+            }
+            return inspect();
+        }
+        if let Some(remembered) = remembered {
+            return Ok(remembered);
+        }
+        let inspection = inspect()?;
+        if holds()
+            && let Some(verdict) = lock(&self.rebuild_required_verdict).as_mut()
+            && verdict.key == key
+        {
+            verdict.control_capability = Some(inspection.clone());
+        }
+        Ok(inspection)
+    }
+
+    /// An active runtime over one store root, refreshing its lifecycle through
+    /// the maintenance seam exactly as a resolved product runtime does.
+    #[cfg(test)]
+    pub(super) fn active_for_test(
+        profile: DerivedAccessProfile,
+        store_root: &std::path::Path,
+    ) -> Arc<Self> {
+        let store_identity = opaque_path_identity("store", store_root).unwrap();
+        let maintenance = DerivedAccessMaintenance {
+            profile,
+            store_root: store_root.to_path_buf(),
+            store_identity: store_identity.clone(),
+        };
+        let lifecycle = maintenance.lifecycle().unwrap();
+        Self::new(
+            DerivedAccessMode::Active {
+                lifecycle,
+                current: Mutex::new(None),
+                store_identity,
+                backend: StoreBackend::Local(store_root.to_path_buf()),
+            },
+            Some(maintenance),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn remembered_rebuild_required_key(&self) -> Option<RebuildRequiredKey> {
+        lock(&self.rebuild_required_verdict)
+            .as_ref()
+            .map(|verdict| verdict.key.clone())
+    }
+
+    /// The lifecycle request discovery would use now: refreshed from the
+    /// maintenance seam when there is one, else the configured lifecycle.
+    fn discovery_lifecycle(&self) -> Option<DerivedAccessLifecycle> {
+        let DerivedAccessMode::Active { lifecycle, .. } = &self.mode else {
+            return None;
+        };
+        match &self.maintenance {
+            Some(maintenance) => maintenance.lifecycle().ok(),
+            None => Some(lifecycle.clone()),
+        }
+    }
+
     fn current_with_publication_retry(
         &self,
         retry_current_transition: bool,
@@ -868,10 +1059,23 @@ impl DerivedAccessRuntime {
                 None => None,
             }
         };
+        // A remembered verdict answers without opening or revalidating the
+        // generation and without re-validating the capability pair; the
+        // worker request is unchanged.
+        if let Some(remembered) = self.remembered_rebuild_required(lifecycle, existing.as_deref()) {
+            self.request_background_rebuild();
+            return Ok(RuntimeCurrentRead::Unavailable(
+                unavailable_lifecycle_status(remembered, "derived generation requires a rebuild"),
+            ));
+        }
         if let Some(existing) = existing {
             let validation = match lifecycle.validate_cached_current(&existing) {
                 Ok(validation) => validation,
                 Err(LifecycleError::RebuildRequired(detail)) => {
+                    // Keep the cached generation: an in-flight append settles
+                    // inside it, and the memo never answers Ready, so the
+                    // next miss revalidates it without reopening.
+                    self.remember_cached_rebuild_required(lifecycle, &existing, &detail);
                     self.request_background_rebuild();
                     return Ok(RuntimeCurrentRead::Unavailable(runtime_status(
                         DerivedAccessAvailability::RebuildRequired,
@@ -915,7 +1119,8 @@ impl DerivedAccessRuntime {
                 "derived history is catching up to authoritative truth",
             )));
         }
-        match lifecycle.open_current() {
+        let mut reader_publication_witness = None;
+        match lifecycle.open_current_witnessed(&mut reader_publication_witness) {
             Ok(Some(opened)) => {
                 let opened = Arc::new(opened);
                 let confirmed_generation_id = published_generation_id_observed(lifecycle)
@@ -980,7 +1185,8 @@ impl DerivedAccessRuntime {
                 }))
             }
             Err(error) => {
-                let observed = lifecycle.status_read_only();
+                let observed = self
+                    .classify_read_only_remembering(lifecycle, reader_publication_witness.as_ref());
                 if retry_current_transition
                     && matches!(
                         observed.as_ref(),
