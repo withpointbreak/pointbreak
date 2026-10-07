@@ -17,7 +17,81 @@ use crate::session::event::{Writer, event_type_from_code, pre_authentication_enc
 use crate::session::store::backend::{Journal, JournalEntry};
 use crate::session::store::event_store::EventStore;
 
+/// Strict readers, legacy coordinators and administrative paths remain closed
+/// throughout enrollment, including a missing selector or an incomplete plan.
+/// This negative fence grants no new-profile admission and enumerates no history.
+pub(in crate::session) fn refuse_progress_store(root: &std::path::Path) -> Result<()> {
+    match std::fs::symlink_metadata(root.join("append-progress")) {
+        Ok(_) => {
+            return capability_error(
+                "progress_reader_unavailable; enrolled strict/admin access requires the future progress reader",
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(ShoreError::Message(error.to_string())),
+    }
+    let journal = crate::session::store::backend::LocalJournal::new(root);
+    if let Some(bytes) = journal.read_event_bytes(ROOT_ACTIVATION_LOGICAL_KEY_V1)? {
+        let probe: serde_json::Value = serde_json::from_slice(&bytes)?;
+        if probe
+            .get("minimumReaderProfile")
+            .and_then(serde_json::Value::as_str)
+            == Some("review_change_revision_progress_v1")
+        {
+            return capability_error(
+                "progress_reader_unavailable; enrolled strict/admin access requires the future progress reader",
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(crate) const REVIEW_CHANGE_REVISION_COHORT_V1: &str = "review_change_revision_v1";
+// Dormant registry: production activation admission remains on the old profile.
+#[allow(dead_code, reason = "enrolled routing is not yet admitted")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SupportedReaderProfileV1 {
+    ChangeRevision,
+    ChangeRevisionProgress,
+}
+
+#[allow(dead_code, reason = "enrolled routing is not yet admitted")]
+impl SupportedReaderProfileV1 {
+    pub(crate) fn minimum_reader_profile(self) -> &'static str {
+        match self {
+            Self::ChangeRevision => REVIEW_CHANGE_REVISION_COHORT_V1,
+            Self::ChangeRevisionProgress => "review_change_revision_progress_v1",
+        }
+    }
+}
+
+#[allow(dead_code, reason = "enrolled routing is not yet admitted")]
+pub(crate) fn supported_reader_profile_v1(value: &str) -> Option<SupportedReaderProfileV1> {
+    match value {
+        REVIEW_CHANGE_REVISION_COHORT_V1 => Some(SupportedReaderProfileV1::ChangeRevision),
+        "review_change_revision_progress_v1" => {
+            Some(SupportedReaderProfileV1::ChangeRevisionProgress)
+        }
+        _ => None,
+    }
+}
+
+#[allow(dead_code, reason = "enrolled routing is not yet admitted")]
+pub(crate) fn reader_profile_versions_for_v1(
+    _profile: SupportedReaderProfileV1,
+) -> &'static [DocumentVersionReservationV1] {
+    READER_PROFILE_DOCUMENT_VERSIONS_V1
+}
+
+const PROGRESS_REQUIRED_CAPABILITIES_V1: &[&str] = &[
+    "auxiliary_document_blob_v1",
+    "auxiliary_document_manifest_v1",
+    "recoverable_append_progress_v1",
+    "relation_proof_v1",
+    "review_fact_port_v1",
+    "revision_relation_attestation_v1",
+    "stable_change_membership_v1",
+];
 #[allow(
     dead_code,
     reason = "the frozen manifest is exercised by qualification tests"
@@ -273,6 +347,25 @@ pub(crate) struct ReviewChangeRevisionManifestV1 {
     reason = "the frozen manifest is exercised by qualification tests"
 )]
 impl ReviewChangeRevisionManifestV1 {
+    pub(crate) fn for_profile(profile: SupportedReaderProfileV1) -> Self {
+        match profile {
+            SupportedReaderProfileV1::ChangeRevision => Self::canonical(),
+            SupportedReaderProfileV1::ChangeRevisionProgress => Self {
+                cohort: profile.minimum_reader_profile(),
+                minimum_reader_profile: profile.minimum_reader_profile(),
+                required_capabilities: PROGRESS_REQUIRED_CAPABILITIES_V1,
+                ..Self::canonical()
+            },
+        }
+    }
+
+    pub(crate) fn validate_for_profile(&self, profile: SupportedReaderProfileV1) -> Result<()> {
+        if self != &Self::for_profile(profile) {
+            return capability_error("unsupported reader profile/manifest pairing");
+        }
+        Ok(())
+    }
+
     pub(crate) const fn canonical() -> Self {
         Self {
             schema: CAPABILITY_MANIFEST_SCHEMA_V1,
@@ -345,10 +438,16 @@ impl BulkAdoptionManifestV1 {
     }
 
     fn validate(&self) -> Result<()> {
+        self.validate_for_profile(SupportedReaderProfileV1::ChangeRevision)
+    }
+
+    fn validate_for_profile(&self, profile: SupportedReaderProfileV1) -> Result<()> {
         if self.schema != BULK_MANIFEST_SCHEMA_V1 || self.version != 1 {
             return capability_error("unsupported bulk-adoption manifest schema/version");
         }
-        if self.cohort_manifest_hash != REVIEW_CHANGE_REVISION_MANIFEST_HASH_V1 {
+        if self.cohort_manifest_hash
+            != ReviewChangeRevisionManifestV1::for_profile(profile).canonical_hash()?
+        {
             return capability_error(
                 "bulk-adoption manifest names an unsupported capability manifest",
             );
@@ -489,20 +588,30 @@ impl StoreCapabilityActivationV1 {
     }
 
     fn validate(&self) -> Result<()> {
+        self.validate_for_profile(SupportedReaderProfileV1::ChangeRevision)
+    }
+
+    fn validate_for_profile(&self, profile: SupportedReaderProfileV1) -> Result<()> {
         if self.schema != ACTIVATION_SCHEMA_V1 || self.version != 1 {
             return capability_error("unsupported capability activation schema/version");
         }
         ensure_sorted_unique(&self.required_capabilities, "required capabilities")?;
-        if self.cohort_manifest_hash != REVIEW_CHANGE_REVISION_MANIFEST_HASH_V1 {
+        let manifest = ReviewChangeRevisionManifestV1::for_profile(profile);
+        if self.cohort_manifest_hash != manifest.canonical_hash()? {
             return capability_error("activation names an unsupported capability manifest");
         }
-        if self.minimum_reader_profile != REVIEW_CHANGE_REVISION_COHORT_V1 {
+        if self.minimum_reader_profile != manifest.minimum_reader_profile {
             return capability_error("activation names an unsupported minimum reader profile");
         }
-        if self.required_capabilities != supported_capabilities() {
+        if self
+            .required_capabilities
+            .iter()
+            .map(String::as_str)
+            .ne(manifest.required_capabilities.iter().copied())
+        {
             return capability_error("activation requires an unsupported capability set");
         }
-        self.bulk_adoption_manifest.validate()?;
+        self.bulk_adoption_manifest.validate_for_profile(profile)?;
         if self.bulk_adoption_manifest.canonical_hash()? != self.bulk_adoption_manifest_hash {
             return capability_error("activation bulk-adoption manifest hash mismatch");
         }
@@ -1229,6 +1338,26 @@ pub(crate) fn event_entries_for_current_product(
 }
 
 pub(crate) fn route_journal_entries(entries: Vec<JournalEntry>) -> Result<JournalInspection> {
+    route_journal_entries_for_profile(entries, SupportedReaderProfileV1::ChangeRevision, || Ok(()))
+}
+
+#[cfg(any(target_os = "macos", windows))]
+pub(crate) fn route_audited_progress_entries(
+    entries: Vec<JournalEntry>,
+    admission: &crate::session::append_progress::JournalAdmission,
+) -> Result<JournalInspection> {
+    route_journal_entries_for_profile(
+        entries,
+        SupportedReaderProfileV1::ChangeRevisionProgress,
+        || admission.checkpoint(),
+    )
+}
+
+fn route_journal_entries_for_profile(
+    entries: Vec<JournalEntry>,
+    profile: SupportedReaderProfileV1,
+    checkpoint: impl Fn() -> Result<()>,
+) -> Result<JournalInspection> {
     #[cfg(any(test, feature = "bench"))]
     let record_entries = entries.clone();
     let mut event_entries = Vec::new();
@@ -1238,6 +1367,7 @@ pub(crate) fn route_journal_entries(entries: Vec<JournalEntry>) -> Result<Journa
     let mut authority_record_identities = Vec::new();
 
     for entry in entries {
+        checkpoint()?;
         let probe: SchemaProbe = serde_json::from_slice(&entry.bytes).map_err(|error| {
             ShoreError::Message(format!("Journal record has no valid typed schema: {error}"))
         })?;
@@ -1252,7 +1382,7 @@ pub(crate) fn route_journal_entries(entries: Vec<JournalEntry>) -> Result<Journa
             }
             ACTIVATION_SCHEMA_V1 => {
                 let activation: StoreCapabilityActivationV1 = serde_json::from_slice(&entry.bytes)?;
-                activation.validate()?;
+                activation.validate_for_profile(profile)?;
                 validate_logical_key_digest(&activation.logical_key(), &entry.key_digest)?;
                 authority_record_identities.push(journal_record_identity(&entry, None)?);
                 activations.push(activation);
@@ -1681,6 +1811,7 @@ where
     Ok(())
 }
 
+#[cfg(test)]
 fn supported_capabilities() -> Vec<String> {
     REVIEW_CHANGE_REVISION_REQUIRED_CAPABILITIES_V1
         .iter()
@@ -1737,16 +1868,39 @@ pub(crate) fn build_signed_activation(
     writer: Writer,
     occurred_at: String,
 ) -> Result<StoreCapabilityActivationV1> {
+    build_signed_activation_for(
+        signer,
+        manifest,
+        nonce,
+        writer,
+        occurred_at,
+        SupportedReaderProfileV1::ChangeRevision,
+    )
+}
+
+fn build_signed_activation_for(
+    signer: &(impl EventSigner + ?Sized),
+    manifest: BulkAdoptionManifestV1,
+    nonce: String,
+    writer: Writer,
+    occurred_at: String,
+    profile: SupportedReaderProfileV1,
+) -> Result<StoreCapabilityActivationV1> {
     let manifest_hash = manifest.canonical_hash()?;
+    let cohort = ReviewChangeRevisionManifestV1::for_profile(profile);
     let mut activation = StoreCapabilityActivationV1 {
         schema: ACTIVATION_SCHEMA_V1.to_owned(),
         version: 1,
         activation_id: String::new(),
         nonce,
         predecessor_activation_id: None,
-        cohort_manifest_hash: REVIEW_CHANGE_REVISION_MANIFEST_HASH_V1.to_owned(),
-        minimum_reader_profile: REVIEW_CHANGE_REVISION_COHORT_V1.to_owned(),
-        required_capabilities: supported_capabilities(),
+        cohort_manifest_hash: cohort.canonical_hash()?,
+        minimum_reader_profile: cohort.minimum_reader_profile.to_owned(),
+        required_capabilities: cohort
+            .required_capabilities
+            .iter()
+            .map(|v| (*v).to_owned())
+            .collect(),
         bulk_adoption_manifest_hash: manifest_hash,
         bulk_adoption_manifest: manifest,
         writer,
@@ -1769,8 +1923,97 @@ pub(crate) fn build_signed_activation(
         ACTIVATION_TBS_PAYLOAD_TYPE_V1,
         &body,
     ))?;
-    activation.validate()?;
+    activation.validate_for_profile(profile)?;
     Ok(activation)
+}
+
+/// Closed enrollment-only signed pair. Ordinary capability readers still call
+/// the old-profile validators; constructing this value grants no store admission.
+pub(crate) struct ProgressPair {
+    pub(crate) activation: StoreCapabilityActivationV1,
+    pub(crate) completion: BulkAdoptionCompletionV1,
+}
+
+impl ProgressPair {
+    pub(crate) fn actor(&self) -> &str {
+        self.activation.writer.actor_id.as_str()
+    }
+    pub(crate) fn signer(&self) -> &SignerId {
+        &self.activation.signer
+    }
+    pub(crate) fn occurred_at(&self) -> &str {
+        &self.activation.occurred_at
+    }
+}
+
+fn empty_progress_cursor() -> Result<AuthorityCursorV2> {
+    authority_cursor(
+        0,
+        0,
+        sha256_json_prefixed(&serde_json::to_value(JournalRecordSetMaterial {
+            schema: JOURNAL_RECORD_SET_SCHEMA_V1,
+            records: vec![],
+        })?)?,
+        event_set_hash(&[])?,
+        &[],
+    )
+}
+
+pub(crate) fn validate_progress_pair(activation: &[u8], completion: &[u8]) -> Result<ProgressPair> {
+    let a: StoreCapabilityActivationV1 = serde_json::from_slice(activation)?;
+    let c: BulkAdoptionCompletionV1 = serde_json::from_slice(completion)?;
+    if canonical_json_bytes(&serde_json::to_value(&a)?)? != activation
+        || canonical_json_bytes(&serde_json::to_value(&c)?)? != completion
+    {
+        return capability_error("noncanonical retained enrollment pair");
+    }
+    a.validate_for_profile(SupportedReaderProfileV1::ChangeRevisionProgress)?;
+    c.validate()?;
+    validate_completion(&c, &a, &[])?;
+    if a.predecessor_activation_id.is_some()
+        || !a.bulk_adoption_manifest.reserved_records.is_empty()
+        || a.bulk_adoption_manifest.source_authority_cursor != empty_progress_cursor()?
+        || a.signer != c.signer
+        || a.occurred_at != c.occurred_at
+    {
+        return capability_error(
+            "enrollment requires one empty root pair and original signer/time",
+        );
+    }
+    Ok(ProgressPair {
+        activation: a,
+        completion: c,
+    })
+}
+
+pub(crate) fn build_progress_pair(
+    signer: &(impl EventSigner + ?Sized),
+    writer: Writer,
+    occurred_at: String,
+    nonce: String,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    let profile = SupportedReaderProfileV1::ChangeRevisionProgress;
+    let manifest = BulkAdoptionManifestV1 {
+        schema: BULK_MANIFEST_SCHEMA_V1.to_owned(),
+        version: 1,
+        cohort_manifest_hash: ReviewChangeRevisionManifestV1::for_profile(profile)
+            .canonical_hash()?,
+        source_authority_cursor: empty_progress_cursor()?,
+        reserved_records: vec![],
+    };
+    let a = build_signed_activation_for(
+        signer,
+        manifest,
+        nonce,
+        writer.clone(),
+        occurred_at.clone(),
+        profile,
+    )?;
+    let c = build_signed_completion(signer, &a, writer, occurred_at)?;
+    let a = canonical_json_bytes(&serde_json::to_value(a)?)?;
+    let c = canonical_json_bytes(&serde_json::to_value(c)?)?;
+    validate_progress_pair(&a, &c)?;
+    Ok((a, c))
 }
 
 pub(crate) fn build_signed_completion(
@@ -2263,6 +2506,16 @@ mod tests {
     }
 
     #[test]
+    fn progress_strict_fence_covers_partial_enrollment_and_missing_selector() {
+        let root = tempfile::tempdir().unwrap();
+        refuse_progress_store(root.path()).unwrap();
+        std::fs::create_dir(root.path().join("append-progress")).unwrap();
+        let error = refuse_progress_store(root.path()).unwrap_err();
+        assert!(error.to_string().contains("progress_reader_unavailable"));
+        assert!(!root.path().join("append-progress/active.json").exists());
+    }
+
+    #[test]
     fn backfill_cohort_is_empty_without_an_activation_record() {
         let root = tempfile::tempdir().unwrap();
         let backend = StoreBackend::Local(root.path().to_path_buf());
@@ -2360,6 +2613,90 @@ mod tests {
         .unwrap();
 
         assert!(backfill_cohort_of(&backend).is_err());
+    }
+
+    #[test]
+    fn checkpoint_progress_registry_is_closed_and_hashes_are_frozen() {
+        let profile = SupportedReaderProfileV1::ChangeRevisionProgress;
+        assert_eq!(
+            supported_reader_profile_v1(profile.minimum_reader_profile()),
+            Some(profile)
+        );
+        for unknown in ["", "__proto__", "review_change_revision_progress_v2"] {
+            assert_eq!(supported_reader_profile_v1(unknown), None);
+        }
+        let old = ReviewChangeRevisionManifestV1::canonical();
+        assert_eq!(
+            old.canonical_hash().unwrap(),
+            REVIEW_CHANGE_REVISION_MANIFEST_HASH_V1
+        );
+        let new = ReviewChangeRevisionManifestV1::for_profile(profile);
+        assert_eq!(
+            new.canonical_hash().unwrap(),
+            "sha256:a9cff5e866b35bb808b1ae2d89c37ad3ea4776a518c7fa5b21cda76700a15705"
+        );
+        new.validate_for_profile(profile).unwrap();
+        assert!(old.validate_for_profile(profile).is_err());
+        assert!(
+            new.validate_for_profile(SupportedReaderProfileV1::ChangeRevision)
+                .is_err()
+        );
+        assert!(
+            new.required_capabilities
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        );
+        let old_doc: serde_json::Value = serde_json::from_str(include_str!(
+            "../../documents/change_reader_profile_v1.json"
+        ))
+        .unwrap();
+        let new_doc: serde_json::Value = serde_json::from_str(include_str!(
+            "../../documents/change_reader_progress_profile_v1.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            new_doc["minimumReaderProfile"],
+            profile.minimum_reader_profile()
+        );
+        assert_eq!(old_doc["documents"], new_doc["documents"]);
+        for reservation in reader_profile_versions_for_v1(profile) {
+            assert_eq!(
+                new_doc["documents"][reservation.schema],
+                reservation.version
+            );
+        }
+    }
+
+    #[test]
+    fn checkpoint_progress_fixed_key_remains_rejected_by_current_admission() {
+        let signer = crate::crypto::TestEd25519Signer::from_seed([0x61; 32]);
+        let manifest = BulkAdoptionManifestV1 {
+            schema: BULK_MANIFEST_SCHEMA_V1.to_owned(),
+            version: 1,
+            cohort_manifest_hash: REVIEW_CHANGE_REVISION_MANIFEST_HASH_V1.to_owned(),
+            source_authority_cursor: route_journal_entries(Vec::new()).unwrap().cursor,
+            reserved_records: Vec::new(),
+        };
+        let mut activation = signed_activation(&signer, manifest).unwrap();
+        let profile = SupportedReaderProfileV1::ChangeRevisionProgress;
+        activation.minimum_reader_profile = profile.minimum_reader_profile().to_owned();
+        activation.cohort_manifest_hash = ReviewChangeRevisionManifestV1::for_profile(profile)
+            .canonical_hash()
+            .unwrap();
+        activation.required_capabilities = PROGRESS_REQUIRED_CAPABILITIES_V1
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect();
+        assert_eq!(activation.logical_key(), ROOT_ACTIVATION_LOGICAL_KEY_V1);
+        // The unchanged admission rejects the manifest before signature checks.
+        // This is a fence control, not positive signed-enrollment evidence.
+        assert!(
+            activation
+                .validate_for_execution()
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported capability manifest")
+        );
     }
 
     #[test]

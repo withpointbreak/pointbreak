@@ -194,6 +194,10 @@ impl CommonDirPaths {
     pub fn binding(&self) -> PathBuf {
         self.common_dir.join("pointbreak.link.json")
     }
+
+    pub fn binding_lock(&self) -> PathBuf {
+        self.common_dir.join("pointbreak.link.lock")
+    }
 }
 
 /// Resolved Pointbreak user-home paths shared by keys and user-level stores.

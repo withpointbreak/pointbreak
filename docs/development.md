@@ -229,3 +229,42 @@ directory.
 
 See `scripts/README.md` for script inventory, mutation boundaries, and script-specific failure
 classes.
+
+### Private append-progress native gate
+
+Changes under `src/session/append_progress/` also require
+`just test-append-progress-native <reviewed-config.json>` on macOS/APFS and Windows/NTFS.
+The gate enumerates all applicable cases in `scripts/append-progress-cases.json`, checks
+compiled names and ignore flags, and requires an exact passing JUnit result for every case.
+It runs 53 cases on macOS (including the five S20 predecessor scenarios) and 52 on Windows.
+The auxiliary child entry is invoked only by its parent, with exact assignment/name/mode evidence.
+Windows native cases require the normal nonadmin owner console and the checked external ACL helper.
+The three pure cases remain ordinary tests; macOS additionally retains 49 ordinary native cases.
+
+This gate consumes already-built binaries and fresh, explicitly assigned fixtures; it never builds,
+retries, adopts an existing root, or cleans up retained evidence. Prepare the reviewed configuration
+and native parent before invoking it; see the script contract in `scripts/README.md`.
+Missing setup is a failure. For these changes, `just check` alone is incomplete: require both native
+host receipts plus the full macOS default gate. Windows native receipts do not imply a full Windows
+default-suite pass, public enrollment qualification, or Inspector validation.
+
+### Private Change-create consumer development
+
+The macOS-only `__owned-change-v1 <enrollment-request-hex> <mode> change create ...`
+entry selects a disposable whole-command owner before the real CLI parser and signing
+handler. Modes are `enroll-empty`, `resume`, and the diagnostic
+`resume-cut-after-presence` (exit79 after the durable presence proof and SQL-owner finish,
+before settlement). Only an explicitly assigned disposable clone-local repository is
+admitted by this development workflow. The same request and Change operation ID must
+survive retry. Public enrollment and other Change mutations remain closed.
+
+The private stderr `private-change-ack:` diagnostic reports the actual authority outcome,
+append settlement and derived availability. The public Change operation receipt is unchanged.
+No derived token is emitted by this consumer; strict readers, legacy coordinators and
+administrative routes refuse an enrolled or partially enrolled root.
+
+`tests/owned_change_entry.rs` is ignored by ordinary test runs and requires an assigned,
+empty retained parent in `POINTBREAK_CONSUMER_FIXTURE`, exact source/caller review and the
+approved macOS diagnostic readiness. Its two profile cases exercise real parsing/signing,
+original-plan retry, interruption/settlement, absent projection, off mode and strict refusal.
+These controls do not replace default/full-suite, Windows, Inspector or final qualification.

@@ -12,6 +12,15 @@ pub use acknowledgement::{
     OperationReceiptStateV1, WriteAcknowledgementV1,
 };
 pub mod adapter;
+#[cfg(any(target_os = "macos", windows))]
+pub(crate) mod append_progress;
+#[cfg(any(target_os = "macos", windows))]
+#[doc(hidden)]
+pub use append_progress::{
+    AppendExit, AuditExit, AuditLimits, OwnedAppendBootstrap, OwnedAppendOperation,
+    OwnedAuditBootstrap, OwnedProcessBootstrap, OwnedProcessExit, OwnedProcessFailure,
+    run_disposable_append, run_disposable_audit, run_disposable_owner,
+};
 #[cfg(feature = "bench")]
 pub(crate) mod benchmark;
 pub(crate) mod derived_access;
@@ -84,6 +93,11 @@ pub fn take_derived_write_diagnostics() -> Vec<ProjectionDiagnostic> {
         })
         .collect()
 }
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub use append_progress::consumer::{
+    OwnedChangeCommand, enter_owned_change_command, take_owned_change_diagnostic,
+};
 pub use event::{
     BodyContentType, IngestProvenance, IngestVia, event_signature_pre_authentication_encoding,
     event_to_be_signed,

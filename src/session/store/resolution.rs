@@ -524,7 +524,31 @@ pub(crate) fn resolve_store(repo: impl AsRef<Path>) -> Result<StoreResolution> {
     resolve_store_with_derived_access_profile(repo, derived_access_profile)
 }
 
+#[cfg(target_os = "macos")]
+pub(in crate::session) fn resolve_owned_change_store(
+    repo: &Path,
+    clone: &super::family_topology::CloneBindingGuard,
+    common: &Path,
+) -> Result<StoreResolution> {
+    if !crate::session::append_progress::consumer::selected() {
+        return Err(ShoreError::Message("owned_process_required".into()));
+    }
+    clone.validate(common)?;
+    let profile = DerivedAccessProfile::from_environment()
+        .map_err(|error| ShoreError::Message(error.to_string()))?;
+    resolve_store_before_profile_admission(repo, profile)
+}
+
 fn resolve_store_with_derived_access_profile(
+    repo: impl AsRef<Path>,
+    derived_access_profile: DerivedAccessProfile,
+) -> Result<StoreResolution> {
+    let resolution = resolve_store_before_profile_admission(repo, derived_access_profile)?;
+    super::capabilities::refuse_progress_store(resolution.store_dir())?;
+    Ok(resolution)
+}
+
+fn resolve_store_before_profile_admission(
     repo: impl AsRef<Path>,
     derived_access_profile: DerivedAccessProfile,
 ) -> Result<StoreResolution> {
