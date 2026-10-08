@@ -44,13 +44,23 @@ impl Gate {
         #[cfg(any(target_os = "macos", windows))]
         {
             use native::namespace::{Role, observe_private_worker};
-            let (role, leaf) = match record.role {
-                ffi::SQLITE_PB_ROLE_MAIN => (Role::Main, "ledger.sqlite"),
-                ffi::SQLITE_PB_ROLE_WAL => (Role::Wal, "ledger.sqlite-wal"),
-                ffi::SQLITE_PB_ROLE_SHM_MAPPING | ffi::SQLITE_PB_ROLE_SHM_LOCK => {
+            let (role, leaf) = match (evidence.projection_target(), record.role) {
+                (true, ffi::SQLITE_PB_ROLE_MAIN) => (Role::ProjectionMain, "cursor.sqlite3"),
+                (true, ffi::SQLITE_PB_ROLE_WAL) => (Role::ProjectionWal, "cursor.sqlite3-wal"),
+                (true, ffi::SQLITE_PB_ROLE_SHM_MAPPING | ffi::SQLITE_PB_ROLE_SHM_LOCK) => {
+                    (Role::ProjectionShm, "cursor.sqlite3-shm")
+                }
+                (true, ffi::SQLITE_PB_ROLE_MAIN_JOURNAL) => {
+                    (Role::ProjectionJournal, "cursor.sqlite3-journal")
+                }
+                (false, ffi::SQLITE_PB_ROLE_MAIN) => (Role::Main, "ledger.sqlite"),
+                (false, ffi::SQLITE_PB_ROLE_WAL) => (Role::Wal, "ledger.sqlite-wal"),
+                (false, ffi::SQLITE_PB_ROLE_SHM_MAPPING | ffi::SQLITE_PB_ROLE_SHM_LOCK) => {
                     (Role::Shm, "ledger.sqlite-shm")
                 }
-                ffi::SQLITE_PB_ROLE_MAIN_JOURNAL => (Role::Journal, "ledger.sqlite-journal"),
+                (false, ffi::SQLITE_PB_ROLE_MAIN_JOURNAL) => {
+                    (Role::Journal, "ledger.sqlite-journal")
+                }
                 _ => return Err(refused()),
             };
             evidence.validate_live()?;
@@ -70,10 +80,7 @@ impl Gate {
                 if raw == 0 || raw == usize::MAX {
                     return Err(refused());
                 }
-                let path = evidence
-                    .inputs()
-                    .database(evidence.members()[0].path())?
-                    .with_file_name(leaf);
+                let path = evidence.database()?.with_file_name(leaf);
                 // SAFETY: pinned native callback retains this exact HANDLE.
                 native::windows_acl::borrowed_private_descriptor(
                     unsafe { std::os::windows::io::BorrowedHandle::borrow_raw(raw as *mut _) },
@@ -81,6 +88,9 @@ impl Gate {
                     native::private_acl::Kind::File,
                 )?
             };
+            if record.role == ffi::SQLITE_PB_ROLE_MAIN {
+                evidence.validate_main_identity(observation.identity)?;
+            }
             if evidence
                 .members()
                 .iter()

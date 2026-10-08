@@ -16,6 +16,8 @@ pub(crate) mod changes;
 pub(crate) mod checkpoint;
 pub(crate) mod cursor;
 pub(crate) mod detail_reads;
+#[cfg(target_os = "macos")]
+pub(in crate::session) mod enrolled;
 pub(crate) mod fact_reads;
 mod fs_retry;
 pub(crate) mod generation;
@@ -27,6 +29,7 @@ pub(crate) mod locator;
 #[cfg(any(test, feature = "bench"))]
 pub(crate) mod oracle;
 pub(crate) mod product_contract;
+pub(crate) mod progress;
 pub(crate) mod review_summary;
 pub(crate) mod revisions;
 pub(crate) mod runtime;

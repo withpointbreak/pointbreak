@@ -131,7 +131,23 @@ impl StoreAuthorityLock {
     }
 
     pub(crate) fn try_acquire(store_root: &Path) -> Result<Option<Self>> {
-        let (key, path) = lock_key(store_root)?;
+        Self::try_acquire_inner(store_root, true)
+    }
+
+    /// Enrolled callers retain the physical root and require the already
+    /// provisioned authority leaf. No directory/leaf creation or symlink follow.
+    pub(in crate::session) fn try_acquire_existing(store_root: &Path) -> Result<Option<Self>> {
+        Self::try_acquire_inner(store_root, false)
+    }
+
+    fn try_acquire_inner(store_root: &Path, create: bool) -> Result<Option<Self>> {
+        let (key, path) = if create {
+            lock_key(store_root)?
+        } else {
+            let root = store_root.canonicalize().map_err(physical_error)?;
+            let path = root.join(STORE_AUTHORITY_LOCK_FILE);
+            ((std::thread::current().id(), path.clone()), path)
+        };
         #[cfg(any(test, feature = "longitudinal-counting"))]
         let attempt = begin_interaction_lock_attempt_v1(
             InteractionLockKindV1::Authority,
@@ -142,7 +158,12 @@ impl StoreAuthorityLock {
             attempt.record_reentrant_acquired();
             return Ok(Some(Self::new(key, state, true)));
         }
-        let file = match open_lock_file(&path) {
+        let opened = if create {
+            open_lock_file(&path)
+        } else {
+            open_identity_path(&path, false, false)
+        };
+        let file = match opened {
             Ok(file) => file,
             Err(error) => {
                 #[cfg(any(test, feature = "longitudinal-counting"))]

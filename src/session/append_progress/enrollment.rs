@@ -17,6 +17,9 @@ use crate::session::store::authority_lock::{PhysicalFileIdentity, StoreAuthority
 use crate::session::store::backend::{Journal, LocalJournal};
 use crate::session::store::capabilities::{self, SupportedReaderProfileV1};
 
+#[cfg(target_os = "macos")]
+mod projection;
+
 fn refuse(detail: impl std::fmt::Display) -> ShoreError {
     ShoreError::Message(format!("progress-initialization-required: {detail}"))
 }
@@ -133,6 +136,21 @@ pub(super) enum EvidenceStage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum EvidenceRole {
     Root,
+    CloneDirectory,
+    CloneLock,
+    CloneBinding,
+    RepositoryControls,
+    StoreConfiguration,
+    DerivedRoot,
+    Generations,
+    Staging,
+    Publications,
+    ProjectionGeneration,
+    GenerationDescriptor,
+    GenerationReaderReceipt,
+    GenerationPublication,
+    GenerationLease,
+    RebuildLease,
     Authority,
     Progress,
     Enrollment,
@@ -152,6 +170,13 @@ impl EvidenceRole {
         matches!(
             self,
             Self::Root
+                | Self::CloneDirectory
+                | Self::RepositoryControls
+                | Self::DerivedRoot
+                | Self::Generations
+                | Self::Staging
+                | Self::Publications
+                | Self::ProjectionGeneration
                 | Self::Artifacts
                 | Self::Notes
                 | Self::Objects
@@ -172,6 +197,7 @@ impl EvidenceRole {
                 | Self::Incarnations
                 | Self::Incarnation
                 | Self::Selector
+                | Self::ProjectionGeneration
         )
     }
 }
@@ -380,6 +406,24 @@ impl<'a> RetainedMember<'a> {
     pub(super) fn path(&self) -> &Path {
         &self.path
     }
+    pub(super) fn content_sha256(&self) -> Option<String> {
+        self.expected.as_deref().map(sha256_bytes_hex)
+    }
+    pub(super) fn progress_identity(&self) -> bool {
+        !matches!(
+            self.role,
+            EvidenceRole::DerivedRoot
+                | EvidenceRole::Generations
+                | EvidenceRole::Staging
+                | EvidenceRole::Publications
+                | EvidenceRole::ProjectionGeneration
+                | EvidenceRole::GenerationDescriptor
+                | EvidenceRole::GenerationReaderReceipt
+                | EvidenceRole::GenerationPublication
+                | EvidenceRole::GenerationLease
+                | EvidenceRole::RebuildLease
+        )
+    }
     /// Capture-time identity; absence is an observation, never a create permit.
     pub(super) fn identity(&self) -> Option<PhysicalFileIdentity> {
         match &self.presence {
@@ -410,14 +454,54 @@ impl<'a> RetainedMember<'a> {
 /// consumes it yet. Capture must precede every overlapping SQL ownership scope.
 pub(super) struct RetainedEvidence<'a> {
     _root: &'a NativeRootHandle,
-    _authority: &'a StoreAuthorityLock,
+    repository_root: Option<&'a NativeRootHandle>,
+    target: SqlTarget,
+    _authority: Option<&'a StoreAuthorityLock>,
     stage: EvidenceStage,
     inputs: InitialInputs,
     members: Vec<RetainedMember<'a>>,
     #[cfg(windows)]
     journal: std::cell::RefCell<crate::session::store::backend::ntfs_journal::RetainedJournal>,
 }
+
+enum SqlTarget {
+    Ledger,
+    CompletedLedger,
+    PublishedProjection(PathBuf),
+    StagingProjection {
+        path: PathBuf,
+        main: PhysicalFileIdentity,
+    },
+}
 impl<'a> RetainedEvidence<'a> {
+    /// N from a finished/never-opened neighboring scope remains live while the
+    /// next SQL owner runs. Include those actual identities in its callback set.
+    pub(super) fn retain_scope_witnesses(&mut self, other: &'a RetainedEvidence<'_>) -> Result<()> {
+        super::owner::require_quiescent()?;
+        other.validate_live()?;
+        for member in &other.members {
+            let Some(file) = member.file() else {
+                continue;
+            };
+            if self
+                .members
+                .iter()
+                // Equal inode identities do not replace the actual retained N
+                // descriptor. Skip only the very same borrowed File object.
+                .any(|m| m.file().is_some_and(|current| std::ptr::eq(current, file)))
+            {
+                continue;
+            }
+            let mut retained = RetainedMember::present(
+                member.role,
+                member.path.clone(),
+                EvidenceHandle::Borrowed(file),
+            )?;
+            retained.expected = member.expected.clone();
+            self.members.push(retained);
+        }
+        self.validate_live()
+    }
     pub(super) fn retirement_read_bytes(&self) -> Result<u64> {
         self.members.iter().try_fold(0u64, |total, member| {
             let bytes = member
@@ -440,13 +524,93 @@ impl<'a> RetainedEvidence<'a> {
         request: &str,
         actor: &str,
     ) -> Result<Self> {
+        Self::capture(root, Some(authority), stage, request, actor)
+    }
+
+    /// Capture N without acquiring, creating or borrowing a writer authority.
+    #[cfg(target_os = "macos")]
+    pub(super) fn capture_read(context: &'a super::read::ReadContext) -> Result<Self> {
+        let mut evidence = Self::capture(
+            &context.root,
+            None,
+            EvidenceStage::Selected,
+            &context.request,
+            &context.actor,
+        )?;
+        evidence.repository_root = Some(&context.repository_root);
+        evidence.target = SqlTarget::CompletedLedger;
+        for (path, file) in context
+            .clone
+            .retained_directories()
+            .chain(context.repository_root.retained_ancestors())
+        {
+            evidence.members.push(RetainedMember::present(
+                EvidenceRole::CloneDirectory,
+                path.to_path_buf(),
+                EvidenceHandle::Borrowed(file),
+            )?);
+        }
+        let repository = native::root_snapshot(&context.repository_root)?.canonical;
+        evidence.members.push(RetainedMember::present(
+            EvidenceRole::CloneDirectory,
+            repository.clone(),
+            EvidenceHandle::Borrowed(native::retained_root_file(&context.repository_root)?),
+        )?);
+        evidence.members.push(RetainedMember::present(
+            EvidenceRole::CloneLock,
+            context.common.join("pointbreak.link.lock"),
+            EvidenceHandle::Borrowed(context.clone.retained_lock()),
+        )?);
+        let mut binding = RetainedMember::capture(
+            EvidenceRole::CloneBinding,
+            context.common.join("pointbreak.link.json"),
+            None,
+        )?;
+        if binding.file().is_some() {
+            binding.expected = Some(binding.read_actual()?);
+        }
+        evidence.members.push(binding);
+        let controls = RetainedMember::capture(
+            EvidenceRole::RepositoryControls,
+            repository.join(".pointbreak"),
+            None,
+        )?;
+        let present = controls.file().is_some();
+        evidence.members.push(controls);
+        if present {
+            for leaf in ["store.json", "store.local.json"] {
+                let mut member = RetainedMember::capture(
+                    EvidenceRole::StoreConfiguration,
+                    repository.join(".pointbreak").join(leaf),
+                    None,
+                )?;
+                if member.file().is_some() {
+                    member.expected = Some(member.read_actual()?);
+                }
+                evidence.members.push(member);
+            }
+        }
+        context.validate_resolution()?;
+        evidence.validate_live()?;
+        Ok(evidence)
+    }
+
+    fn capture(
+        root: &'a NativeRootHandle,
+        authority: Option<&'a StoreAuthorityLock>,
+        stage: EvidenceStage,
+        request: &str,
+        actor: &str,
+    ) -> Result<Self> {
         super::owner::require_quiescent()?;
         if !id(request) {
             return Err(refuse("retained evidence request grammar"));
         }
         let snapshot = native::root_snapshot(root)?;
         let canonical = &snapshot.canonical;
-        authority.validate_physical_root(canonical)?;
+        if let Some(authority) = authority {
+            authority.validate_physical_root(canonical)?;
+        }
         let witness = ledger::root_witness(root)?;
         let mut members = vec![
             RetainedMember::present(
@@ -454,11 +618,19 @@ impl<'a> RetainedEvidence<'a> {
                 canonical.clone(),
                 EvidenceHandle::Borrowed(native::retained_root_file(root)?),
             )?,
-            RetainedMember::present(
-                EvidenceRole::Authority,
-                canonical.join("authority.writer.lock"),
-                EvidenceHandle::Borrowed(authority.retained_file()),
-            )?,
+            if let Some(authority) = authority {
+                RetainedMember::present(
+                    EvidenceRole::Authority,
+                    canonical.join("authority.writer.lock"),
+                    EvidenceHandle::Borrowed(authority.retained_file()),
+                )?
+            } else {
+                RetainedMember::capture(
+                    EvidenceRole::Authority,
+                    canonical.join("authority.writer.lock"),
+                    Some(true),
+                )?
+            },
         ];
         let progress = canonical.join("append-progress");
         let enrollment = progress.join("enrollment");
@@ -558,7 +730,9 @@ impl<'a> RetainedEvidence<'a> {
         if native::root_snapshot(root)? != snapshot {
             return Err(refuse("retained evidence root changed"));
         }
-        authority.validate_physical_root(canonical)?;
+        if let Some(authority) = authority {
+            authority.validate_physical_root(canonical)?;
+        }
         #[cfg(windows)]
         let journal = {
             let events = members
@@ -576,6 +750,8 @@ impl<'a> RetainedEvidence<'a> {
             #[cfg(windows)]
             journal,
             _root: root,
+            repository_root: None,
+            target: SqlTarget::Ledger,
             _authority: authority,
             stage,
             inputs,
@@ -590,8 +766,11 @@ impl<'a> RetainedEvidence<'a> {
     fn validate_members(&self, published: bool) -> Result<()> {
         use super::native::namespace::{Role, observe_private_worker};
         self._root.validate_live()?;
+        if let Some(repository) = self.repository_root {
+            repository.validate_live()?;
+        }
         for member in &self.members {
-            if member.role != EvidenceRole::Root {
+            if member.role != EvidenceRole::Root && member.path.parent().is_some() {
                 let parent = self
                     .members
                     .iter()
@@ -599,6 +778,21 @@ impl<'a> RetainedEvidence<'a> {
                     .and_then(RetainedMember::file)
                     .ok_or_else(|| refuse("unretained evidence parent"))?;
                 let role = match member.role {
+                    EvidenceRole::CloneDirectory => Role::Ancestor,
+                    EvidenceRole::CloneLock => Role::CloneLock,
+                    EvidenceRole::CloneBinding => Role::CloneBinding,
+                    EvidenceRole::RepositoryControls => Role::RepositoryControls,
+                    EvidenceRole::StoreConfiguration => Role::StoreConfiguration,
+                    EvidenceRole::DerivedRoot => Role::DerivedRoot,
+                    EvidenceRole::Generations => Role::Generations,
+                    EvidenceRole::Staging => Role::Staging,
+                    EvidenceRole::Publications => Role::Publications,
+                    EvidenceRole::ProjectionGeneration => Role::Generation,
+                    EvidenceRole::GenerationDescriptor => Role::GenerationDescriptor,
+                    EvidenceRole::GenerationReaderReceipt => Role::GenerationReaderReceipt,
+                    EvidenceRole::GenerationPublication => Role::GenerationPublication,
+                    EvidenceRole::GenerationLease => Role::GenerationLease,
+                    EvidenceRole::RebuildLease => Role::RebuildLease,
                     EvidenceRole::Authority => Role::Authority,
                     EvidenceRole::Progress => Role::Progress,
                     EvidenceRole::Enrollment => Role::Enrollment,
@@ -641,6 +835,7 @@ impl<'a> RetainedEvidence<'a> {
                         | EvidenceRole::Notes
                         | EvidenceRole::Objects
                         | EvidenceRole::Events
+                        | EvidenceRole::Publications
                 ) {
                     if !(published && member.role == EvidenceRole::Events)
                         && actual.modified != observation.modified
@@ -768,16 +963,65 @@ impl<'a> RetainedEvidence<'a> {
     pub(super) fn native_parent(&self) -> Result<&fs::File> {
         self.members
             .iter()
-            .find(|m| m.role == EvidenceRole::Incarnation)
+            .find(|m| {
+                m.role
+                    == if self.projection_target() {
+                        EvidenceRole::ProjectionGeneration
+                    } else {
+                        EvidenceRole::Incarnation
+                    }
+            })
             .and_then(RetainedMember::file)
             .ok_or_else(|| refuse("missing retained incarnation"))
+    }
+    pub(super) fn database(&self) -> Result<PathBuf> {
+        match &self.target {
+            SqlTarget::Ledger | SqlTarget::CompletedLedger => {
+                self.inputs.database(self.members[0].path())
+            }
+            SqlTarget::PublishedProjection(path) | SqlTarget::StagingProjection { path, .. } => {
+                Ok(path.clone())
+            }
+        }
+    }
+    pub(super) fn required_profile(&self) -> Option<u32> {
+        match self.target {
+            SqlTarget::Ledger => None,
+            SqlTarget::CompletedLedger | SqlTarget::PublishedProjection(_) => {
+                Some(libsqlite3_sys::SQLITE_PB_PROFILE_ORDINARY_READ_SNAPSHOT)
+            }
+            SqlTarget::StagingProjection { .. } => {
+                Some(libsqlite3_sys::SQLITE_PB_PROFILE_CREATE_INIT)
+            }
+        }
+    }
+    pub(super) fn projection_target(&self) -> bool {
+        matches!(
+            self.target,
+            SqlTarget::PublishedProjection(_) | SqlTarget::StagingProjection { .. }
+        )
+    }
+    pub(super) fn validate_main_identity(&self, identity: PhysicalFileIdentity) -> Result<()> {
+        if let SqlTarget::StagingProjection { main, .. } = self.target
+            && main != identity
+        {
+            return Err(refuse(
+                "fresh staging main replaced before native acquisition",
+            ));
+        }
+        Ok(())
     }
     pub(super) fn sync_directories(&self) -> Result<()> {
         self.validate_live()?;
         for member in self.members.iter().rev().filter(|m| {
             matches!(
                 m.role,
-                EvidenceRole::Progress | EvidenceRole::Incarnations | EvidenceRole::Incarnation
+                EvidenceRole::Progress
+                    | EvidenceRole::Incarnations
+                    | EvidenceRole::Incarnation
+                    | EvidenceRole::DerivedRoot
+                    | EvidenceRole::Staging
+                    | EvidenceRole::ProjectionGeneration
             )
         }) {
             if let Some(file) = member.file() {

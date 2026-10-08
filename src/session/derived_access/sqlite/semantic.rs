@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
 use super::locator::{SqliteLocator, SqliteLocatorError, read_locator_checkpoint};
@@ -49,7 +49,7 @@ use crate::session::workflow::{referenced_content_hashes_for_event, tag_completi
 use crate::session::{EventStore, parse_event_instant};
 
 const SEMANTIC_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-semantic.v1";
-const SEMANTIC_SCHEMA_VERSION: i64 = 9;
+const SEMANTIC_SCHEMA_VERSION: i64 = 10;
 const PRODUCT_HISTORY_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-history.v1";
 const PRODUCT_HISTORY_SCHEMA_VERSION: i64 = 5;
 
@@ -1494,6 +1494,14 @@ impl SqliteSemantic {
         initialize_schema: bool,
     ) -> Result<Self, SqliteSemanticError> {
         let connection = locator.validated_connection()?;
+        Self::initialize_on(&connection, initialize_schema)?;
+        Ok(Self { locator })
+    }
+
+    pub(super) fn initialize_on(
+        connection: &Connection,
+        initialize_schema: bool,
+    ) -> Result<(), SqliteSemanticError> {
         let locator_checkpoint = read_locator_checkpoint(&connection)?;
         let semantic_schema_exists = connection
             .query_row(
@@ -1576,14 +1584,14 @@ impl SqliteSemantic {
             }
             validate_meta(&connection, locator_checkpoint.applied)?;
             validate_product_history_meta(&connection, locator_checkpoint.applied)?;
-            return Ok(Self { locator });
+            return Ok(());
         }
         connection
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS semantic_meta (
                      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                      profile_id TEXT NOT NULL,
-                     schema_version INTEGER NOT NULL CHECK (schema_version = 9),
+                     schema_version INTEGER NOT NULL CHECK (schema_version = 10),
                      epoch INTEGER NOT NULL CHECK (epoch > 0),
                      applied_sequence INTEGER NOT NULL CHECK (applied_sequence >= 0)
                  ) STRICT;
@@ -2005,6 +2013,10 @@ impl SqliteSemantic {
                      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                      checkpoint_json TEXT NOT NULL
                          CHECK (length(checkpoint_json) > 0)
+                 ) STRICT;
+                 CREATE TABLE IF NOT EXISTS append_progress_binding (
+                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                     binding_json TEXT NOT NULL CHECK (length(binding_json) > 0)
                  ) STRICT;",
             )
             .map_err(|error| sqlite_error("create semantic schema", error))?;
@@ -2055,7 +2067,7 @@ impl SqliteSemantic {
             .map_err(|error| sqlite_error("initialize semantic state projection", error))?;
         validate_meta(&connection, locator_checkpoint.applied)?;
         validate_product_history_meta(&connection, locator_checkpoint.applied)?;
-        Ok(Self { locator })
+        Ok(())
     }
 
     /// Seed the publication-anchored live checkpoint while a generation is
@@ -2074,6 +2086,43 @@ impl SqliteSemantic {
             )
             .map_err(|error| sqlite_error("seed reader projection checkpoint", error))?;
         Ok(())
+    }
+
+    pub(crate) fn validate_enrolled_checkpoint_on(
+        connection: &Connection,
+        head: TruthCursor,
+    ) -> Result<(), SqliteSemanticError> {
+        validate_meta(connection, head)?;
+        validate_product_history_meta(connection, head)
+    }
+
+    /// Called only inside the fresh enrolled staging owner's fixed population.
+    /// No connection is opened here and neither row can be installed alone.
+    pub(crate) fn seed_enrolled_reader_checkpoint_on(
+        connection: &Connection,
+        checkpoint: &ReaderProjectionCheckpointV1,
+        binding: &crate::session::derived_access::progress::ProgressProjectionBindingV1,
+    ) -> Result<(), SqliteSemanticError> {
+        let checkpoint_json = canonical_checkpoint_json(checkpoint)?;
+        let binding_json = binding
+            .canonical_json()
+            .map_err(|error| SqliteSemanticError::Metadata(error.to_string()))?;
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| sqlite_error("begin enrolled publication seed", error))?;
+        transaction.execute(
+            "INSERT INTO reader_projection_checkpoint (singleton, checkpoint_json) VALUES (1, ?1)",
+            [checkpoint_json],
+        ).map_err(|error| sqlite_error("seed enrolled reader checkpoint", error))?;
+        transaction
+            .execute(
+                "INSERT INTO append_progress_binding (singleton, binding_json) VALUES (1, ?1)",
+                [binding_json],
+            )
+            .map_err(|error| sqlite_error("seed enrolled progress binding", error))?;
+        transaction
+            .commit()
+            .map_err(|error| sqlite_error("commit enrolled publication seed", error))
     }
 
     pub(crate) fn apply_delta(
@@ -2147,9 +2196,86 @@ impl SqliteSemantic {
             .map_or(delta.after, |receipt| receipt.cursor);
         let proposal_summary_conflicts =
             self.proposal_summary_conflict_updates(delta.after, product_history_facts)?;
-        let result = self
-            .locator
-            .apply_delta_with(delta, locator_rows, |transaction| {
+        let connection = self.locator.validated_connection()?;
+        Self::apply_delta_on(
+            &connection,
+            delta,
+            locator_rows,
+            semantic_facts,
+            product_history_facts,
+            &proposal_summary_conflicts,
+            inject_failure,
+        )?;
+        Ok(applied)
+    }
+
+    /// Fresh full rebuild only. It never hydrates a carrier or opens a second
+    /// connection while the native owner is live.
+    pub(crate) fn populate_enrolled_on(
+        connection: &Connection,
+        head: TruthCursor,
+        entries: &[super::cursor::BootstrapPopulationEntry],
+    ) -> Result<(), crate::session::derived_access::service::DerivedAccessServiceError> {
+        use crate::session::derived_access::service::DerivedAccessService;
+        SqliteLocator::initialize_on(connection)?;
+        Self::initialize_on(connection, true)?;
+        let delta = CursorDelta {
+            after: TruthCursor::new(head.epoch, 0),
+            observed_head: head,
+            complete: true,
+            receipts: entries.iter().map(|entry| entry.receipt.clone()).collect(),
+        };
+        let (rows, facts, history) =
+            DerivedAccessService::derived_rows_from_bootstrap(&delta, entries)?;
+        let mut baselines = BTreeMap::<RevisionRefV1, Option<String>>::new();
+        let mut conflicts = BTreeMap::new();
+        for proposal in history
+            .iter()
+            .filter_map(|fact| fact.proposal_summary.as_ref())
+        {
+            match baselines.get(&proposal.revision) {
+                None => {
+                    baselines.insert(proposal.revision.clone(), proposal.summary.clone());
+                }
+                Some(summary) if summary != &proposal.summary => {
+                    conflicts
+                        .entry(proposal.revision.clone())
+                        .or_insert(proposal.sequence);
+                }
+                Some(_) => {}
+            }
+        }
+        let conflicts = conflicts
+            .into_iter()
+            .map(
+                |(revision, first_conflict_sequence)| ProposalSummaryConflictUpdate {
+                    revision,
+                    first_conflict_sequence,
+                },
+            )
+            .collect::<Vec<_>>();
+        Self::apply_delta_on(
+            connection, &delta, &rows, &facts, &history, &conflicts, false,
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_delta_on(
+        connection: &Connection,
+        delta: &CursorDelta,
+        locator_rows: &[LocatorRow],
+        semantic_facts: &[SemanticFact],
+        product_history_facts: &[ProductHistoryFact],
+        proposal_summary_conflicts: &[ProposalSummaryConflictUpdate],
+        inject_failure: bool,
+    ) -> Result<(), SqliteSemanticError> {
+        let applied = delta
+            .receipts
+            .last()
+            .map_or(delta.after, |receipt| receipt.cursor);
+        let result =
+            SqliteLocator::apply_delta_on(connection, delta, locator_rows, |transaction| {
                 insert_facts(transaction, semantic_facts)?;
                 insert_product_history_facts(transaction, product_history_facts)?;
                 insert_proposal_summary_conflicts(transaction, &proposal_summary_conflicts)?;
@@ -2244,7 +2370,7 @@ impl SqliteSemantic {
                 Ok(())
             });
         result.map_err(SqliteSemanticError::from)?;
-        Ok(applied)
+        Ok(())
     }
 
     /// Compare only proposal groups touched by this delta. The sparse table
@@ -2455,6 +2581,102 @@ impl SqliteSemantic {
         )?))
     }
 
+    /// Rebuild verification uses bytes from the independent authority census.
+    /// No file is opened here while the staging owner's Q roles are live.
+    pub(crate) fn validate_enrolled_materialization_on(
+        connection: &Connection,
+        observed: TruthCursor,
+        entries: &[super::cursor::BootstrapPopulationEntry],
+    ) -> Result<SemanticSnapshot, SqliteSemanticError> {
+        let checkpoint = read_locator_checkpoint(connection)?;
+        validate_meta(connection, checkpoint.applied)?;
+        if checkpoint.applied != observed || entries.len() as u64 != observed.sequence {
+            return Err(SqliteSemanticError::Metadata(
+                "enrolled coverage mismatch".into(),
+            ));
+        }
+        let state = query_materialized_state(connection)?;
+        let mut facts = query_materialized_compact_facts(
+            connection,
+            observed.epoch,
+            observed.sequence,
+            None,
+            MaterializedFactFamilies::AllExceptObservations,
+        )?;
+        for fact in &mut facts {
+            crate::session::append_progress::data_work_checkpoint()
+                .map_err(|error| SqliteSemanticError::Metadata(error.to_string()))?;
+            let entry = fact
+                .cursor
+                .sequence
+                .checked_sub(1)
+                .and_then(|n| usize::try_from(n).ok())
+                .and_then(|n| entries.get(n))
+                .ok_or_else(|| {
+                    SqliteSemanticError::Metadata("invalid materialized sequence".into())
+                })?;
+            if fact.logical_reread_key != sha256_bytes_hex(entry.event.idempotency_key.as_bytes()) {
+                return Err(SqliteSemanticError::CarrierMismatch(fact.cursor));
+            }
+            fact.logical_reread_key = entry.event.idempotency_key.clone();
+            let expected = SemanticFact::from_event(
+                fact.cursor,
+                &entry.event,
+                entry.receipt.validation_witness.clone(),
+            )?;
+            if *fact != expected {
+                return Err(SqliteSemanticError::CarrierMismatch(fact.cursor));
+            }
+        }
+        let actual = SemanticSnapshot::from_materialized(observed, state, &facts)?;
+        let events = entries
+            .iter()
+            .map(|entry| entry.event.clone())
+            .collect::<Vec<_>>();
+        let expected = SemanticSnapshot::materialized_oracle_from_events(observed, &events)?;
+        crate::session::append_progress::data_work_checkpoint()
+            .map_err(|error| SqliteSemanticError::Metadata(error.to_string()))?;
+        if actual != expected {
+            return Err(SqliteSemanticError::Metadata(
+                "enrolled strict replay mismatch".into(),
+            ));
+        }
+        for query in [
+            "SELECT count(*) FROM cursor_receipt",
+            "SELECT count(*) FROM locator_event",
+            "SELECT count(*) FROM semantic_event_fact",
+        ] {
+            let count: i64 = connection
+                .query_row(query, [], |row| row.get(0))
+                .map_err(|error| sqlite_error("verify enrolled coverage", error))?;
+            if u64::try_from(count).ok() != Some(observed.sequence) {
+                return Err(SqliteSemanticError::Metadata(
+                    "enrolled row coverage mismatch".into(),
+                ));
+            }
+        }
+        let LocatorRead::Ready(changes) =
+            Self::materialized_change_projection_on(connection, observed)?
+        else {
+            return Err(SqliteSemanticError::Metadata(
+                "enrolled Change checkpoint behind".into(),
+            ));
+        };
+        let conflicts = crate::session::derived_access::verification::strict_enrolled_proposal_summary_conflicts(&events)
+            .map_err(|error| SqliteSemanticError::Metadata(error.to_string()))?;
+        if changes.projection != actual.changes
+            || changes.proposal_summary_conflict_sequences != conflicts
+            || changes.document_projection
+                != crate::session::project_change_documents(&events)
+                    .map_err(|error| SqliteSemanticError::Metadata(error.to_string()))?
+        {
+            return Err(SqliteSemanticError::Metadata(
+                "enrolled Change replay mismatch".into(),
+            ));
+        }
+        Ok(actual)
+    }
+
     pub(crate) fn materialized_attention_snapshot(
         &self,
         observed: TruthCursor,
@@ -2612,6 +2834,13 @@ impl SqliteSemantic {
         observed: TruthCursor,
     ) -> Result<LocatorRead<MaterializedChangeProjection>, SqliteSemanticError> {
         let connection = self.locator.validated_connection()?;
+        Self::materialized_change_projection_on(&connection, observed)
+    }
+
+    pub(crate) fn materialized_change_projection_on(
+        connection: &Connection,
+        observed: TruthCursor,
+    ) -> Result<LocatorRead<MaterializedChangeProjection>, SqliteSemanticError> {
         let checkpoint = read_locator_checkpoint(&connection)?;
         validate_meta(&connection, checkpoint.applied)?;
         if checkpoint.applied.epoch != observed.epoch

@@ -178,7 +178,68 @@ impl SqliteLocator {
                 delta.receipts.len()
             )));
         }
-        let mut connection = self.validated_connection()?;
+        let connection = self.validated_connection()?;
+        Self::apply_delta_on(&connection, delta, rows, apply_semantic)
+    }
+
+    pub(crate) fn validate_enrolled_rows_on(
+        connection: &Connection,
+        entries: &[super::cursor::BootstrapPopulationEntry],
+    ) -> Result<(), SqliteLocatorError> {
+        let (rows, _) =
+            query_locator_rows(connection, &locator_select("ORDER BY locator.sequence"), [])?;
+        if rows.len() != entries.len() {
+            return Err(SqliteLocatorError::Metadata(
+                "enrolled locator coverage".into(),
+            ));
+        }
+        for (mut row, entry) in rows.into_iter().zip(entries) {
+            crate::session::append_progress::data_work_checkpoint()
+                .map_err(|error| SqliteLocatorError::Metadata(error.to_string()))?;
+            if row.logical_reread_key != sha256_bytes_hex(entry.event.idempotency_key.as_bytes()) {
+                return Err(SqliteLocatorError::CarrierMismatch(row.cursor));
+            }
+            row.logical_reread_key = entry.event.idempotency_key.clone();
+            let expected = LocatorRow::from_event(
+                entry.receipt.cursor,
+                &entry.event,
+                entry.receipt.validation_witness.clone(),
+            )?;
+            if row != expected {
+                return Err(SqliteLocatorError::CarrierMismatch(row.cursor));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn initialize_on(connection: &Connection) -> Result<(), SqliteLocatorError> {
+        let cursor = validate_cursor_metadata(connection)?;
+        initialize_locator_schema(connection, &cursor)?;
+        validate_locator_checkpoint(connection, &cursor)?;
+        Ok(())
+    }
+
+    pub(crate) fn validate_enrolled_checkpoint_on(
+        connection: &Connection,
+    ) -> Result<(), SqliteLocatorError> {
+        let cursor = validate_cursor_metadata(connection)?;
+        validate_locator_checkpoint(connection, &cursor)?;
+        Ok(())
+    }
+
+    pub(super) fn apply_delta_on(
+        connection: &Connection,
+        delta: &CursorDelta,
+        rows: &[LocatorRow],
+        apply_semantic: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<(), SqliteLocatorError>,
+    ) -> Result<LocatorCheckpoint, SqliteLocatorError> {
+        if rows.len() != delta.receipts.len() {
+            return Err(SqliteLocatorError::Delta(format!(
+                "{} locator rows for {} cursor receipts",
+                rows.len(),
+                delta.receipts.len()
+            )));
+        }
         let checkpoint = read_locator_checkpoint(&connection)?;
         if checkpoint.applied != delta.after {
             return Err(SqliteLocatorError::Delta(format!(
@@ -215,9 +276,9 @@ impl SqliteLocator {
             )));
         }
 
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| sqlite_error("begin locator delta", error))?;
+        let transaction =
+            rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)
+                .map_err(|error| sqlite_error("begin locator delta", error))?;
         for row in rows {
             insert_locator_row(&transaction, row)?;
         }

@@ -70,6 +70,7 @@ pub(crate) struct PublicationValidationSnapshot {
     pub(crate) authority: TruthAuthoritySnapshot,
     pub(crate) locator_applied: TruthCursor,
     pub(crate) reader_projection_checkpoint: Option<ReaderProjectionCheckpointV1>,
+    pub(crate) progress_binding: Option<super::progress::ProgressProjectionBindingV1>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -318,7 +319,7 @@ impl DerivedAccessService {
         Self::decode_publication_validation_snapshot(raw)
     }
 
-    fn decode_publication_validation_snapshot(
+    pub(super) fn decode_publication_validation_snapshot(
         raw: super::sqlite::PublishedValidationSnapshotRaw,
     ) -> Result<PublicationValidationSnapshot, DerivedAccessServiceError> {
         let reader_projection_checkpoint = raw
@@ -332,6 +333,12 @@ impl DerivedAccessService {
             authority: raw.authority,
             locator_applied: raw.locator_applied,
             reader_projection_checkpoint,
+            progress_binding: raw
+                .progress_binding_json
+                .as_deref()
+                .map(super::progress::ProgressProjectionBindingV1::decode)
+                .transpose()
+                .map_err(|error| SqliteSemanticError::Metadata(error.to_string()))?,
         })
     }
 
@@ -453,7 +460,7 @@ impl DerivedAccessService {
                 receipts,
             };
             let (rows, semantic_facts, product_history_facts) =
-                self.derived_rows_from_bootstrap(&delta, chunk)?;
+                Self::derived_rows_from_bootstrap(&delta, chunk)?;
             applied = self.semantic.apply_delta(
                 &delta,
                 &rows,
@@ -912,8 +919,7 @@ impl DerivedAccessService {
         Ok((locator_rows, semantic_facts, product_history_facts))
     }
 
-    fn derived_rows_from_bootstrap(
-        &self,
+    pub(super) fn derived_rows_from_bootstrap(
         delta: &CursorDelta,
         entries: &[BootstrapPopulationEntry],
     ) -> Result<DerivedRows, DerivedAccessServiceError> {
@@ -928,6 +934,8 @@ impl DerivedAccessService {
         let mut semantic_facts = Vec::with_capacity(entries.len());
         let mut product_history_facts = Vec::with_capacity(entries.len());
         for (receipt, entry) in delta.receipts.iter().zip(entries) {
+            crate::session::append_progress::data_work_checkpoint()
+                .map_err(|error| DerivedAccessServiceError::Truth(error.to_string()))?;
             if receipt != &entry.receipt {
                 return Err(DerivedAccessServiceError::Truth(format!(
                     "bootstrap receipt drift at {:?}",

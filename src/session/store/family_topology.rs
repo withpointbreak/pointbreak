@@ -51,6 +51,15 @@ pub(in crate::session) struct CloneBindingGuard {
 )]
 impl CloneBindingGuard {
     pub(in crate::session) fn try_acquire(common_dir: &Path) -> Result<Option<Self>> {
+        Self::acquire(common_dir, true)
+    }
+
+    /// Reader admission requires the stable leaf provisioned by an authorized writer.
+    pub(in crate::session) fn try_acquire_existing(common_dir: &Path) -> Result<Option<Self>> {
+        Self::acquire(common_dir, false)
+    }
+
+    fn acquire(common_dir: &Path, create: bool) -> Result<Option<Self>> {
         let (common_dir, directories) = capture_directories(common_dir)?;
         let key = directories
             .last()
@@ -59,7 +68,7 @@ impl CloneBindingGuard {
             .parts();
         let lock_path = CommonDirPaths::from_common_dir(common_dir.as_path()).binding_lock();
         // First use may create only the stable lock leaf in an observed parent.
-        let lock = open_identity_path(&lock_path, false, true)?;
+        let lock = open_identity_path(&lock_path, false, create)?;
         let lock_identity = file_identity(&lock)?;
         ensure_supported_filesystem(&lock)?;
 
@@ -90,6 +99,17 @@ impl CloneBindingGuard {
                 lock_path.display()
             ))),
         }
+    }
+
+    /// Borrow N from the actual held admission, only for synchronous identity checks.
+    pub(in crate::session) fn retained_directories(&self) -> impl Iterator<Item = (&Path, &File)> {
+        self.directories
+            .iter()
+            .map(|w| (w.path.as_path(), &w.handle))
+    }
+
+    pub(in crate::session) fn retained_lock(&self) -> &File {
+        &self.lock
     }
 
     pub(in crate::session) fn validate(&self, common_dir: &Path) -> Result<()> {

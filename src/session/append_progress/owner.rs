@@ -78,6 +78,42 @@ pub(super) fn terminal() -> ! {
     std::process::abort()
 }
 
+thread_local! {
+    static DATA_COMMAND: Cell<bool> = const { Cell::new(false) };
+}
+
+#[doc(hidden)]
+pub struct OwnedDataCommand {
+    _permit: OwnedProcessPermit,
+}
+impl Drop for OwnedDataCommand {
+    fn drop(&mut self) {
+        DATA_COMMAND.with(|active| active.set(false));
+    }
+}
+
+/// Enter the binary-owned data executor before creating services or worker state.
+///
+/// # Safety
+/// The caller owns the entire disposable process and must run data operations
+/// serially on this thread until the returned non-Send owner is dropped. No
+/// embedding host or sibling data operation may require continued execution.
+/// The terminal callback exits immediately without unwinding; arguments,
+/// environment, a PID and a timeout do not establish this contract.
+#[doc(hidden)]
+pub unsafe fn enter_owned_data_command(
+    terminate: fn(OwnedProcessFailure) -> !,
+) -> Result<OwnedDataCommand> {
+    // SAFETY: inherited from this function's binary-only lifetime contract.
+    let permit = unsafe { OwnedProcessPermit::enter(terminate) }?;
+    DATA_COMMAND.with(|active| active.set(true));
+    Ok(OwnedDataCommand { _permit: permit })
+}
+
+pub(in crate::session) fn data_selected() -> bool {
+    DATA_COMMAND.with(Cell::get)
+}
+
 /// Private raw-root foundation input. Constructing it grants no native authority.
 #[doc(hidden)]
 pub struct OwnedProcessBootstrap {

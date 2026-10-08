@@ -10,6 +10,24 @@ use super::{BorrowedMetadata, Result, ShoreError};
 #[derive(Clone, Copy, Debug)]
 pub(in crate::session::append_progress) enum Role {
     Ancestor,
+    CloneLock,
+    CloneBinding,
+    RepositoryControls,
+    StoreConfiguration,
+    DerivedRoot,
+    Generations,
+    Staging,
+    Publications,
+    Generation,
+    GenerationDescriptor,
+    GenerationReaderReceipt,
+    GenerationPublication,
+    GenerationLease,
+    RebuildLease,
+    ProjectionMain,
+    ProjectionWal,
+    ProjectionShm,
+    ProjectionJournal,
     Authority,
     Progress,
     Enrollment,
@@ -33,6 +51,12 @@ impl Role {
         matches!(
             self,
             Self::Ancestor
+                | Self::RepositoryControls
+                | Self::DerivedRoot
+                | Self::Generations
+                | Self::Staging
+                | Self::Publications
+                | Self::Generation
                 | Self::Progress
                 | Self::Enrollment
                 | Self::Incarnations
@@ -61,6 +85,82 @@ impl Role {
                 }
                 return Ok(name);
             }
+            Self::CloneLock => "pointbreak.link.lock",
+            Self::CloneBinding => "pointbreak.link.json",
+            Self::RepositoryControls => ".pointbreak",
+            Self::StoreConfiguration => {
+                return if matches!(name, "store.json" | "store.local.json") {
+                    Ok(name)
+                } else {
+                    Err(invalid())
+                };
+            }
+            Self::DerivedRoot => {
+                return if matches!(name, "derived" | ".pointbreak-derived") {
+                    Ok(name)
+                } else {
+                    Err(invalid())
+                };
+            }
+            Self::Generations => "generations",
+            Self::Staging => "staging",
+            Self::Publications => "publications",
+            Self::Generation => {
+                return if !name.is_empty()
+                    && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                {
+                    Ok(name)
+                } else {
+                    Err(invalid())
+                };
+            }
+            Self::GenerationDescriptor => "generation.json",
+            Self::GenerationReaderReceipt => "change-reader-profile.json",
+            Self::GenerationPublication => {
+                let token = name.strip_suffix(".json").ok_or_else(invalid)?;
+                let (sequence, generation) = token.split_once('-').ok_or_else(invalid)?;
+                return if sequence.len() == 20
+                    && sequence.bytes().all(|b| b.is_ascii_digit())
+                    && !generation.is_empty()
+                    && generation
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                {
+                    Ok(name)
+                } else {
+                    Err(invalid())
+                };
+            }
+            Self::GenerationLease => {
+                let token = name
+                    .strip_prefix("derived.generation-lease-")
+                    .or_else(|| name.strip_prefix(".pointbreak-derived.generation-lease-"))
+                    .and_then(|n| n.strip_suffix(".lock"))
+                    .ok_or_else(invalid)?;
+                return if !token.is_empty()
+                    && token
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                {
+                    Ok(name)
+                } else {
+                    Err(invalid())
+                };
+            }
+            Self::RebuildLease => {
+                return if matches!(
+                    name,
+                    "derived.rebuild.lock" | ".pointbreak-derived.rebuild.lock"
+                ) {
+                    Ok(name)
+                } else {
+                    Err(invalid())
+                };
+            }
+            Self::ProjectionMain => "cursor.sqlite3",
+            Self::ProjectionWal => "cursor.sqlite3-wal",
+            Self::ProjectionShm => "cursor.sqlite3-shm",
+            Self::ProjectionJournal => "cursor.sqlite3-journal",
             Self::Authority => "authority.writer.lock",
             Self::Progress => "append-progress",
             Self::Enrollment => "enrollment",

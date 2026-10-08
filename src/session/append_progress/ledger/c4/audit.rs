@@ -53,6 +53,19 @@ pub(super) fn read_prefix(
     if snapshot.state.phase.completed() {
         return Err(fail("completed state needs no audit"));
     }
+    read_prefix_inner(db, inputs, snapshot, native, false).map(|(prefix, _)| prefix)
+}
+
+fn read_prefix_inner(
+    db: &Connection,
+    inputs: &InitialInputs,
+    snapshot: &Snapshot,
+    native: &JournalChangeStamp,
+    completed_rebuild: bool,
+) -> Result<(ValidatedPrefix, Vec<Receipt>)> {
+    if snapshot.state.phase.completed() != completed_rebuild {
+        return Err(fail("full-prefix operation phase mismatch"));
+    }
     // Inspect cardinality without a count query or allocating arbitrary fields.
     for table in ["meta", "current"] {
         let mut query = db
@@ -106,6 +119,7 @@ pub(super) fn read_prefix(
     }
     let mut head = 0i64;
     let mut used_attempts = BTreeSet::new();
+    let mut receipts = Vec::new();
     let mut query = db.prepare("SELECT sequence,key,stored_sha256,stored_length,original_attempt FROM receipt ORDER BY sequence").map_err(sql)?;
     let mut rows = query.query([]).map_err(sql)?;
     while let Some(row) = rows.next().map_err(sql)? {
@@ -133,23 +147,31 @@ pub(super) fn read_prefix(
             return Err(fail("prefix gap, excess, duplicate or attempt mismatch"));
         }
         prefix = chain(&prefix, &receipt)?;
+        if completed_rebuild {
+            receipts.push(receipt);
+        }
         budget::check()?;
     }
     if head != snapshot.state.head || prefix != snapshot.state.prefix {
         return Err(fail("full prefix does not match metadata"));
     }
-    let o = snapshot.state.obligation()?;
-    if attempts.get(&o.attempt_id)
-        != Some(&(o.key.clone(), o.expected_sha256.clone(), o.expected_length))
-        || used_attempts.contains(&o.attempt_id)
-        || expected.contains_key(&sha256_bytes_hex(o.key.as_bytes()))
-    {
-        return Err(fail("current obligation conflicts with complete prefix"));
+    if !completed_rebuild {
+        let o = snapshot.state.obligation()?;
+        if attempts.get(&o.attempt_id)
+            != Some(&(o.key.clone(), o.expected_sha256.clone(), o.expected_length))
+            || used_attempts.contains(&o.attempt_id)
+            || expected.contains_key(&sha256_bytes_hex(o.key.as_bytes()))
+        {
+            return Err(fail("current obligation conflicts with complete prefix"));
+        }
     }
-    Ok(ValidatedPrefix {
-        expected,
-        native: native.clone(),
-    })
+    Ok((
+        ValidatedPrefix {
+            expected,
+            native: native.clone(),
+        },
+        receipts,
+    ))
 }
 
 /// No constructor is exposed outside this closed audit implementation. A value
@@ -159,6 +181,103 @@ impl JournalAdmission {
     pub(crate) fn checkpoint(&self) -> Result<()> {
         budget::check()
     }
+}
+
+#[cfg(target_os = "macos")]
+pub(in crate::session) struct RebuildEvent {
+    pub(in crate::session) event: ShoreEvent,
+    pub(in crate::session) validation_witness: String,
+    pub(in crate::session) carrier_bytes: u64,
+}
+
+#[cfg(target_os = "macos")]
+pub(in crate::session) struct CompletedRebuildInputs {
+    pub(in crate::session) fence: crate::session::append_progress::ProgressReadFence,
+    pub(in crate::session) events: Vec<RebuildEvent>,
+    pub(in crate::session) inspection: crate::session::store::capabilities::JournalInspection,
+}
+
+/// The explicit rebuild's O(H) read uses profile7 and never settles an obligation.
+/// Native authority is read independently, then matched to the complete prefix.
+#[cfg(target_os = "macos")]
+pub(in crate::session) fn completed_rebuild_inputs(
+    context: &crate::session::append_progress::ReadContext,
+    layout: &crate::session::derived_access::generation::GenerationLayout,
+    authority: &StoreAuthorityLock,
+    rebuild: &crate::session::derived_access::generation::RebuildLease,
+) -> Result<CompletedRebuildInputs> {
+    if !budget::active() {
+        return Err(fail("completed rebuild requires invocation budget"));
+    }
+    let evidence = RetainedEvidence::capture_rebuild_read(context, layout, authority, rebuild)?;
+    let (fence, (prefix, receipts)) = completed_scope(evidence, |db, snapshot, inputs| {
+        read_prefix_inner(db, inputs, snapshot, &snapshot.state.native, true)
+    })?;
+    // All SQL is explicitly finished before opening native event/content N.
+    let mut inventory = Inventory::scan_inner(context.store_dir(), true)?;
+    if inventory.stored != prefix.expected {
+        return Err(fail(
+            "completed progress prefix differs from native authority",
+        ));
+    }
+    let admission = JournalAdmission(());
+    let inspection = crate::session::store::capabilities::route_audited_progress_entries(
+        std::mem::take(&mut inventory.journal),
+        &admission,
+    )?;
+    if !matches!(
+        inspection.status,
+        crate::session::store::capabilities::StoreCapabilityStatus::Ready { .. }
+    ) || inspection.minimum_reader_profile.as_deref()
+        != Some("review_change_revision_progress_v1")
+        || inspection.cursor.event_count != fence.head()
+    {
+        return Err(fail("completed rebuild capability/cursor binding"));
+    }
+    content::validate_events(&inventory, inspection.event_entries.clone())?;
+    let mut entries = inspection
+        .event_entries
+        .iter()
+        .map(|entry| (entry.key_digest.clone(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let mut events = Vec::with_capacity(receipts.len());
+    for receipt in receipts {
+        let key = sha256_bytes_hex(receipt.key.as_bytes());
+        let entry = entries
+            .remove(&key)
+            .ok_or_else(|| fail("progress receipt has no native event"))?;
+        if sha256_bytes_hex(&entry.bytes) != receipt.stored_sha256
+            || i64::try_from(entry.bytes.len()).ok() != Some(receipt.stored_length)
+        {
+            return Err(fail("progress receipt/native byte mismatch"));
+        }
+        events.push(RebuildEvent {
+            event: EventStore::decode_qualification_entry(
+                entry.key_digest.clone(),
+                entry.bytes.clone(),
+            )?,
+            validation_witness: receipt.stored_sha256,
+            carrier_bytes: receipt.stored_length as u64,
+        });
+    }
+    if !entries.is_empty() {
+        return Err(fail("unreceipted native domain event"));
+    }
+    inventory.validate()?;
+    drop(entries);
+    drop(inventory);
+    authority.validate_physical_root(context.store_dir())?;
+    let after = observe_completed(RetainedEvidence::capture_rebuild_read(
+        context, layout, authority, rebuild,
+    )?)?;
+    if after != fence {
+        return Err(fail("authority changed during completed rebuild census"));
+    }
+    Ok(CompletedRebuildInputs {
+        fence,
+        events,
+        inspection,
+    })
 }
 
 struct Witness {
@@ -242,6 +361,9 @@ impl Inventory {
         Ok(())
     }
     fn scan(root: &Path) -> Result<Self> {
+        Self::scan_inner(root, false)
+    }
+    fn scan_inner(root: &Path, completed_rebuild: bool) -> Result<Self> {
         let mut result = Self::new();
         result.hold(root, true)?;
         for entry in std::fs::read_dir(root).map_err(io)? {
@@ -259,6 +381,36 @@ impl Inventory {
                     result.hold(&path, false)?
                 }
                 "derived" => result.hold(&path, true)?,
+                // Real Change commands retain plans/checkpoints outside Journal
+                // authority. Admit only the closed existing filenames and keep
+                // their physical witnesses; never replay them as events.
+                "operations" if completed_rebuild => {
+                    result.hold(&path, true)?;
+                    for child in std::fs::read_dir(&path).map_err(io)? {
+                        budget::visit()?;
+                        let child = child.map_err(io)?;
+                        let name = child.file_name();
+                        let name = name.to_str().ok_or_else(|| fail("operation filename"))?;
+                        let stem = name
+                            .strip_suffix(".capture.json")
+                            .or_else(|| name.strip_suffix(".json"));
+                        if !stem.is_some_and(hash64) {
+                            return Err(fail("unknown operation metadata"));
+                        }
+                        result.hold(&child.path(), false)?;
+                    }
+                }
+                name if completed_rebuild
+                    && name
+                        .strip_prefix("derived.generation-lease-")
+                        .and_then(|n| n.strip_suffix(".lock"))
+                        .is_some_and(|n| {
+                            !n.is_empty()
+                                && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                        }) =>
+                {
+                    result.hold(&path, false)?
+                }
                 // SQL and operational metadata have their own exact native and
                 // schema gates. Their contents never become Journal authority.
                 "append-progress" => result.scan_operational(&path, 0)?,

@@ -30,7 +30,7 @@ mod history;
 mod id_resolver;
 mod identity;
 mod input_request;
-mod inspect;
+pub(crate) mod inspect;
 mod json;
 mod key;
 pub(crate) mod legacy_admission;

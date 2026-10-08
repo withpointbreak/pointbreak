@@ -495,6 +495,74 @@ fn load(db: &Connection, inputs: &InitialInputs, command: &Command) -> Result<Sn
         attempt_exists,
     })
 }
+/// Completed observation only: the native reader owns an explicit transaction.
+/// This deliberately does not call execute(), reconcile(), or any writer path.
+pub(in crate::session::append_progress) fn observe_completed(
+    evidence: RetainedEvidence<'_>,
+) -> Result<super::super::read::ProgressReadFence> {
+    completed_scope(evidence, |_, _, _| Ok(())).map(|(fence, ())| fence)
+}
+
+fn completed_scope<T>(
+    evidence: RetainedEvidence<'_>,
+    inspect: impl FnOnce(&Connection, &Snapshot, &InitialInputs) -> Result<T>,
+) -> Result<(super::super::read::ProgressReadFence, T)> {
+    evidence.validate_live()?;
+    let anchor = evidence.journal_stamp()?;
+    let reserve = budget::reserve_retirement(evidence.retirement_read_bytes()?)?;
+    let permit = LiveSqlPermit(super::super::owner::SqlPermit::enter()?);
+    let mut owner = NativeSqlOwner::prepare(evidence, ScopeProfile::OrdinaryRead);
+    let result = owner.open_native(&permit).and_then(|()| {
+        owner.with_connection(&permit, |db, context| {
+            context.gate(db, &anchor)?;
+            let snapshot = load(
+                db,
+                context.evidence.inputs(),
+                &Command {
+                    full_prefix: false,
+                    key: None,
+                    attempt: None,
+                    change: None,
+                    required_native: None,
+                },
+            )?;
+            if !snapshot.state.phase.completed() {
+                return Err(fail("recovery-required: progress obligation is pending"));
+            }
+            context.gate(db, &snapshot.state.native)?;
+            let inspected = inspect(db, &snapshot, context.evidence.inputs())?;
+            context.gate(db, &snapshot.state.native)?;
+            let state = snapshot.state;
+            let state_sha256 = sha256_json_hex(&json!({
+                "binding": state.binding, "head": state.head, "prefix": state.prefix,
+                "native": state.native, "phase": state.phase.text(),
+                "obligation": state.obligation, "proof": state.proof,
+            }))?;
+            let fence = super::super::read::ProgressReadFence::completed(
+                &context.evidence,
+                state.head,
+                state.prefix,
+                state.native,
+                state_sha256,
+            )?;
+            Ok((fence, inspected))
+        })
+    });
+    // Both success and failure retire through exactly the same owned finish.
+    let finished = owner.finish();
+    drop(permit);
+    drop(reserve);
+    let finished = finished?;
+    finished.evidence().validate_live()?;
+    accept_check(&anchor, &finished.evidence().journal_check(&anchor)?)?;
+    let (fence, inspected) = result?;
+    accept_check(
+        fence.native_stamp(),
+        &finished.evidence().journal_check(fence.native_stamp())?,
+    )?;
+    Ok((fence, inspected))
+}
+
 fn canonical_option<T: Serialize>(v: &Option<T>) -> Result<Option<String>> {
     v.as_ref()
         .map(|v| text(&serde_json::to_value(v)?))

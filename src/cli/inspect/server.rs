@@ -238,7 +238,7 @@ pub(super) struct ChangeReaderCache<
 }
 
 impl<Presentation, Timeline> ChangeReaderCache<Presentation, Timeline> {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             slot: Mutex::new(None),
             timeline_slot: Mutex::new(None),
@@ -706,19 +706,20 @@ const FAVICON_SVG: &[u8] = include_bytes!("assets/favicon.svg");
 const FAVICON_PNG: &[u8] = include_bytes!("assets/favicon.png");
 const FAVICON_DARK_PNG: &[u8] = include_bytes!("assets/favicon-dark.png");
 
-struct Response {
-    status: &'static str,
-    content_type: &'static str,
-    body: Vec<u8>,
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct Response {
+    pub(super) status: String,
+    content_type: String,
+    pub(super) body: Vec<u8>,
     content_security_policy: bool,
-    headers: Vec<(&'static str, &'static str)>,
+    headers: Vec<(String, String)>,
 }
 
 impl Response {
     fn new(status: &'static str, content_type: &'static str, body: Vec<u8>) -> Self {
         Self {
-            status,
-            content_type,
+            status: status.into(),
+            content_type: content_type.into(),
             body,
             content_security_policy: false,
             headers: Vec::new(),
@@ -726,7 +727,7 @@ impl Response {
     }
 
     fn with_header(mut self, name: &'static str, value: &'static str) -> Self {
-        self.headers.push((name, value));
+        self.headers.push((name.into(), value.into()));
         self
     }
 
@@ -744,7 +745,7 @@ impl Response {
         Self::new("200 OK", content_type, body.to_vec())
     }
 
-    fn json_ok(body: String) -> Self {
+    pub(super) fn json_ok(body: String) -> Self {
         Self::new(
             "200 OK",
             "application/json; charset=utf-8",
@@ -752,7 +753,7 @@ impl Response {
         )
     }
 
-    fn json_error(status: &'static str, message: &str) -> Self {
+    pub(super) fn json_error(status: &'static str, message: &str) -> Self {
         let body = serde_json::json!({ "error": message }).to_string();
         Self::new(status, "application/json; charset=utf-8", body.into_bytes())
     }
@@ -791,7 +792,7 @@ pub(super) fn serve(
         serve_static: !api_only,
     });
     let capability_url = format!("{url}#/timeline?token={}", policy.token.expose());
-    let state = Arc::new(InspectState::new(repo.clone())?);
+    let state = Arc::new(super::owned::Supervisor::new(repo.clone()));
 
     match (api_only, output_format) {
         (false, StartupOutputFormat::Text) => {
@@ -846,7 +847,7 @@ pub(super) fn serve(
 
 fn handle_connection(
     stream: TcpStream,
-    state: &Arc<InspectState>,
+    state: &Arc<super::owned::Supervisor>,
     policy: &RequestPolicy,
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(15)))?;
@@ -873,7 +874,7 @@ fn handle_connection(
         }
     };
 
-    let (path, query) = split_target(&request.target);
+    let (path, _query) = split_target(&request.target);
     if !has_exact_host(policy, &request)
         || (is_api_path(path) && !has_exact_bearer(policy, &request))
     {
@@ -883,6 +884,43 @@ fn handle_connection(
     if !request.longitudinal_counting.is_empty() && !is_api_path(path) {
         return write_response(stream, &Response::unauthorized());
     }
+
+    let response = if request.method == "GET" && path == "/api/version" {
+        api_response(serde_json::to_string(&version_document()).map_err(|error| error.to_string()))
+    } else if request.method == "GET" && path == "/api/derived-access/status" {
+        state.status()
+    } else if request.method == "POST" && path == "/api/derived-access/cancel" {
+        state.cancel()
+    } else if request.method == "POST" && path == "/api/derived-access/retry" {
+        state.retry()
+    } else if request.method == "GET" && policy.serve_static && static_response(path).is_some() {
+        static_response(path).expect("checked static route")
+    } else if !is_api_path(path) {
+        Response::json_error("404 Not Found", "no such route")
+    } else {
+        state.request(super::owned::DataRequest {
+            method: request.method,
+            target: request.target,
+            #[cfg(feature = "longitudinal-counting")]
+            counting: request.longitudinal_counting,
+        })
+    };
+    write_response(stream, &response)
+}
+
+pub(super) fn data_response(
+    state: &Arc<InspectState>,
+    input: &super::owned::DataRequest,
+) -> std::io::Result<Response> {
+    let request = RequestHead {
+        method: input.method.clone(),
+        target: input.target.clone(),
+        hosts: Vec::new(),
+        authorizations: Vec::new(),
+        #[cfg(feature = "longitudinal-counting")]
+        longitudinal_counting: input.counting.clone(),
+    };
+    let (path, query) = split_target(&request.target);
     #[cfg(feature = "longitudinal-counting")]
     if let Some(counting_request) = longitudinal_counting_request(&request)? {
         let LongitudinalCountingRequest {
@@ -898,29 +936,22 @@ fn handle_connection(
             // a dropped connection leaves the controller unable to attribute
             // the refusal, while nothing here has touched request state yet.
             if request.method != "GET" || path != "/api/v2/history" {
-                return write_response(
-                    stream,
-                    &Response::text(
-                        "400 Bad Request",
-                        "Timeline post-pin barrier is valid only for one derived Timeline request",
-                    ),
-                );
+                return Ok(Response::text(
+                    "400 Bad Request",
+                    "Timeline post-pin barrier is valid only for one derived Timeline request",
+                ));
             }
             if context.manifest_sha256 != barrier.barrier_identity_sha256 {
-                return write_response(
-                    stream,
-                    &Response::text(
-                        "400 Bad Request",
-                        "Timeline post-pin barrier identity must bind the counter manifest",
-                    ),
-                );
+                return Ok(Response::text(
+                    "400 Bad Request",
+                    "Timeline post-pin barrier identity must bind the counter manifest",
+                ));
             }
             let Some(root) = std::env::var_os(
                 pointbreak::bench_support::longitudinal::LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_ROOT_ENV_V1,
             ) else {
-                return write_response(
-                    stream,
-                    &Response::text(
+                return Ok(
+                    Response::text(
                         "400 Bad Request",
                         "Timeline post-pin barrier request omitted its explicit child environment root",
                     ),
@@ -929,18 +960,15 @@ fn handle_connection(
             scope = match scope.with_timeline_post_pin_barrier(PathBuf::from(root), barrier) {
                 Ok(scope) => scope,
                 Err(error) => {
-                    return write_response(
-                        stream,
-                        &Response::text(
-                            "400 Bad Request",
-                            &format!("Timeline post-pin barrier arming failed: {error}"),
-                        ),
-                    );
+                    return Ok(Response::text(
+                        "400 Bad Request",
+                        &format!("Timeline post-pin barrier arming failed: {error}"),
+                    ));
                 }
             };
         }
         let _guard = scope.enter();
-        let response = route(state, policy.serve_static, &request.method, path, query);
+        let mut response = route(state, false, &request.method, path, query);
         record_response_body(&response);
         let receipt = longitudinal_receipt_header(&scope, context, &response)?;
         // An armed barrier the route never consumed must answer with the
@@ -953,17 +981,14 @@ fn handle_connection(
                     .chars()
                     .take(400)
                     .collect();
-                return write_response(
-                    stream,
-                    &Response::text(
-                        "400 Bad Request",
-                        &format!(
-                            "Timeline post-pin barrier failed: {error}; \
+                return Ok(Response::text(
+                    "400 Bad Request",
+                    &format!(
+                        "Timeline post-pin barrier failed: {error}; \
                              route response was {} with body {body_prefix}",
-                            response.status
-                        ),
+                        response.status
                     ),
-                );
+                ));
             }
         };
         let mut headers = vec![(
@@ -976,11 +1001,15 @@ fn handle_connection(
                 barrier_receipt.as_str(),
             ));
         }
-        return write_response_inner(stream, &response, &headers);
+        response.headers.extend(
+            headers
+                .into_iter()
+                .map(|(name, value)| (name.into(), value.into())),
+        );
+        return Ok(response);
     }
 
-    let response = route(state, policy.serve_static, &request.method, path, query);
-    write_response(stream, &response)
+    Ok(route(state, false, &request.method, path, query))
 }
 
 #[cfg(feature = "longitudinal-counting")]
@@ -2640,7 +2669,7 @@ mod tests {
         let connection = source_between(
             SERVER_SOURCE,
             "fn handle_connection(",
-            "fn longitudinal_receipt_header(",
+            "pub(super) fn data_response(",
         );
         assert!(
             !connection.contains("change_reader_cache"),
@@ -2657,10 +2686,10 @@ mod tests {
         let connection = source_between(
             SERVER_SOURCE,
             "fn handle_connection(",
-            "fn longitudinal_receipt_header(",
+            "pub(super) fn data_response(",
         );
-        assert_source_order(connection, "!has_exact_host", "let response = route(");
-        assert_source_order(connection, "!has_exact_bearer", "let response = route(");
+        assert_source_order(connection, "!has_exact_host", "state.request(");
+        assert_source_order(connection, "!has_exact_bearer", "state.request(");
         assert!(
             !connection.contains("warm_caches_after_auth"),
             "static and unauthenticated requests must have no cache-warm seam"
@@ -3146,7 +3175,10 @@ mod tests {
         for (path, query) in requests {
             let response = route_change_v2(&fixture.state, path, query.as_deref());
             assert!(
-                matches!(response.status, "409 Conflict" | "503 Service Unavailable"),
+                matches!(
+                    response.status.as_str(),
+                    "409 Conflict" | "503 Service Unavailable"
+                ),
                 "{path} silently fell back instead of following the derived lens posture: {}",
                 response.status
             );
@@ -3168,8 +3200,8 @@ mod tests {
         };
         for response in [revision, resource, interdiff] {
             assert_eq!(
-                (detail.1, detail.2.as_slice()),
-                (response.1, response.2.as_slice()),
+                (detail.1.as_str(), detail.2.as_slice()),
+                (response.1.as_str(), response.2.as_slice()),
                 "{} and {} must follow the same refusal posture",
                 detail.0,
                 response.0

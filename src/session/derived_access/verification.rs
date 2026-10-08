@@ -33,6 +33,18 @@ pub(crate) fn strict_proposal_summary_conflicts(
             .cmp(&replay_key_for(&right.idempotency_key))
             .then_with(|| left.idempotency_key.cmp(&right.idempotency_key))
     });
+    proposal_summary_conflicts_in_order(events.into_iter())
+}
+
+pub(crate) fn strict_enrolled_proposal_summary_conflicts(
+    events: &[ShoreEvent],
+) -> ShoreResult<BTreeMap<RevisionRefV1, u64>> {
+    proposal_summary_conflicts_in_order(events.iter())
+}
+
+fn proposal_summary_conflicts_in_order<'a>(
+    events: impl Iterator<Item = &'a ShoreEvent>,
+) -> ShoreResult<BTreeMap<RevisionRefV1, u64>> {
     let mut baselines = BTreeMap::<RevisionRefV1, Option<String>>::new();
     let mut conflicts = BTreeMap::new();
     for (index, event) in events.into_iter().enumerate() {

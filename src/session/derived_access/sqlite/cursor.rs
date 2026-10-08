@@ -109,6 +109,7 @@ pub(crate) struct PublishedValidationSnapshotRaw {
     pub(crate) authority: TruthAuthoritySnapshot,
     pub(crate) locator_applied: TruthCursor,
     pub(crate) reader_projection_checkpoint_json: Option<String>,
+    pub(crate) progress_binding_json: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -673,6 +674,22 @@ impl SqliteCursorLedger {
         hook: impl FnOnce(),
     ) -> Result<PublishedValidationSnapshotRaw, CursorLedgerError> {
         let (connection, metadata) = self.hot_read_connection_with_hook(hook)?;
+        Self::publication_snapshot_on(&connection, metadata)
+    }
+
+    pub(crate) fn enrolled_publication_snapshot_on(
+        connection: &Connection,
+        identity: &CursorLedgerIdentity,
+    ) -> Result<PublishedValidationSnapshotRaw, CursorLedgerError> {
+        let metadata = validate_metadata_header(connection, identity)?;
+        validate_bounded_head(connection, &metadata)?;
+        Self::publication_snapshot_on(connection, metadata)
+    }
+
+    fn publication_snapshot_on(
+        connection: &Connection,
+        metadata: Metadata,
+    ) -> Result<PublishedValidationSnapshotRaw, CursorLedgerError> {
         let (locator_epoch, locator_applied, locator_observed) = connection
             .query_row(
                 "SELECT epoch, applied_sequence, observed_sequence
@@ -724,6 +741,22 @@ impl SqliteCursorLedger {
         } else {
             None
         };
+        let binding_table_exists = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'append_progress_binding')",
+            [], |row| row.get::<_, bool>(0),
+        ).map_err(|error| sqlite_error("inspect progress binding schema", error))?;
+        let progress_binding_json = if binding_table_exists {
+            connection
+                .query_row(
+                    "SELECT binding_json FROM append_progress_binding WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|error| sqlite_error("read progress projection binding", error))?
+        } else {
+            None
+        };
 
         Ok(PublishedValidationSnapshotRaw {
             authority: TruthAuthoritySnapshot {
@@ -735,6 +768,7 @@ impl SqliteCursorLedger {
             },
             locator_applied: TruthCursor::new(locator_epoch, locator_applied),
             reader_projection_checkpoint_json,
+            progress_binding_json,
         })
     }
 
@@ -1563,6 +1597,69 @@ fn decode_prefixed_digest(value: &str, label: &'static str) -> Result<[u8; 32], 
         CursorLedgerError::SchemaMismatch(format!("{label} has no sha256 prefix"))
     })?;
     decode_digest(value, label)
+}
+
+/// Populate a fresh owned staging target in the progress receipt order. The
+/// caller owns and explicitly finishes the only connection; this opens no file.
+#[cfg(target_os = "macos")]
+pub(in crate::session) fn initialize_enrolled_cursor_on(
+    connection: &Connection,
+    identity: &CursorLedgerIdentity,
+    epoch: u64,
+    stamp: &JournalChangeStamp,
+    events: Vec<crate::session::append_progress::RebuildEvent>,
+) -> Result<Vec<BootstrapPopulationEntry>, CursorLedgerError> {
+    validate_identity(identity)?;
+    if epoch == 0 {
+        return Err(CursorLedgerError::SchemaMismatch(
+            "zero generation epoch".into(),
+        ));
+    }
+    connection
+        .execute_batch(
+            "PRAGMA page_size=4096; PRAGMA application_id=1346520131; PRAGMA user_version=4; \
+         PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; \
+         PRAGMA cell_size_check=ON; PRAGMA fullfsync=ON;",
+        )
+        .map_err(|error| sqlite_error("configure owned cursor", error))?;
+    initialize_schema(connection, identity, epoch, "staging", stamp)?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| sqlite_error("begin owned cursor population", error))?;
+    let mut population = Vec::with_capacity(events.len());
+    for (offset, event) in events.into_iter().enumerate() {
+        crate::session::append_progress::data_work_checkpoint()
+            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        let sequence = u64::try_from(offset)
+            .ok()
+            .and_then(|n| n.checked_add(1))
+            .ok_or_else(|| CursorLedgerError::SchemaMismatch("sequence overflow".into()))?;
+        let receipt = CursorReceipt {
+            cursor: TruthCursor::new(epoch, sequence),
+            logical_reread_key: event.event.idempotency_key.clone(),
+            attempt_token: format!("bootstrap:{epoch}:{sequence}:{}", event.validation_witness),
+            validation_witness: event.validation_witness,
+        };
+        insert_attempt(&transaction, &receipt.attempt_token)?;
+        insert_receipt(&transaction, &receipt)?;
+        population.push(BootstrapPopulationEntry {
+            receipt,
+            event: event.event,
+            carrier_bytes: event.carrier_bytes,
+        });
+    }
+    transaction
+        .execute(
+            "UPDATE cursor_meta SET head_sequence=?1, bootstrap_state='complete' \
+         WHERE singleton=1 AND bootstrap_state='staging'",
+            [usize_to_i64(population.len(), "owned cursor head")?],
+        )
+        .map_err(|error| sqlite_error("complete owned cursor", error))?;
+    transaction
+        .commit()
+        .map_err(|error| sqlite_error("commit owned cursor", error))?;
+    validate_completed_metadata(connection, identity)?;
+    Ok(population)
 }
 
 fn initialize_schema(

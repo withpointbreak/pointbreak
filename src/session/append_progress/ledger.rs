@@ -1,6 +1,8 @@
 //! Private owned enrollment and append ledger; public routing remains disabled.
 
 pub(super) mod c4;
+#[cfg(target_os = "macos")]
+mod projection;
 use std::cell::{Cell, RefCell};
 use std::ffi::{CString, c_void};
 use std::marker::PhantomData;
@@ -9,6 +11,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use libsqlite3_sys as ffi;
+#[cfg(target_os = "macos")]
+pub(in crate::session) use projection::{with_published_projection, with_staging_projection};
 #[cfg(test)]
 use rusqlite::OpenFlags;
 use rusqlite::{Connection, params};
@@ -51,6 +55,7 @@ struct LiveSqlPermit(super::owner::SqlPermit);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ScopeProfile {
     Selected,
+    OrdinaryRead,
     CreateInit,
     ReopenInit,
     Certify,
@@ -62,6 +67,7 @@ impl ScopeProfile {
     fn native(self) -> u32 {
         match self {
             Self::Selected => ffi::SQLITE_PB_PROFILE_SELECTED_H0,
+            Self::OrdinaryRead => ffi::SQLITE_PB_PROFILE_ORDINARY_READ_SNAPSHOT,
             Self::CreateInit => ffi::SQLITE_PB_PROFILE_CREATE_INIT,
             Self::ReopenInit => ffi::SQLITE_PB_PROFILE_REOPEN_INIT,
             Self::Certify => ffi::SQLITE_PB_PROFILE_CERTIFY,
@@ -70,12 +76,15 @@ impl ScopeProfile {
             Self::Reconcile => ffi::SQLITE_PB_PROFILE_RECONCILE,
         }
     }
+    fn readonly(self) -> bool {
+        matches!(self, Self::Selected | Self::OrdinaryRead)
+    }
     fn capabilities(self) -> u64 {
         ffi::SQLITE_PB_CAP_NATIVE_OWNERSHIP
             | ffi::SQLITE_PB_CAP_EARLY_CONTEXT
             | ffi::SQLITE_PB_CAP_EXPLICIT_FINISH
             | ffi::SQLITE_PB_CAP_NO_RETRY_BINDING
-            | if self == Self::Selected {
+            | if self.readonly() {
                 ffi::SQLITE_PB_CAP_READONLY_SHM | ffi::SQLITE_PB_CAP_NO_PERSISTENT_MUTATION
             } else {
                 ffi::SQLITE_PB_CAP_WRITER_BARRIER
@@ -281,6 +290,9 @@ struct NativeSqlOwner<'a> {
 }
 impl<'a> NativeSqlOwner<'a> {
     fn prepare(evidence: RetainedEvidence<'a>, profile: ScopeProfile) -> Self {
+        let wrong_target_profile = evidence
+            .required_profile()
+            .is_some_and(|required| required != profile.native());
         Self {
             connection: std::ptr::null_mut(),
             disposition: None,
@@ -289,7 +301,7 @@ impl<'a> NativeSqlOwner<'a> {
                 profile,
                 phase: Cell::new(OwnerPhase::Prepared),
                 in_callback: Cell::new(false),
-                first_error: RefCell::new(None),
+                first_error: RefCell::new(wrong_target_profile.then_some(OwnerFailure::State)),
                 anchor: None,
                 c4_command: None,
                 live: super::live::Gate::new(),
@@ -318,12 +330,7 @@ impl<'a> NativeSqlOwner<'a> {
     }
     fn path(&self) -> Result<CString> {
         let evidence = &self.context().evidence;
-        let root = evidence
-            .members()
-            .iter()
-            .find(|member| member.role() == EvidenceRole::Root)
-            .ok_or_else(|| refuse("SQL owner has no root"))?;
-        let path = evidence.inputs().database(root.path())?;
+        let path = evidence.database()?;
         #[cfg(unix)]
         let bytes = {
             use std::os::unix::ffi::OsStrExt as _;
@@ -362,7 +369,7 @@ impl<'a> NativeSqlOwner<'a> {
         // SAFETY: stable context and N predate open. The owner slot receives
         // every nonnull result directly, including failed/sick connections.
         let rc = unsafe {
-            if self.context().profile == ScopeProfile::Selected {
+            if self.context().profile.readonly() {
                 ffi::sqlite3_pb_reader_open_v1(path.as_ptr(), &options, &mut self.connection)
             } else {
                 ffi::sqlite3_pb_writer_open_v1(path.as_ptr(), &options, &mut self.connection)
@@ -381,11 +388,11 @@ impl<'a> NativeSqlOwner<'a> {
         Ok(())
     }
     // Internal noncapturing operation; only detached outcome data can escape.
-    fn with_connection(
+    fn with_connection<T>(
         &mut self,
         _gate: &LiveSqlPermit,
-        run: for<'db> fn(&'db Connection, &'db OwnerContext<'a>) -> Result<OperationOutcome>,
-    ) -> Result<OperationOutcome> {
+        run: impl for<'db> FnOnce(&'db Connection, &'db OwnerContext<'a>) -> Result<T>,
+    ) -> Result<T> {
         if self.context().phase.get() != OwnerPhase::Open
             || self.connection.is_null()
             || self.context().in_callback.get()
@@ -455,7 +462,7 @@ impl<'a> NativeSqlOwner<'a> {
         // SAFETY: no lexical wrapper/statement remains; the pinned finish owns
         // rollback/close and alone clears the slot after confirmed detachment.
         let rc = unsafe {
-            if self.context().profile == ScopeProfile::Selected {
+            if self.context().profile.readonly() {
                 ffi::sqlite3_pb_reader_finish_v1(&mut self.connection, &mut record)
             } else {
                 ffi::sqlite3_pb_writer_finish_v1(&mut self.connection, &mut record)
@@ -2205,7 +2212,7 @@ impl OwnerContext<'_> {
         accept_check(anchor, &self.evidence.journal_check(anchor)?)?;
         // SAFETY: the lexical non-owning wrapper cannot outlive NativeSqlOwner.
         let rc = unsafe {
-            if self.profile == ScopeProfile::Selected {
+            if self.profile.readonly() {
                 ffi::sqlite3_pb_reader_visit_v1(db.handle(), 1 << ffi::SQLITE_PB_ROLE_MAIN)
             } else {
                 ffi::sqlite3_pb_writer_visit_v1(db.handle(), 1 << ffi::SQLITE_PB_ROLE_MAIN)

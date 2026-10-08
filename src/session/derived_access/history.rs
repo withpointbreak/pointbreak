@@ -706,6 +706,12 @@ impl DerivedHistoryAccess {
         self.runtime.start_background_rebuild()
     }
 
+    /// Deliver cooperative cancellation without acquiring the worker handle or joining.
+    #[doc(hidden)]
+    pub fn request_background_cancel(&self) {
+        self.runtime.request_background_cancel();
+    }
+
     /// Cooperatively cancel and join this process's rebuild worker.
     ///
     /// Explicit cancellation stays latched so status and data-route discovery

@@ -18,12 +18,69 @@ fn main() -> ExitCode {
         if mode == "__owned-append-v1" {
             return private_append_command(arguments.collect());
         }
+        if mode == "__inspect-data-v1" {
+            return cli::inspect::owned::child_main(arguments.collect());
+        }
         if mode == "__owned-data-v1" {
-            eprintln!("owned_process_required; private child transport is not yet admitted");
-            return ExitCode::from(2);
+            return private_data_command(arguments.collect());
         }
     }
     cli::run_main()
+}
+
+#[cfg(target_os = "macos")]
+fn private_data_command(arguments: Vec<std::ffi::OsString>) -> ExitCode {
+    use std::io::Read as _;
+
+    use pointbreak::session::{
+        OwnedDataRequest, OwnedProcessFailure, enter_owned_data_command, run_owned_data_request,
+    };
+    fn terminal(_: OwnedProcessFailure) -> ! {
+        // SAFETY: this branch owns the disposable process before CLI setup.
+        unsafe { libc::_exit(90) }
+    }
+    let result = (|| -> pointbreak::error::Result<_> {
+        if !arguments.is_empty() {
+            return Err(pointbreak::error::ShoreError::Message(
+                "private data command has no positional arguments".into(),
+            ));
+        }
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .lock()
+            .take(65_537)
+            .read_to_end(&mut bytes)
+            .map_err(|error| pointbreak::error::ShoreError::Message(error.to_string()))?;
+        if bytes.len() > 65_536 {
+            return Err(pointbreak::error::ShoreError::Message(
+                "private data request limit".into(),
+            ));
+        }
+        let input: OwnedDataRequest = serde_json::from_slice(&bytes)?;
+        // SAFETY: this private binary branch precedes CLI parsing, tracing,
+        // async runtimes and services. It owns the sole data thread to exit.
+        let owner = unsafe { enter_owned_data_command(terminal) }?;
+        run_owned_data_request(
+            &owner,
+            input,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+    })();
+    match result {
+        Ok(value) => {
+            println!("{value}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::from(2)
+        }
+    }
+}
+#[cfg(not(target_os = "macos"))]
+fn private_data_command(_: Vec<std::ffi::OsString>) -> ExitCode {
+    eprintln!("owned_process_required; native data entry unsupported on this platform");
+    ExitCode::from(2)
 }
 
 #[cfg(any(target_os = "macos", windows))]

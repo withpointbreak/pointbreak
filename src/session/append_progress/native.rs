@@ -63,6 +63,15 @@ pub(super) fn root_snapshot(root: &NativeRootHandle) -> Result<RootSnapshot> {
 }
 
 pub(super) fn physical_root(root: &Path) -> Result<NativeRootHandle> {
+    capture_physical_root(root, true)
+}
+
+/// Noncreating observation: no writer lock, directory sync or permission repair.
+pub(super) fn read_root(root: &Path) -> Result<NativeRootHandle> {
+    capture_physical_root(root, false)
+}
+
+fn capture_physical_root(root: &Path, durability: bool) -> Result<NativeRootHandle> {
     super::owner::require_quiescent()?;
     #[cfg(target_os = "macos")]
     {
@@ -88,7 +97,9 @@ pub(super) fn physical_root(root: &Path) -> Result<NativeRootHandle> {
         }
         // Unlike the existing Windows no-op helper, admission exercises the
         // actual directory barrier before returning a usable handle.
-        directory.sync_all().map_err(native_error)?;
+        if durability {
+            directory.sync_all().map_err(native_error)?;
+        }
         let ancestors = retain_ancestors(&supplied, &canonical)?;
         let handle = NativeRootHandle {
             ancestors,
@@ -101,6 +112,11 @@ pub(super) fn physical_root(root: &Path) -> Result<NativeRootHandle> {
     }
     #[cfg(windows)]
     {
+        if !durability {
+            return Err(unsupported(
+                "ordinary read adapter is not qualified on Windows",
+            ));
+        }
         ntfs_candidate_root(root)
     }
     #[cfg(not(any(target_os = "macos", windows)))]
@@ -1245,6 +1261,12 @@ fn retain_ancestors(
 }
 #[cfg(any(target_os = "macos", windows))]
 impl NativeRootHandle {
+    pub(super) fn retained_ancestors(&self) -> impl Iterator<Item = (&Path, &std::fs::File)> {
+        self.ancestors
+            .iter()
+            .map(|(path, file)| (path.as_path(), file))
+    }
+
     pub(super) fn validate_live(&self) -> Result<()> {
         use crate::session::store::authority_lock::file_identity;
         super::owner::require_owned()?;

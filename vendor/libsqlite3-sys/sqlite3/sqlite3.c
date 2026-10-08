@@ -18805,7 +18805,10 @@ struct sqlite3PbContext {
   int finishing;
   sqlite3_stmt *readerBegin; /* One engine-owned bootstrap statement, never exported. */
   int writer;
+  unsigned int target; /* Closed and immutable after pre-open classification. */
 };
+#define SQLITE_PB_TARGET_LEDGER 1u
+#define SQLITE_PB_TARGET_PROJECTION 2u
 #define SQLITE_PB_CONTEXT_MAGIC 0x50424e31u
 static int sqlite3PbLatch(sqlite3PbContext*, int);
 static void sqlite3PbTerminal(sqlite3PbContext*, int);
@@ -270540,7 +270543,8 @@ static int sqlite3PbContextInit(
   ) return SQLITE_MISUSE;
 #ifndef SQLITE_POINTBREAK_QUALIFICATION
   if( options->profile>SQLITE_PB_PROFILE_READY_RESUME
-   && options->profile<SQLITE_PB_PROFILE_APPEND ) return SQLITE_MISUSE;
+   && options->profile<SQLITE_PB_PROFILE_APPEND
+   && options->profile!=SQLITE_PB_PROFILE_ORDINARY_READ_SNAPSHOT ) return SQLITE_MISUSE;
 #endif
   for(i=0; i<4; i++) if( options->reserved[i]!=0 ) return SQLITE_MISUSE;
   memset(p, 0, sizeof(*p));
@@ -270656,6 +270660,200 @@ static int sqlite3PbTable(const char *z){
       || sqlite3PbName(z,"current");
 }
 
+/* Fixed derived schema. These grants apply only to a Rust-attested cursor
+** target; they never broaden a ledger connection's operation policy. */
+static int sqlite3PbProjectionColumn(const char *table, const char *column){
+  static const struct { const char *table; const char *columns; } schema[] = {
+    {"cursor_meta","|singleton|store_id|profile_id|schema_version|epoch|head_sequence|authority_stamp_json|bootstrap_state|quarantine_reason|"},
+    {"cursor_attempt","|attempt_hash|"},
+    {"cursor_intent","|singleton|epoch|sequence|logical_reread_key|validation_witness|attempt_hash|attempt_token|"},
+    {"cursor_receipt","|sequence|epoch|logical_reread_key_hash|validation_witness_hash|attempt_hash|attempt_token|"},
+    {"authority_record_identity","|key_digest|record_hash|event_payload_hash|"},
+    {"locator_checkpoint","|singleton|store_id|profile_id|schema_version|epoch|applied_sequence|observed_sequence|"},
+    {"locator_event","|sequence|epoch|event_hash|normalized_occurred_at|event_type_id|journal_id|subject_id|track_id|payload_hash|"},
+    {"locator_event_type","|id|value|"},
+    {"locator_journal","|id|value|"},
+    {"locator_subject","|id|value|"},
+    {"locator_track","|id|value|"},
+    {"semantic_meta","|singleton|profile_id|schema_version|epoch|applied_sequence|"},
+    {"semantic_identity_prefix","|id|value|"},
+    {"semantic_actor","|id|value|"},
+    {"semantic_event_fact","|sequence|revision_prefix_id|revision_digest|revision_raw|semantic_prefix_id|semantic_digest|semantic_raw|content_prefix_id|content_digest|content_raw|occurred_at|assertion_mode|actor_id|"},
+    {"semantic_revision_fact","|sequence|object_id|engagement_id|supersedes_json|base_commit_oid|capture_commit_oid|capture_tree_oid|"},
+    {"semantic_assessment_fact","|sequence|assessment|replaces_json|related_observations_json|related_requests_json|revision_scoped|"},
+    {"semantic_request_fact","|sequence|reason_code|title|"},
+    {"semantic_response_fact","|sequence|request_id|"},
+    {"semantic_validation_fact","|sequence|check_name|status|exit_code|completed_at|log_hashes_json|"},
+    {"semantic_commit_association_fact","|sequence|commit_oid|tree_oid|"},
+    {"semantic_commit_withdrawal_fact","|sequence|association_id|"},
+    {"semantic_ref_association_fact","|sequence|ref_name|head_oid|"},
+    {"semantic_ref_withdrawal_fact","|sequence|association_id|"},
+    {"semantic_change_fact","|sequence|fact_json|"},
+    {"semantic_revision_proposal_carrier","|sequence|revision_id|object_artifact_content_hash|"},
+    {"semantic_revision_proposal_conflict","|revision_id|object_artifact_content_hash|first_conflict_sequence|"},
+    {"semantic_representative","|family_id|semantic_key_prefix_id|semantic_key_digest|semantic_key_raw|semantic_key_hash|sequence|"},
+    {"semantic_duplicate_projection","|family|semantic_key|event_count|event_ids_json|"},
+    {"semantic_state_projection","|singleton|journal_id|current_revision_id|current_object_id|revision_count|event_count|observation_count|assessment_count|validation_check_count|input_request_count|open_input_request_count|open_operative_input_request_count|"},
+    {"product_history_meta","|singleton|profile_id|schema_version|epoch|applied_sequence|"},
+    {"product_history_tag","|sequence|tag_key|"},
+    {"product_history_tag_value","|sequence|tag_value|"},
+    {"product_history_signature","|sequence|target_event_id|"},
+    {"product_revision","|sequence|revision_id|captured_at|captured_at_millis|"},
+    {"product_revision_edge","|sequence|superseded_revision_id|"},
+    {"product_history_event","|sequence|request_state|"},
+    {"product_history_revision_reference","|sequence|source_kind|reference_role|resolution|revision_id|object_artifact_content_hash|historical_change_eligible|"},
+    {"product_history_membership_claim","|sequence|claim_id|change_id|revision_id|"},
+    {"product_history_membership_withdrawal","|sequence|claim_id|"},
+    {"product_history_relation_claim","|sequence|claim_id|change_id|successor_revision_id|successor_object_artifact_content_hash|predecessor_revision_id|predecessor_object_artifact_content_hash|"},
+    {"product_history_relation_withdrawal","|sequence|claim_id|"},
+    {"product_history_change_correlation","|sequence|change_id|correlation_role|source_kind|source_id|support_sequence|"},
+    {"product_history_content_reference","|sequence|content_prefix_id|content_digest|content_raw|content_key_hash|"},
+    {"reader_projection_checkpoint","|singleton|checkpoint_json|"},
+    {"append_progress_binding","|singleton|binding_json|"},
+    {"cursor_receipt_text","|sequence|epoch|logical_reread_key_hash|validation_witness|attempt_token|"},
+    {"locator_event_text","|sequence|epoch|event_id|normalized_occurred_at|replay_key|event_type|journal_id|subject_id|track_id|payload_hash|"},
+    {"semantic_representative_text","|family_id|family|semantic_key|semantic_key_hash|sequence|"},
+    {"semantic_event_fact_text","|sequence|revision_id|semantic_id|content_hash|occurred_at|assertion_mode|actor_id|revision_prefix_id|revision_digest|semantic_prefix_id|semantic_digest|content_prefix_id|content_digest|"},
+  };
+  unsigned int i;
+  for(i=0; i<sizeof(schema)/sizeof(schema[0]); i++){
+    if( sqlite3PbName(table,schema[i].table) ){
+      const char *at;
+      size_t length;
+      if( column==0 || column[0]==0 ) return 1;
+      length = strlen(column);
+      for(at=schema[i].columns; *at; at++){
+        if( *at=='|' && sqlite3_strnicmp(at+1,column,(int)length)==0
+         && strlen(at+1)>length && at[length+1]=='|' ) return 1;
+      }
+      return 0;
+    }
+  }
+  return 0;
+}
+static int sqlite3PbProjectionView(const char *name){
+  return sqlite3PbName(name,"cursor_receipt_text")
+      || sqlite3PbName(name,"locator_event_text")
+      || sqlite3PbName(name,"semantic_representative_text")
+      || sqlite3PbName(name,"semantic_event_fact_text");
+}
+static int sqlite3PbProjectionIndex(const char *index, const char *table){
+  static const struct { const char *index; const char *table; } indexes[] = {
+    {"locator_event_display","locator_event"},
+    {"locator_event_cursor","locator_event"},
+    {"locator_event_target","locator_event"},
+    {"semantic_revision_engagement","semantic_revision_fact"},
+    {"semantic_response_request","semantic_response_fact"},
+    {"semantic_revision_proposal_exact","semantic_revision_proposal_carrier"},
+    {"semantic_representative_sequence","semantic_representative"},
+    {"semantic_event_fact_revision","semantic_event_fact"},
+    {"semantic_event_fact_content","semantic_event_fact"},
+    {"product_history_tag_key","product_history_tag"},
+    {"product_history_tag_value_lookup","product_history_tag_value"},
+    {"product_history_signature_target","product_history_signature"},
+    {"product_revision_identity","product_revision"},
+    {"product_revision_chronological","product_revision"},
+    {"product_revision_edge_target","product_revision_edge"},
+    {"product_history_event_request_state","product_history_event"},
+    {"product_history_revision_reference_exact","product_history_revision_reference"},
+    {"product_history_revision_reference_unresolved","product_history_revision_reference"},
+    {"product_history_revision_reference_candidate","product_history_revision_reference"},
+    {"product_history_revision_reference_historical","product_history_revision_reference"},
+    {"product_history_membership_claim_identity","product_history_membership_claim"},
+    {"product_history_membership_claim_revision","product_history_membership_claim"},
+    {"product_history_membership_withdrawal_claim","product_history_membership_withdrawal"},
+    {"product_history_relation_claim_identity","product_history_relation_claim"},
+    {"product_history_relation_claim_successor","product_history_relation_claim"},
+    {"product_history_relation_claim_predecessor","product_history_relation_claim"},
+    {"product_history_relation_withdrawal_claim","product_history_relation_withdrawal"},
+    {"product_history_change_correlation_change","product_history_change_correlation"},
+    {"product_history_change_correlation_support","product_history_change_correlation"},
+    {"product_history_content_reference_lookup","product_history_content_reference"},
+  };
+  unsigned int i;
+  if( index==0 ) return 0;
+  /* A NULL table selects only fixed explicit names for SQLITE_REINDEX. */
+  if( table!=0 && strncmp(index,"sqlite_autoindex_",17)==0 ){
+    size_t n = strlen(table);
+    return sqlite3PbProjectionColumn(table,0)
+        && strncmp(index+17,table,n)==0 && index[17+n]=='_';
+  }
+  for(i=0; i<sizeof(indexes)/sizeof(indexes[0]); i++){
+    if( sqlite3PbName(index,indexes[i].index)
+     && (table==0 || sqlite3PbName(table,indexes[i].table)) ) return 1;
+  }
+  return 0;
+}
+static int sqlite3PbProjectionAuthorize(
+  sqlite3PbContext *p, int code, const char *a, const char *b,
+  const char *zDb, const char *zContext
+){
+  int create = p->writer && p->options.profile==SQLITE_PB_PROFILE_CREATE_INIT;
+  int schema = sqlite3PbName(a,"sqlite_schema") || sqlite3PbName(a,"sqlite_master");
+  if( p->inCallback || (zDb!=0 && !sqlite3PbName(zDb,"main")) ) return SQLITE_DENY;
+  /* Only the fixed read views are allowed; triggers/other views remain denied. */
+  if( zContext!=0 && !sqlite3PbProjectionView(zContext) ) return SQLITE_DENY;
+  if( p->finishing ) return code==SQLITE_TRANSACTION && sqlite3PbName(a,"ROLLBACK")
+                           ? SQLITE_OK : SQLITE_DENY;
+  if( p->firstError!=SQLITE_OK ) return SQLITE_DENY;
+  if( !p->writer && p->db->autoCommit
+   && (code==SQLITE_SELECT || code==SQLITE_READ || code==SQLITE_PRAGMA) ) return SQLITE_DENY;
+  switch(code){
+    case SQLITE_SELECT: return SQLITE_OK;
+    case SQLITE_TRANSACTION:
+      return sqlite3PbName(a,"BEGIN") || sqlite3PbName(a,"COMMIT")
+          || sqlite3PbName(a,"ROLLBACK") ? SQLITE_OK : SQLITE_DENY;
+    case SQLITE_READ:
+      return schema || sqlite3PbProjectionColumn(a,b) ? SQLITE_OK : SQLITE_DENY;
+    case SQLITE_FUNCTION:
+      return sqlite3PbName(b,"count") || sqlite3PbName(b,"length")
+          || sqlite3PbName(b,"lower") || sqlite3PbName(b,"hex")
+          || sqlite3PbName(b,"coalesce") || sqlite3PbName(b,"max")
+          || sqlite3PbName(b,"min") || sqlite3PbName(b,"sum")
+          || sqlite3PbName(b,"substr") || sqlite3PbName(b,"glob")
+          || sqlite3PbName(b,"like") || sqlite3PbName(b,"typeof")
+          ? SQLITE_OK : SQLITE_DENY;
+    case SQLITE_PRAGMA:
+      if( b==0 && (sqlite3PbName(a,"user_version")
+       || sqlite3PbName(a,"application_id") || sqlite3PbName(a,"schema_version")) ) return SQLITE_OK;
+      if( sqlite3PbName(a,"table_info") && sqlite3PbProjectionColumn(b,0) ) return SQLITE_OK;
+      if( !create ) return SQLITE_DENY;
+      if( b==0 && (sqlite3PbName(a,"synchronous") || sqlite3PbName(a,"foreign_keys")) ) return SQLITE_OK;
+      if( (sqlite3PbName(a,"page_size") && sqlite3PbName(b,"4096"))
+       || (sqlite3PbName(a,"application_id") && sqlite3PbName(b,"1346520131"))
+       || (sqlite3PbName(a,"user_version") && sqlite3PbName(b,"4"))
+       || (sqlite3PbName(a,"journal_mode") && sqlite3PbName(b,"WAL"))
+       || (sqlite3PbName(a,"synchronous") && sqlite3PbName(b,"FULL"))
+       || (sqlite3PbName(a,"foreign_keys") && sqlite3PbName(b,"ON"))
+       || (sqlite3PbName(a,"fullfsync") && sqlite3PbName(b,"ON"))
+       || (sqlite3PbName(a,"cell_size_check") && sqlite3PbName(b,"ON"))
+       || (sqlite3PbName(a,"wal_checkpoint") && sqlite3PbName(b,"FULL")) ) return SQLITE_OK;
+      return SQLITE_DENY;
+    case SQLITE_CREATE_TABLE:
+      return create && sqlite3PbProjectionColumn(a,0)
+          && !sqlite3PbProjectionView(a) ? SQLITE_OK : SQLITE_DENY;
+    case SQLITE_CREATE_INDEX:
+      return create && b!=0 && sqlite3PbProjectionIndex(a,b) ? SQLITE_OK : SQLITE_DENY;
+    case SQLITE_REINDEX:
+      /* CREATE INDEX refills the new index through this authorization event. */
+      return create && b==0 && zContext==0 && sqlite3PbName(zDb,"main")
+          && sqlite3PbProjectionIndex(a,0) ? SQLITE_OK : SQLITE_DENY;
+    case SQLITE_CREATE_VIEW:
+      return create && sqlite3PbProjectionView(a) ? SQLITE_OK : SQLITE_DENY;
+    case SQLITE_INSERT:
+      return create && (schema || (sqlite3PbProjectionColumn(a,0)
+          && !sqlite3PbProjectionView(a))) ? SQLITE_OK : SQLITE_DENY;
+    case SQLITE_UPDATE:
+      return create && (schema || (sqlite3PbProjectionColumn(a,b)
+          && !sqlite3PbProjectionView(a))) ? SQLITE_OK : SQLITE_DENY;
+    case SQLITE_DELETE:
+      return create && (sqlite3PbName(a,"cursor_intent")
+          || sqlite3PbName(a,"product_history_change_correlation")
+          || sqlite3PbName(a,"product_history_revision_reference")) ? SQLITE_OK : SQLITE_DENY;
+    default: return SQLITE_DENY;
+  }
+}
+
 /* Unreplaceable connection-local guard; callers still expose only fixed SQL. */
 static int sqlite3PbAuthorize(
   void *arg, int code, const char *a, const char *b,
@@ -270665,6 +270863,9 @@ static int sqlite3PbAuthorize(
   int create = p->options.profile==SQLITE_PB_PROFILE_CREATE_INIT;
   int append = p->options.profile==SQLITE_PB_PROFILE_APPEND;
   int progress = append || p->options.profile==SQLITE_PB_PROFILE_RECONCILE;
+  if( p->target==SQLITE_PB_TARGET_PROJECTION )
+    return sqlite3PbProjectionAuthorize(p,code,a,b,zDb,zContext);
+  if( p->target!=SQLITE_PB_TARGET_LEDGER ) return SQLITE_DENY;
   if( p->inCallback || zContext!=0 ) return SQLITE_DENY;
   if( p->finishing ) return code==SQLITE_TRANSACTION && sqlite3PbName(a,"ROLLBACK")
                            ? SQLITE_OK : SQLITE_DENY;
@@ -270889,7 +271090,8 @@ static int sqlite3PbOpen(
   *out = 0;
   rc = sqlite3PbContextInit(&initial,options);
   if( rc!=SQLITE_OK || initial.writer!=writer ) return SQLITE_MISUSE;
-  if( !writer && options->profile!=SQLITE_PB_PROFILE_SELECTED_H0 ) return SQLITE_MISUSE;
+  if( !writer && options->profile!=SQLITE_PB_PROFILE_SELECTED_H0
+   && options->profile!=SQLITE_PB_PROFILE_ORDINARY_READ_SNAPSHOT ) return SQLITE_MISUSE;
   required |= writer ? SQLITE_PB_CAP_WRITER_BARRIER
                      : SQLITE_PB_CAP_READONLY_SHM|SQLITE_PB_CAP_NO_PERSISTENT_MUTATION;
   if( options->profile==SQLITE_PB_PROFILE_APPEND
@@ -270898,6 +271100,19 @@ static int sqlite3PbOpen(
   /* Require the complete native ownership/mutation ABI before any acquisition. */
   if( (sqlite3_pb_reader_abi_v1()->capabilities&required)!=required ) return SQLITE_MISUSE;
   if( path==0 || path[0]==0 ) return SQLITE_CANTOPEN;
+  {
+    const char *leaf = path;
+    const char *at;
+    /* Classify before acquisition. Rust independently attests actual Q handles
+    ** under retained N; this exact filename is not an authority credential. */
+    for(at=path; *at; at++) if( *at=='/' || *at=='\\' ) leaf=at+1;
+    if( strcmp(leaf,"ledger.sqlite")==0 ) initial.target=SQLITE_PB_TARGET_LEDGER;
+    else if( strcmp(leaf,"cursor.sqlite3")==0 ){
+      if( options->profile!=SQLITE_PB_PROFILE_ORDINARY_READ_SNAPSHOT
+       && options->profile!=SQLITE_PB_PROFILE_CREATE_INIT ) return SQLITE_MISUSE;
+      initial.target=SQLITE_PB_TARGET_PROJECTION;
+    }else return SQLITE_CANTOPEN;
+  }
 #if SQLITE_OS_UNIX
   if( path[0]!='/' ) return SQLITE_CANTOPEN;
   vfs = "unix"; /* The dispatcher independently requires the POSIX finder. */

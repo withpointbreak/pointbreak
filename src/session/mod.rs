@@ -18,9 +18,13 @@ pub(crate) mod append_progress;
 #[doc(hidden)]
 pub use append_progress::{
     AppendExit, AuditExit, AuditLimits, OwnedAppendBootstrap, OwnedAppendOperation,
-    OwnedAuditBootstrap, OwnedProcessBootstrap, OwnedProcessExit, OwnedProcessFailure,
-    run_disposable_append, run_disposable_audit, run_disposable_owner,
+    OwnedAuditBootstrap, OwnedDataCommand, OwnedProcessBootstrap, OwnedProcessExit,
+    OwnedProcessFailure, enter_owned_data_command, run_disposable_append, run_disposable_audit,
+    run_disposable_owner,
 };
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub use append_progress::{OwnedDataOperation, OwnedDataRequest, run_owned_data_request};
 #[cfg(feature = "bench")]
 pub(crate) mod benchmark;
 pub(crate) mod derived_access;
