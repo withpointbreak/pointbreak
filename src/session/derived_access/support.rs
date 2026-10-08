@@ -226,6 +226,7 @@ fn query_string_rows(
     let mut statement = connection.prepare(sql).map_err(|error| error.to_string())?;
     let rows = statement
         .query_map(rusqlite::params_from_iter(parameters.iter()), |row| {
+            crate::session::derived_access::owned_row_charge(row)?;
             row.get::<_, String>(0)
         })
         .map_err(|error| error.to_string())?;
@@ -237,4 +238,57 @@ fn to_sql_integer(value: impl TryInto<i64>) -> Result<i64, String> {
     value
         .try_into()
         .map_err(|_| "history value does not fit SQLite INTEGER".to_owned())
+}
+
+/// Selected support closure for an admitted readonly native phase. Every probe
+/// shares the caller's snapshot; Rust sets preserve complete multi-value inputs.
+pub(super) fn support_event_plan_readonly(
+    connection: &rusqlite::Connection,
+    selected: &[ShoreEvent],
+    as_of: TruthCursor,
+) -> Result<SupportEventPlan, String> {
+    let mut targets = selected
+        .iter()
+        .map(|event| event.event_id.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+    let mut hashes = crate::session::workflow::selected_support_content_hashes(selected)
+        .map_err(|error| error.to_string())?;
+    let epoch = to_sql_integer(as_of.epoch)?;
+    let sequence = to_sql_integer(as_of.sequence)?;
+    let query = |sql: &str, keys: &BTreeSet<String>| -> Result<BTreeSet<String>, String> {
+        if keys.len() > 8192 {
+            return Err("selected support set limit".into());
+        }
+        let mut statement = connection.prepare(sql).map_err(|e| e.to_string())?;
+        let mut values = BTreeSet::new();
+        for key in keys {
+            let rows = statement
+                .query_map(rusqlite::params![epoch, sequence, key], |row| {
+                    crate::session::derived_access::owned_row_charge(row)?;
+                    row.get::<_, String>(0)
+                })
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                values.insert(row.map_err(|e| e.to_string())?);
+                if values.len() > 8192 {
+                    return Err("selected support row limit".into());
+                }
+            }
+        }
+        Ok(values)
+    };
+    hashes.extend(query("SELECT event.content_hash FROM semantic_event_fact_text AS event JOIN locator_event_text AS locator ON locator.sequence=event.sequence WHERE locator.event_id=?3 AND event.content_hash IS NOT NULL AND locator.epoch=?1 AND locator.sequence<=?2 ORDER BY event.content_hash", &targets)?);
+    let removal = query(
+        "SELECT locator.event_id FROM semantic_event_fact_text AS event JOIN locator_event_text AS locator ON locator.sequence=event.sequence WHERE event.content_hash=?3 AND locator.event_type='artifact_removed' AND locator.epoch=?1 AND locator.sequence<=?2 ORDER BY locator.event_id",
+        &hashes,
+    )?;
+    targets.extend(removal.iter().cloned());
+    let signatures = query(
+        "SELECT locator.event_id FROM product_history_signature AS signature JOIN locator_event_text AS locator ON locator.sequence=signature.sequence WHERE signature.target_event_id=?3 AND locator.epoch=?1 AND locator.sequence<=?2 ORDER BY locator.event_id",
+        &targets,
+    )?;
+    Ok(SupportEventPlan {
+        removal_event_ids: removal.into_iter().collect(),
+        signature_event_ids: signatures.into_iter().collect(),
+    })
 }

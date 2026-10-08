@@ -158,6 +158,116 @@ impl ReadContext {
         value.observe()?;
         Ok(value)
     }
+    pub(in crate::session) fn selected_event_bytes(&self, digest: &str) -> Result<Vec<u8>> {
+        super::require_quiescent_data()?;
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(ShoreError::Message(
+                "invalid selected event key digest".into(),
+            ));
+        }
+        self.clone.validate(&self.common)?;
+        let path = self.store.join("events").join(format!("{digest}.json"));
+        let file = crate::session::store::authority_lock::open_identity_path(&path, false, false)?;
+        let length = file
+            .metadata()
+            .map_err(|error| ShoreError::Message(error.to_string()))?
+            .len();
+        if length > 16 * 1024 * 1024 {
+            return Err(ShoreError::Message("selected carrier byte limit".into()));
+        }
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_carrier_open();
+        let bytes = super::audit::read(&file, length)?;
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_carrier_bytes(bytes.len());
+        Ok(bytes)
+    }
+    pub(in crate::session) fn identity_document(&self) -> Result<serde_json::Value> {
+        super::require_quiescent_data()?;
+        let before = self.observe()?;
+        let repository = native::root_snapshot(&self.repository_root)?.canonical;
+        let basename = |path: &std::path::Path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+        };
+        let current = basename(&repository).unwrap_or_else(|| "repository".into());
+        let label = self
+            .common
+            .parent()
+            .and_then(basename)
+            .unwrap_or_else(|| current.clone());
+        let identity = crate::session::StoreIdentity {
+            store_identity: crate::session::store::resolution::opaque_path_identity(
+                "store",
+                &self.store,
+            )?,
+            context_identity: crate::session::store::resolution::opaque_path_identity(
+                "context",
+                &repository,
+            )?,
+            repository: label.clone(),
+            worktree: (current != label).then_some(current),
+            placement: crate::session::StorePlacement {
+                tier: "clone",
+                label: "clone store",
+            },
+            family: None,
+        };
+        let mut document = serde_json::to_value(identity)?;
+        document["schema"] = "pointbreak.inspect-identity".into();
+        if self.observe()? != before {
+            return Err(ShoreError::Message(
+                "owned Inspector identity changed".into(),
+            ));
+        }
+        Ok(document)
+    }
+    pub(in crate::session) fn trust_set(&self) -> Result<crate::session::TrustSet> {
+        super::require_quiescent_data()?;
+        let repository = native::root_snapshot(&self.repository_root)?.canonical;
+        let path = crate::paths::RepositoryPaths::from_worktree_root(repository).allowed_signers();
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(crate::session::TrustSet::default());
+            }
+            Err(error) => return Err(ShoreError::Message(error.to_string())),
+            Ok(_) => {}
+        }
+        let bytes = super::data_file_bytes(&path, 1_048_576)?;
+        match serde_json::from_slice(&bytes)
+            .map_err(ShoreError::from)
+            .and_then(crate::session::signing::event_signature_trust_set)
+        {
+            Ok(trust) => Ok(trust),
+            Err(error) => {
+                eprintln!("warning: ignoring {}: {error}", path.display());
+                Ok(crate::session::TrustSet::default())
+            }
+        }
+    }
+    pub(in crate::session) fn backend(
+        &self,
+    ) -> Result<crate::session::store::backend::StoreBackend> {
+        owner::require_quiescent()?;
+        let repository = native::root_snapshot(&self.repository_root)?.canonical;
+        let resolved = crate::session::store::resolution::resolve_owned_data_store(
+            &repository,
+            &self.clone,
+            &self.common,
+        )?;
+        if resolved.store_dir() != self.store || resolved.derived_access_profile() != self.profile {
+            return Err(ShoreError::Message(
+                "owned data store resolution changed".into(),
+            ));
+        }
+        Ok(resolved.backend().clone())
+    }
     pub(in crate::session) fn store_dir(&self) -> &std::path::Path {
         &self.store
     }

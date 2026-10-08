@@ -4,6 +4,7 @@
  */
 
 import changeReaderProfile from "../../../../documents/change_reader_profile_v1.json";
+import changeReaderProgressProfile from "../../../../documents/change_reader_progress_profile_v1.json";
 
 /**
  * Authority state for the reader's target store cohort. These states describe
@@ -2013,7 +2014,9 @@ export function decodeReaderProfile(value: unknown): ReaderProfile {
   }
   if (
     availability === "ready" &&
-    (minimumReaderProfile !== CHANGE_READER_PROFILE ||
+    ((minimumReaderProfile !== CHANGE_READER_PROFILE &&
+      minimumReaderProfile !==
+        changeReaderProgressProfile.minimumReaderProfile) ||
       typeof commitGraphStamp !== "string" ||
       commitGraphStamp.length === 0)
   ) {

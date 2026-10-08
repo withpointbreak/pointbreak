@@ -12,7 +12,10 @@ use std::rc::Rc;
 
 use libsqlite3_sys as ffi;
 #[cfg(target_os = "macos")]
-pub(in crate::session) use projection::{with_published_projection, with_staging_projection};
+pub(in crate::session) use projection::{
+    ProjectionRequestWitnesses, with_projection_phase, with_published_projection,
+    with_staging_projection,
+};
 #[cfg(test)]
 use rusqlite::OpenFlags;
 use rusqlite::{Connection, params};

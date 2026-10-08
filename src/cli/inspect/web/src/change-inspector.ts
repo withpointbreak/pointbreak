@@ -486,6 +486,7 @@ export async function bootstrapChangeInspector(
     const observation = ++recoveryObservationEpoch;
     const credentialVersion = sessionCredentialVersion();
     const wasBuilding = recoveryStatus?.rebuildInFlight === true;
+    const previousCompleted = recoveryStatus?.child?.lastCompletedRequestId;
     recoveryController?.abort("superseded");
     const controller = new AbortController();
     recoveryController = controller;
@@ -506,7 +507,14 @@ export async function bootstrapChangeInspector(
       recoveryStatus = decoded;
       recoveryError = null;
       renderRecovery();
-      if (wasBuilding && decoded.servingCurrent) reloadSelectedAccess();
+      if (
+        (wasBuilding && decoded.servingCurrent) ||
+        (decoded.child?.lastCompletedKind === "rebuild" &&
+          decoded.child.lastCompletedOutcome === "succeeded" &&
+          decoded.child.state === "completed" &&
+          decoded.child.lastCompletedRequestId !== previousCompleted)
+      )
+        reloadSelectedAccess();
     } catch (error) {
       if (controller.signal.aborted || observation !== recoveryObservationEpoch)
         return;
@@ -519,7 +527,11 @@ export async function bootstrapChangeInspector(
       recoveryTimer =
         isCurrentComposition() &&
         recoveryPending === null &&
-        recoveryStatus?.rebuildInFlight
+        (recoveryStatus?.rebuildInFlight ||
+          recoveryStatus?.child?.observationPending ||
+          ["starting", "initializing", "running"].includes(
+            recoveryStatus?.child?.state ?? "",
+          ))
           ? setTimeout(() => void refreshRecoveryStatus(), 750)
           : null;
     }

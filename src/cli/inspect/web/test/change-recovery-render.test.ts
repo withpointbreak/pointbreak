@@ -31,6 +31,46 @@ beforeEach(() => {
 });
 
 describe("Change recovery presentation", () => {
+  it("shows an unknown outcome without claiming cancellation completed", () => {
+    renderChangeRecovery(
+      {
+        status: {
+          ...status,
+          actions: ["retry"],
+          child: {
+            epoch: 2,
+            operation: 7,
+            requestId: "a".repeat(32),
+            lastCompletedOperation: null,
+            lastCompletedRequestId: null,
+            lastCompletedKind: null,
+            lastCompletedOutcome: null,
+            state: "unknown",
+            detail: "Response lost; operation may still be running.",
+            cooperativeCancellation: true,
+            observationOnly: true,
+            observationPending: false,
+            observedAtUnixMilliseconds: null,
+            observationAgeMilliseconds: null,
+          },
+        },
+        error: null,
+        access: "derived",
+        fallbackValidated: false,
+        pending: null,
+      },
+      actions,
+    );
+    expect(document.querySelector("#derived-access-summary")?.textContent).toBe(
+      "Data operation outcome unknown",
+    );
+    expect(
+      document.querySelector("#derived-access-detail")?.textContent,
+    ).toContain("may still be running");
+    expect(
+      document.querySelector("#derived-access-cancel")?.classList,
+    ).toContain("hidden");
+  });
   it("shows only advertised actions and treats server detail as text", () => {
     renderChangeRecovery(
       {

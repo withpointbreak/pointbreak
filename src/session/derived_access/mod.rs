@@ -800,3 +800,20 @@ mod tests {
 
 #[cfg(test)]
 mod product_contract_tests;
+
+#[cfg(target_os = "macos")]
+pub(in crate::session) mod enrolled_inspector;
+
+/// Charge only the admitted enrolled reader; ordinary platform readers retain
+/// their existing behavior and cannot select an enrolled native route.
+fn owned_row_charge(row: &rusqlite::Row<'_>) -> rusqlite::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::session::append_progress::data_row_charge(row)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = row;
+        Ok(())
+    }
+}

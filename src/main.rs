@@ -18,6 +18,9 @@ fn main() -> ExitCode {
         if mode == "__owned-append-v1" {
             return private_append_command(arguments.collect());
         }
+        if mode == "__owned-inspect-v1" {
+            return cli::inspect::owned::shell_main(arguments.collect());
+        }
         if mode == "__inspect-data-v1" {
             return cli::inspect::owned::child_main(arguments.collect());
         }

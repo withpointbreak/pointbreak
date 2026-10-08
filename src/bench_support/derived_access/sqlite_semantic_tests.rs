@@ -2219,7 +2219,7 @@ fn proposal_carrier_inventory_is_indexed_and_retains_no_summary_material() {
     append(&adapter, &conflicting, 2);
 
     let inventory = adapter.semantic_inventory().expect("semantic inventory");
-    assert_eq!(inventory.schema_version, 9);
+    assert_eq!(inventory.schema_version, 10);
     assert_eq!(inventory.proposal_carrier_count, 3);
     assert!(
         inventory
@@ -3619,7 +3619,7 @@ fn append_restart_and_selected_detail_do_not_rebuild_full_projections() {
         inventory.profile_id,
         "pointbreak.sqlite-derived-access-semantic.v1"
     );
-    assert_eq!(inventory.schema_version, 9);
+    assert_eq!(inventory.schema_version, 10);
     assert_eq!(inventory.fact_count, 1);
     assert_eq!(inventory.retained_body_object_bytes, 0);
     assert_eq!(

@@ -333,6 +333,16 @@ pub(super) enum TimelineReadBoundary {
     TrustBindingComplete,
 }
 
+impl std::fmt::Display for TimelinePageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RequestInvalid(message) | Self::Stale(message) | Self::Invalid(message) => {
+                f.write_str(message)
+            }
+        }
+    }
+}
+
 impl From<String> for TimelinePageError {
     fn from(message: String) -> Self {
         Self::Invalid(message)
@@ -378,6 +388,14 @@ struct TimelinePredicate {
 fn timeline_predicate(
     request: &DerivedTimelinePageRequestV1,
     include_url_types: bool,
+) -> TimelinePredicate {
+    timeline_predicate_with(request, include_url_types, field_predicate)
+}
+
+fn timeline_predicate_with(
+    request: &DerivedTimelinePageRequestV1,
+    include_url_types: bool,
+    field_builder: fn(&str, &str) -> (String, Vec<Value>),
 ) -> TimelinePredicate {
     let mut predicates = vec!["1 = 1".to_owned()];
     let mut parameters = Vec::new();
@@ -443,7 +461,7 @@ fn timeline_predicate(
         else {
             continue;
         };
-        let (predicate, mut clause_parameters) = field_predicate(field, value);
+        let (predicate, mut clause_parameters) = field_builder(field, value);
         predicates.push(if *negate {
             format!("NOT ({predicate})")
         } else {
@@ -586,27 +604,41 @@ fn select_bodyless_timeline(
     let cte = timeline_cte(as_of);
     let page = timeline_predicate(request, true);
     let facet = timeline_predicate(request, false);
-    let match_count = query_selected_count(
+    select_bodyless_timeline_from(
         connection,
-        &cte,
-        TIMELINE_RELATION,
-        &page.sql,
-        &page.parameters,
-    )?;
-    let facets = query_selected_facets(
-        connection,
-        &cte,
-        TIMELINE_RELATION,
-        &facet.sql,
-        &facet.parameters,
-    )?;
+        TimelineSql {
+            cte: &cte,
+            relation: TIMELINE_RELATION,
+        },
+        request,
+        page,
+        facet,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct TimelineSql<'a> {
+    cte: &'a str,
+    relation: &'a str,
+}
+
+fn select_bodyless_timeline_from(
+    connection: &rusqlite::Connection,
+    source: TimelineSql<'_>,
+    request: &DerivedTimelinePageRequestV1,
+    page: TimelinePredicate,
+    facet: TimelinePredicate,
+) -> Result<BodylessTimelineSelection, TimelinePageError> {
+    let TimelineSql { cte, relation } = source;
+    let match_count = query_selected_count(connection, cte, relation, &page.sql, &page.parameters)?;
+    let facets = query_selected_facets(connection, cte, relation, &facet.sql, &facet.parameters)?;
     let descending = request.order() == DerivedTimelineOrderV1::Desc;
     let (offset, match_index) =
-        resolve_timeline_offset(connection, &cte, &page, request, descending, match_count)?;
+        resolve_timeline_offset(connection, source, &page, request, descending, match_count)?;
     let keys = query_selected_window(
         connection,
-        &cte,
-        TIMELINE_RELATION,
+        cte,
+        relation,
         &page.sql,
         &page.parameters,
         descending,
@@ -615,7 +647,7 @@ fn select_bodyless_timeline(
     )?;
     let adjacent = adjacent_windows(
         connection,
-        &cte,
+        source,
         &page,
         request,
         descending,
@@ -636,19 +668,20 @@ fn select_bodyless_timeline(
 
 fn resolve_timeline_offset(
     connection: &rusqlite::Connection,
-    cte: &str,
+    source: TimelineSql<'_>,
     predicate: &TimelinePredicate,
     request: &DerivedTimelinePageRequestV1,
     descending: bool,
     match_count: usize,
 ) -> Result<(usize, Option<usize>), TimelinePageError> {
+    let TimelineSql { cte, relation } = source;
     match request.position() {
         DerivedTimelinePagePositionV1::Initial => Ok((0, None)),
         DerivedTimelinePagePositionV1::At(event_id) => {
             let key = query_selected_key(
                 connection,
                 cte,
-                TIMELINE_RELATION,
+                relation,
                 &predicate.sql,
                 &predicate.parameters,
                 event_id.as_str(),
@@ -661,7 +694,7 @@ fn resolve_timeline_offset(
             let index = query_selected_index(
                 connection,
                 cte,
-                TIMELINE_RELATION,
+                relation,
                 &predicate.sql,
                 &predicate.parameters,
                 &key,
@@ -681,7 +714,7 @@ fn resolve_timeline_offset(
             let key = query_selected_key(
                 connection,
                 cte,
-                TIMELINE_RELATION,
+                relation,
                 &predicate.sql,
                 &predicate.parameters,
                 boundary.event_id().as_str(),
@@ -693,7 +726,7 @@ fn resolve_timeline_offset(
             })?;
             let occurred_at = query_raw_occurred_at(
                 connection,
-                cte,
+                source,
                 &predicate.sql,
                 &predicate.parameters,
                 boundary.event_id().as_str(),
@@ -711,7 +744,7 @@ fn resolve_timeline_offset(
             let offset = query_selected_index(
                 connection,
                 cte,
-                TIMELINE_RELATION,
+                relation,
                 &predicate.sql,
                 &predicate.parameters,
                 &key,
@@ -736,7 +769,7 @@ fn resolve_timeline_offset(
 #[allow(clippy::too_many_arguments)]
 fn adjacent_windows(
     connection: &rusqlite::Connection,
-    cte: &str,
+    source: TimelineSql<'_>,
     predicate: &TimelinePredicate,
     request: &DerivedTimelinePageRequestV1,
     descending: bool,
@@ -753,7 +786,7 @@ fn adjacent_windows(
         } else {
             Some(DerivedTimelinePageBoundaryV1::Key(key_at_offset(
                 connection,
-                cte,
+                source,
                 predicate,
                 descending,
                 previous_start - 1,
@@ -766,7 +799,7 @@ fn adjacent_windows(
             .last()
             .ok_or_else(|| "Timeline page has no continuation anchor".to_owned())?;
         Some(DerivedTimelinePageBoundaryV1::Key(timeline_page_key(
-            connection, cte, predicate, key,
+            connection, source, predicate, key,
         )?))
     } else {
         None
@@ -776,15 +809,16 @@ fn adjacent_windows(
 
 fn key_at_offset(
     connection: &rusqlite::Connection,
-    cte: &str,
+    source: TimelineSql<'_>,
     predicate: &TimelinePredicate,
     descending: bool,
     offset: usize,
 ) -> Result<DerivedTimelinePageKeyV1, String> {
+    let TimelineSql { cte, relation } = source;
     let mut keys = query_selected_window(
         connection,
         cte,
-        TIMELINE_RELATION,
+        relation,
         &predicate.sql,
         &predicate.parameters,
         descending,
@@ -794,18 +828,18 @@ fn key_at_offset(
     let key = keys
         .pop()
         .ok_or_else(|| "Timeline adjacent boundary is outside this query".to_owned())?;
-    timeline_page_key(connection, cte, predicate, &key)
+    timeline_page_key(connection, source, predicate, &key)
 }
 
 fn timeline_page_key(
     connection: &rusqlite::Connection,
-    cte: &str,
+    source: TimelineSql<'_>,
     predicate: &TimelinePredicate,
     key: &SelectedHistoryKey,
 ) -> Result<DerivedTimelinePageKeyV1, String> {
     let occurred_at = query_raw_occurred_at(
         connection,
-        cte,
+        source,
         &predicate.sql,
         &predicate.parameters,
         &key.event_id,
@@ -817,20 +851,22 @@ fn timeline_page_key(
 
 fn query_raw_occurred_at(
     connection: &rusqlite::Connection,
-    cte: &str,
+    source: TimelineSql<'_>,
     predicate: &str,
     parameters: &[Value],
     event_id: &str,
 ) -> Result<Option<String>, String> {
+    let TimelineSql { cte, relation } = source;
     let sql = format!(
         "{cte}
-         SELECT occurred_at FROM {TIMELINE_RELATION}
+         SELECT occurred_at FROM {relation}
          WHERE {predicate} AND event_id = ?"
     );
     let mut values = parameters.to_vec();
     values.push(event_id.to_owned().into());
     connection
         .query_row(&sql, rusqlite::params_from_iter(values.iter()), |row| {
+            crate::session::derived_access::owned_row_charge(row)?;
             row.get(0)
         })
         .optional()
@@ -950,6 +986,7 @@ fn load_timeline_expectations(
                 to_sql_integer(as_of.sequence)?,
             ],
             |row| {
+                crate::session::derived_access::owned_row_charge(row)?;
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
@@ -1036,6 +1073,7 @@ fn load_timeline_expectations(
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([], |row| {
+            crate::session::derived_access::owned_row_charge(row)?;
             Ok((
                 row.get::<_, String>(0)?,
                 NormalizedRevisionReference {
@@ -1074,6 +1112,7 @@ fn load_timeline_expectations(
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([], |row| {
+            crate::session::derived_access::owned_row_charge(row)?;
             Ok((
                 row.get::<_, String>(0)?,
                 NormalizedChangeCorrelation {
@@ -1107,6 +1146,7 @@ fn load_timeline_expectations(
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([], |row| {
+            crate::session::derived_access::owned_row_charge(row)?;
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
         .map_err(|error| error.to_string())?;
@@ -1179,6 +1219,7 @@ fn query_candidate_proposal_locators(
                 to_sql_integer(as_of.sequence)?,
             ],
             |row| {
+                crate::session::derived_access::owned_row_charge(row)?;
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
@@ -1568,6 +1609,7 @@ fn validate_signature_support(
                 to_sql_integer(as_of.sequence)?,
             ],
             |row| {
+                crate::session::derived_access::owned_row_charge(row)?;
                 Ok((
                     row.get::<_, String>(0)?,
                     to_u64_sql(row.get(1)?)?,
@@ -1897,6 +1939,7 @@ fn query_locator_expectations(
                 to_sql_integer(as_of.sequence)?,
             ],
             |row| {
+                crate::session::derived_access::owned_row_charge(row)?;
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
@@ -1989,12 +2032,28 @@ fn query_global_projection(
     as_of: TruthCursor,
 ) -> Result<TimelineGlobalProjection, String> {
     let cte = timeline_cte(as_of);
+    query_global_projection_from(
+        connection,
+        as_of,
+        TimelineSql {
+            cte: &cte,
+            relation: TIMELINE_RELATION,
+        },
+    )
+}
+
+fn query_global_projection_from(
+    connection: &rusqlite::Connection,
+    as_of: TruthCursor,
+    source: TimelineSql<'_>,
+) -> Result<TimelineGlobalProjection, String> {
+    let TimelineSql { cte, relation } = source;
     let event_types = query_strings(
         connection,
         &format!(
             "{cte}
              SELECT event_type
-             FROM {TIMELINE_RELATION}
+             FROM {relation}
              GROUP BY event_type
              ORDER BY min(normalized_occurred_at || '|' || event_id)"
         ),
@@ -2010,7 +2069,7 @@ fn query_global_projection(
         &format!(
             "{cte}
              SELECT DISTINCT track_id
-             FROM {TIMELINE_RELATION}
+             FROM {relation}
              WHERE track_id IS NOT NULL
              ORDER BY track_id"
         ),
@@ -2047,6 +2106,7 @@ fn query_global_projection(
         .map_err(|error| error.to_string())?;
     let revision_refs = statement
         .query_map([], |row| {
+            crate::session::derived_access::owned_row_charge(row)?;
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
         .map_err(|error| error.to_string())?
@@ -2112,7 +2172,10 @@ fn query_global_projection(
 fn query_strings(connection: &rusqlite::Connection, sql: &str) -> Result<Vec<String>, String> {
     let mut statement = connection.prepare(sql).map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map([], |row| row.get::<_, String>(0))
+        .query_map([], |row| {
+            crate::session::derived_access::owned_row_charge(row)?;
+            row.get::<_, String>(0)
+        })
         .map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
@@ -2432,6 +2495,7 @@ pub(super) fn timeline_window_query_plan_for_test(
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map(rusqlite::params_from_iter(parameters.iter()), |row| {
+            crate::session::derived_access::owned_row_charge(row)?;
             row.get::<_, String>(3)
         })
         .map_err(|error| error.to_string())?;
@@ -2719,3 +2783,6 @@ mod tests {
         assert!(!cli.contains("fn token_set<"));
     }
 }
+
+#[cfg(target_os = "macos")]
+pub(super) mod enrolled;

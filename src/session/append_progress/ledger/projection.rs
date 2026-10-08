@@ -17,7 +17,55 @@ pub(in crate::session) fn with_published_projection<T>(
     lease: &GenerationReadLease,
     query: impl for<'db> FnOnce(&'db Connection, &ProgressReadFence) -> Result<T>,
 ) -> Result<T> {
-    let evidence = RetainedEvidence::capture_projection_read(
+    with_projection_phase(
+        context,
+        layout,
+        publication,
+        descriptor,
+        reader_receipt,
+        lease,
+        None,
+        query,
+    )
+}
+
+/// Actual request-wide file handles remain in N for every native scope.
+pub(in crate::session) struct ProjectionRequestWitnesses<'a>(RetainedEvidence<'a>);
+impl<'a> ProjectionRequestWitnesses<'a> {
+    pub(in crate::session) fn capture(
+        context: &'a ReadContext,
+        layout: &GenerationLayout,
+        publication: &GenerationPublication,
+        descriptor: &GenerationDescriptor,
+        receipt: &crate::session::derived_access::semantic::change::ChangeReaderProfileReceiptV3,
+        lease: &'a GenerationReadLease,
+    ) -> Result<Self> {
+        Ok(Self(RetainedEvidence::capture_projection_read(
+            context,
+            layout,
+            publication,
+            descriptor,
+            receipt,
+            lease,
+        )?))
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit borrowed evidence and phase callback"
+)]
+pub(in crate::session) fn with_projection_phase<T>(
+    context: &ReadContext,
+    layout: &GenerationLayout,
+    publication: &GenerationPublication,
+    descriptor: &GenerationDescriptor,
+    reader_receipt: &crate::session::derived_access::semantic::change::ChangeReaderProfileReceiptV3,
+    lease: &GenerationReadLease,
+    witnesses: Option<&ProjectionRequestWitnesses<'_>>,
+    query: impl for<'db> FnOnce(&'db Connection, &ProgressReadFence) -> Result<T>,
+) -> Result<T> {
+    let mut evidence = RetainedEvidence::capture_projection_read(
         context,
         layout,
         publication,
@@ -25,6 +73,9 @@ pub(in crate::session) fn with_published_projection<T>(
         reader_receipt,
         lease,
     )?;
+    if let Some(witnesses) = witnesses {
+        evidence.retain_scope_witnesses(&witnesses.0)?;
+    }
     let before = context.observe_with_witnesses(&evidence)?;
     let reserve = super::super::audit::reserve_retirement(evidence.retirement_read_bytes()?)?;
     let permit = LiveSqlPermit(super::super::owner::SqlPermit::enter()?);

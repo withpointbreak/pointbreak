@@ -1181,6 +1181,7 @@ pub(super) fn query_selected_facets(
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map(rusqlite::params_from_iter(parameters.iter()), |row| {
+            crate::session::derived_access::owned_row_charge(row)?;
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })
         .map_err(|error| error.to_string())?;
@@ -1220,6 +1221,7 @@ pub(super) fn query_selected_key(
     values.push(event_id.to_owned().into());
     connection
         .query_row(&sql, rusqlite::params_from_iter(values.iter()), |row| {
+            crate::session::derived_access::owned_row_charge(row)?;
             Ok(SelectedHistoryKey {
                 occurred_at: row.get(0)?,
                 event_id: row.get(1)?,
@@ -1300,6 +1302,7 @@ pub(super) fn query_selected_window(
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map(rusqlite::params_from_iter(values.iter()), |row| {
+            crate::session::derived_access::owned_row_charge(row)?;
             Ok(SelectedHistoryKey {
                 occurred_at: row.get(0)?,
                 event_id: row.get(1)?,

@@ -617,12 +617,16 @@ impl QualificationLocalJournal {
 /// `content_ref` under the store dir.
 #[derive(Debug)]
 pub(crate) struct LocalContentStore {
+    #[cfg(target_os = "macos")]
+    root: PathBuf,
     storage: LocalStorage,
 }
 
 impl LocalContentStore {
     pub(crate) fn new(store_dir: impl AsRef<Path>) -> Self {
         Self {
+            #[cfg(target_os = "macos")]
+            root: store_dir.as_ref().to_path_buf(),
             storage: LocalStorage::new(store_dir),
         }
     }
@@ -635,10 +639,23 @@ impl ContentStore for LocalContentStore {
     }
 
     fn get(&self, content_ref: &str) -> Result<Vec<u8>> {
+        #[cfg(target_os = "macos")]
+        if let Some(result) =
+            crate::session::append_progress::owned_content_read(&self.root, content_ref)
+        {
+            return result?
+                .ok_or_else(|| ShoreError::Message(format!("content absent: {content_ref}")));
+        }
         self.storage.read_bytes(Path::new(content_ref))
     }
 
     fn get_if_exists(&self, content_ref: &str) -> Result<Option<Vec<u8>>> {
+        #[cfg(target_os = "macos")]
+        if let Some(result) =
+            crate::session::append_progress::owned_content_read(&self.root, content_ref)
+        {
+            return result;
+        }
         self.storage.read_bytes_if_exists(Path::new(content_ref))
     }
 

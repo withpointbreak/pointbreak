@@ -133,6 +133,45 @@ afterEach(async () => {
 });
 
 describe("Change-first recovery integration", () => {
+  it("renders enrolled Change documents only after matching profile postflight", async () => {
+    let profiles = 0;
+    globalThis.fetch = vi.fn(async (input, init) => {
+      expect(init?.method ?? "GET").toBe("GET");
+      const path = String(input);
+      if (path === "/api/identity")
+        return new Response(JSON.stringify(identity));
+      if (path === "/api/derived-access/status")
+        return new Response(JSON.stringify(status({ actions: [] })));
+      if (path.startsWith("/api/v2/profile")) {
+        profiles++;
+        return new Response(
+          JSON.stringify({
+            ...profile,
+            minimumReaderProfile: "review_change_revision_progress_v1",
+          }),
+        );
+      }
+      if (path.startsWith("/api/v2/changes"))
+        return new Response(JSON.stringify(page("changes")));
+      if (path.startsWith("/api/v2/attention"))
+        return new Response(JSON.stringify(page("attention")));
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector(".unit-card[data-change-id]"),
+      ).not.toBeNull(),
+    );
+    expect(profiles).toBeGreaterThanOrEqual(2);
+    expect(document.querySelector("#master")?.textContent).not.toContain(
+      "Reader refused:",
+    );
+  });
+
   it("keeps the shell usable and starts fallback only after an explicit click", async () => {
     const requests: Array<{ path: string; method: string }> = [];
     globalThis.fetch = vi.fn(async (input, init) => {

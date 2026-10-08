@@ -165,23 +165,6 @@ impl SqliteLocator {
         read_locator_checkpoint(&connection)
     }
 
-    pub(crate) fn apply_delta_with(
-        &self,
-        delta: &CursorDelta,
-        rows: &[LocatorRow],
-        apply_semantic: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<(), SqliteLocatorError>,
-    ) -> Result<LocatorCheckpoint, SqliteLocatorError> {
-        if rows.len() != delta.receipts.len() {
-            return Err(SqliteLocatorError::Delta(format!(
-                "{} locator rows for {} cursor receipts",
-                rows.len(),
-                delta.receipts.len()
-            )));
-        }
-        let connection = self.validated_connection()?;
-        Self::apply_delta_on(&connection, delta, rows, apply_semantic)
-    }
-
     pub(crate) fn validate_enrolled_rows_on(
         connection: &Connection,
         entries: &[super::cursor::BootstrapPopulationEntry],
@@ -240,7 +223,7 @@ impl SqliteLocator {
                 delta.receipts.len()
             )));
         }
-        let checkpoint = read_locator_checkpoint(&connection)?;
+        let checkpoint = read_locator_checkpoint(connection)?;
         if checkpoint.applied != delta.after {
             return Err(SqliteLocatorError::Delta(format!(
                 "delta starts at {:?}, checkpoint is {:?}",
@@ -397,6 +380,46 @@ impl SqliteLocator {
             );
         }
         Ok(LocatorRead::Ready(hydrated))
+    }
+
+    /// Selection only: no stock open and no filesystem hydration. Caller owns
+    /// the snapshot and must finish it before using these owned rows.
+    pub(crate) fn selected_rows_on(
+        connection: &Connection,
+        event_ids: &[String],
+        observed: TruthCursor,
+    ) -> Result<Vec<Option<LocatorRow>>, SqliteLocatorError> {
+        let checkpoint = read_locator_checkpoint(connection)?;
+        if checkpoint.applied != observed {
+            return Err(SqliteLocatorError::Metadata(
+                "selected locator checkpoint moved".into(),
+            ));
+        }
+        let sql = locator_select(
+            "WHERE locator.event_hash = ?1 AND locator.epoch = ?2 AND locator.sequence <= ?3",
+        );
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(|error| sqlite_error("prepare detached locator selection", error))?;
+        event_ids
+            .iter()
+            .map(|id| {
+                let Some(hash) = decode_prefixed_digest(id, "evt:sha256:") else {
+                    return Ok(None);
+                };
+                statement
+                    .query_row(
+                        params![
+                            hash.as_slice(),
+                            to_i64(observed.epoch, "selected epoch")?,
+                            to_i64(observed.sequence, "selected cursor")?
+                        ],
+                        stored_locator_row_from_sql,
+                    )
+                    .optional()
+                    .map_err(|error| sqlite_error("select detached locator", error))
+            })
+            .collect()
     }
 
     pub(crate) fn chronological_window(
@@ -1019,6 +1042,7 @@ fn query_locator_rows(
 }
 
 fn stored_locator_row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocatorRow> {
+    crate::session::derived_access::owned_row_charge(row)?;
     let epoch = row.get::<_, i64>(0)?;
     let sequence = row.get::<_, i64>(1)?;
     let receipt_epoch = row.get::<_, i64>(12)?;
@@ -1043,9 +1067,9 @@ fn stored_locator_row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<Loca
     })
 }
 
-fn hydrate_locator_row(
+pub(crate) fn hydrate_locator_row(
     journal: &QualificationLocalJournal,
-    mut stored: LocatorRow,
+    stored: LocatorRow,
 ) -> Result<HydratedLocatorRow, SqliteLocatorError> {
     let bytes = journal
         .read_event_bytes_by_key_digest(&stored.logical_reread_key)
@@ -1056,6 +1080,14 @@ fn hydrate_locator_row(
                 stored.logical_reread_key
             ))
         })?;
+    hydrate_locator_bytes(stored, bytes)
+}
+
+/// Filesystem-free validation, shared by stock and owned phased hydration.
+pub(crate) fn hydrate_locator_bytes(
+    mut stored: LocatorRow,
+    bytes: Vec<u8>,
+) -> Result<HydratedLocatorRow, SqliteLocatorError> {
     if sha256_bytes_hex(&bytes) != stored.validation_witness {
         #[cfg(any(test, feature = "longitudinal-counting"))]
         record_timeline_carrier_mismatch_v1(

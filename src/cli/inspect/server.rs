@@ -779,6 +779,18 @@ pub(super) fn serve(
     output_format: StartupOutputFormat,
     stdout: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    serve_selected(addr, repo, open, api_only, output_format, stdout, None)
+}
+
+pub(super) fn serve_selected(
+    addr: SocketAddr,
+    repo: PathBuf,
+    open: bool,
+    api_only: bool,
+    output_format: StartupOutputFormat,
+    stdout: &mut dyn Write,
+    selection: Option<super::owned::EnrollmentSelection>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let listener =
         TcpListener::bind(addr).map_err(|error| format!("could not bind {addr}: {error}"))?;
     // Resolve the actually-bound address so an ephemeral port (`--port 0`)
@@ -792,7 +804,7 @@ pub(super) fn serve(
         serve_static: !api_only,
     });
     let capability_url = format!("{url}#/timeline?token={}", policy.token.expose());
-    let state = Arc::new(super::owned::Supervisor::new(repo.clone()));
+    let state = Arc::new(super::owned::Supervisor::new(repo.clone(), selection));
 
     match (api_only, output_format) {
         (false, StartupOutputFormat::Text) => {
@@ -912,6 +924,15 @@ pub(super) fn data_response(
     state: &Arc<InspectState>,
     input: &super::owned::DataRequest,
 ) -> std::io::Result<Response> {
+    counted_data_response(input, |method, path, query| {
+        route(state, false, method, path, query)
+    })
+}
+
+pub(super) fn counted_data_response(
+    input: &super::owned::DataRequest,
+    dispatch: impl FnOnce(&str, &str, Option<&str>) -> Response,
+) -> std::io::Result<Response> {
     let request = RequestHead {
         method: input.method.clone(),
         target: input.target.clone(),
@@ -968,7 +989,7 @@ pub(super) fn data_response(
             };
         }
         let _guard = scope.enter();
-        let mut response = route(state, false, &request.method, path, query);
+        let mut response = dispatch(&request.method, path, query);
         record_response_body(&response);
         let receipt = longitudinal_receipt_header(&scope, context, &response)?;
         // An armed barrier the route never consumed must answer with the
@@ -1009,7 +1030,7 @@ pub(super) fn data_response(
         return Ok(response);
     }
 
-    Ok(route(state, false, &request.method, path, query))
+    Ok(dispatch(&request.method, path, query))
 }
 
 #[cfg(feature = "longitudinal-counting")]
@@ -1589,7 +1610,10 @@ fn route_change_v2(state: &InspectState, path: &str, query: Option<&str>) -> Res
 /// endpoints, so accepting a first duplicate, ignoring an unknown member, or
 /// repairing malformed encoding would make the URL's identity ambiguous. Keep
 /// this stricter than the legacy convenience parser used by unrelated routes.
-fn exact_selector_values(query: Option<&str>, expected: &[&str]) -> Result<Vec<String>, String> {
+pub(super) fn exact_selector_values(
+    query: Option<&str>,
+    expected: &[&str],
+) -> Result<Vec<String>, String> {
     let query = query.ok_or_else(|| format!("missing {}", expected[0]))?;
     if query.is_empty() {
         return Err(format!("missing {}", expected[0]));
@@ -1631,7 +1655,7 @@ fn exact_selection_error_response(message: &str) -> Response {
     )
 }
 
-fn change_v2_response(result: Result<api::ChangeV2Json, String>) -> Response {
+pub(super) fn change_v2_response(result: Result<api::ChangeV2Json, String>) -> Response {
     match result {
         Ok(api::ChangeV2Json::Ok(body)) => Response::json_ok(body),
         Ok(api::ChangeV2Json::Unavailable(body)) => Response::new(
@@ -2070,7 +2094,7 @@ fn percent_decode(input: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn strict_percent_decode(input: &str) -> Result<String, String> {
+pub(super) fn strict_percent_decode(input: &str) -> Result<String, String> {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -2443,7 +2467,7 @@ mod tests {
         let exact = source_between(
             SERVER_SOURCE,
             "fn route_change_v2(",
-            "fn exact_selector_values(",
+            "pub(super) fn exact_selector_values(",
         );
         assert!(exact.contains("let cache = &state.change_reader_cache"));
         assert!(exact.contains("let stamp_binder = &state.strict_change_stamp"));
@@ -4517,7 +4541,7 @@ mod tests {
         let route = source_between(
             SERVER_SOURCE,
             "fn route_change_v2(",
-            "fn exact_selector_values(",
+            "pub(super) fn exact_selector_values(",
         );
         assert!(route.contains("let exact_documents = &state.exact_document_bodies"));
         assert!(route.contains(

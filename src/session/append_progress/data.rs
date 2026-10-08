@@ -15,6 +15,7 @@ use crate::session::derived_access::sqlite::SqliteSemantic;
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OwnedDataOperation {
+    Identity,
     Rebuild,
     ReadChanges,
 }
@@ -53,6 +54,7 @@ pub fn run_owned_data_request(
         &request.enrollment_actor,
     )?;
     match request.operation {
+        OwnedDataOperation::Identity => context.identity_document(),
         OwnedDataOperation::Rebuild => {
             let publication = enrolled::rebuild(&context, cancelled)?;
             Ok(serde_json::json!({"version":1,"operation":"rebuild","publication":publication}))
@@ -81,4 +83,32 @@ pub fn run_owned_data_request(
             })
         }
     }
+}
+
+/// Private binary-only callback. It can compose detached documents but cannot
+/// acquire or retain a raw SQL connection. Final admission follows the callback.
+#[doc(hidden)]
+pub fn with_owned_inspector_request<T>(
+    _owner: &OwnedDataCommand,
+    repository: &std::path::Path,
+    request_id: &str,
+    enrollment_actor: &str,
+    limits: AuditLimits,
+    cancelled: Arc<AtomicBool>,
+    compose: impl FnOnce(
+        &mut crate::session::derived_access::enrolled_inspector::OwnedInspectorReader<'_>,
+    ) -> Result<T>,
+) -> Result<T> {
+    super::require_quiescent_data()?;
+    let _work = super::enter_data_work(limits, cancelled)?;
+    let context = ReadContext::begin(repository, request_id, enrollment_actor)?;
+    crate::session::derived_access::enrolled::with_request_pin(&context, |pin| {
+        let mut reader =
+            crate::session::derived_access::enrolled_inspector::OwnedInspectorReader::from_pin(
+                pin, repository,
+            )?;
+        let value = compose(&mut reader)?;
+        reader.finish()?;
+        Ok(value)
+    })
 }

@@ -23,8 +23,8 @@ use super::sqlite::{
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
 use crate::error::{Result, ShoreError};
 use crate::session::append_progress::{
-    ProgressReadFence, ReadContext, completed_rebuild_inputs, with_published_projection,
-    with_staging_projection,
+    ProgressReadFence, ProjectionRequestWitnesses, ReadContext, completed_rebuild_inputs,
+    with_projection_phase, with_published_projection, with_staging_projection,
 };
 use crate::session::store::authority_lock::StoreAuthorityLock;
 use crate::session::store::capabilities::StoreCapabilityStatus;
@@ -271,3 +271,144 @@ pub(in crate::session) fn read<T>(
         },
     )
 }
+
+/// A lexical response pin: native scopes never outlive a phase, while all
+/// request witnesses and the actual generation lease survive hydration.
+pub(in crate::session) struct RequestPin<'a> {
+    context: &'a ReadContext,
+    paths: GenerationLayout,
+    publication: GenerationPublication,
+    descriptor: GenerationDescriptor,
+    receipt: ChangeReaderProfileReceiptV3,
+    lease: &'a super::generation::GenerationReadLease,
+    witnesses: ProjectionRequestWitnesses<'a>,
+    identity: CursorLedgerIdentity,
+    checkpoint: ReaderProjectionCheckpointV1,
+    fence: ProgressReadFence,
+    phases: usize,
+}
+pub(in crate::session) fn with_request_pin<T>(
+    context: &ReadContext,
+    compose: impl for<'pin> FnOnce(RequestPin<'pin>) -> Result<T>,
+) -> Result<T> {
+    if context.profile() != DerivedAccessProfile::SqliteWalBodylessV1 {
+        return Err(fail("derived access disabled"));
+    }
+    let paths = GenerationLayout::new(context.store_dir()).map_err(fail)?;
+    context.require_stable_layout(&paths)?;
+    let store_id =
+        crate::session::store::resolution::opaque_path_identity("store", context.store_dir())?;
+    let publication = paths
+        .current_publication()
+        .map_err(fail)?
+        .ok_or_else(|| fail("projection absent; explicit rebuild required"))?;
+    let lease = paths
+        .acquire_existing_read_lease(&publication.generation_id)
+        .map_err(fail)?;
+    let descriptor = paths.descriptor(&publication).map_err(fail)?;
+    let path = paths
+        .generation(&publication.generation_id)
+        .join(CHANGE_READER_PROFILE_RESOURCE_V3);
+    let bytes = crate::session::append_progress::data_file_bytes(&path, 1_048_576)?;
+    let receipt: ChangeReaderProfileReceiptV3 = serde_json::from_slice(&bytes)?;
+    receipt.validate().map_err(fail)?;
+    if receipt.minimum_reader_profile != "review_change_revision_progress_v1"
+        || receipt.publication_store_id != store_id
+        || descriptor.store_id != store_id
+        || receipt.publication_generation_id != publication.generation_id
+        || receipt.publication_truth_cursor
+            != TruthCursor::new(descriptor.epoch, descriptor.head_sequence)
+        || receipt.receipt_sha256 != descriptor.semantic_receipt
+        || receipt.publication_platform_stamp != descriptor.authority_stamp
+        || descriptor.profile != context.profile()
+    {
+        return Err(fail("publication identity mismatch"));
+    }
+    let identity = CursorLedgerIdentity::new(store_id);
+
+    let witnesses = ProjectionRequestWitnesses::capture(
+        context,
+        &paths,
+        &publication,
+        &descriptor,
+        &receipt,
+        &lease,
+    )?;
+    let (checkpoint, fence) = with_projection_phase(
+        context,
+        &paths,
+        &publication,
+        &descriptor,
+        &receipt,
+        &lease,
+        Some(&witnesses),
+        |db, fence| {
+            Ok((
+                validate_snapshot(db, &identity, &receipt, fence)?,
+                fence.clone(),
+            ))
+        },
+    )?;
+    compose(RequestPin {
+        context,
+        paths,
+        publication,
+        descriptor,
+        receipt,
+        lease: &lease,
+        witnesses,
+        identity,
+        checkpoint,
+        fence,
+        phases: 1,
+    })
+}
+impl RequestPin<'_> {
+    pub(in crate::session) fn checkpoint(&self) -> &ReaderProjectionCheckpointV1 {
+        &self.checkpoint
+    }
+    pub(in crate::session) fn receipt(&self) -> &ChangeReaderProfileReceiptV3 {
+        &self.receipt
+    }
+    pub(in crate::session) fn context(&self) -> &ReadContext {
+        self.context
+    }
+    pub(in crate::session) fn phase<T>(
+        &mut self,
+        query: impl for<'db> FnOnce(
+            &'db Connection,
+            &ReaderProjectionCheckpointV1,
+            &ChangeReaderProfileReceiptV3,
+        ) -> Result<T>,
+    ) -> Result<T> {
+        crate::session::append_progress::data_work_checkpoint()?;
+        self.phases += 1;
+        if self.phases > 32 {
+            return Err(fail("request SQL phase limit"));
+        }
+        with_projection_phase(
+            self.context,
+            &self.paths,
+            &self.publication,
+            &self.descriptor,
+            &self.receipt,
+            self.lease,
+            Some(&self.witnesses),
+            |db, fence| {
+                let checkpoint = validate_snapshot(db, &self.identity, &self.receipt, fence)?;
+                if fence != &self.fence || checkpoint != self.checkpoint {
+                    return Err(fail("request pin changed between phases"));
+                }
+                query(db, &checkpoint, &self.receipt)
+            },
+        )
+    }
+    pub(in crate::session) fn finish(mut self) -> Result<()> {
+        // Runs after every filesystem/resource/trust/cache effect. The native
+        // producer revalidates actual N, namespace, journal and publication.
+        self.phase(|_, _, _| Ok(()))
+    }
+}
+
+#[cfg(test)]
+mod pin_controls;

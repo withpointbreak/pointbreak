@@ -102,6 +102,14 @@ pub fn take_derived_write_diagnostics() -> Vec<ProjectionDiagnostic> {
 pub use append_progress::consumer::{
     OwnedChangeCommand, enter_owned_change_command, take_owned_change_diagnostic,
 };
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub use append_progress::with_owned_inspector_request;
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub use derived_access::enrolled_inspector::{
+    OwnedInspectorGeneration, OwnedInspectorPage, OwnedInspectorReader,
+};
 pub use event::{
     BodyContentType, IngestProvenance, IngestVia, event_signature_pre_authentication_encoding,
     event_to_be_signed,
