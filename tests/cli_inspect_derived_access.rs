@@ -60,7 +60,9 @@ fn unset_inspector_first_start_builds_the_default_projection() {
     );
 
     let inspector = Inspector::spawn_authenticated(&legacy_repo);
-    let status = inspector.get_json("/api/derived-access/status");
+    let status = inspector.wait_for_owned_status("default projection observed", None, |status| {
+        status["active"] == true && status["availability"] == "current"
+    });
     let history = inspector.get_json("/api/history");
 
     assert_eq!(status["active"], true);
@@ -98,19 +100,22 @@ fn active_inspector_first_start_bootstraps_and_serves_history() {
         &legacy_repo,
         &[("POINTBREAK_DERIVED_ACCESS", "sqlite-wal-bodyless-v1")],
     );
-    let (status_head, status_body) = inspector.raw_get("/api/derived-access/status");
-    assert!(
-        status_head.contains("200 OK"),
-        "derived status must remain available during first bootstrap: {status_head}: {status_body}"
-    );
-    let status = serde_json::from_str::<serde_json::Value>(&status_body)
-        .expect("derived-access status JSON");
-    assert_eq!(status["schema"], "pointbreak.inspect-derived-access-status");
-    assert_eq!(status["version"], 1);
-    assert_eq!(status["active"], true);
-    assert!(status["availability"].is_string());
-    assert!(status["rebuildInFlight"].is_boolean());
-    assert!(status["actions"].is_array());
+    // TCP acceptance precedes the child bootstrap. Require an actual in-flight
+    // rebuild observation while its publication lock is held before cancelling.
+    let status =
+        inspector.wait_for_owned_status("blocked first bootstrap observed", None, |status| {
+            status["active"] == true
+                && status["rebuildInFlight"] == true
+                && status["child"]["operation"].is_null()
+                && status["child"]["observationPending"] == false
+                && status["child"]["observedAtUnixMilliseconds"].is_u64()
+        });
+    let epoch = status["child"]["epoch"].as_u64().unwrap();
+    let before_cancel = status["child"]["observedAtUnixMilliseconds"]
+        .as_u64()
+        .unwrap();
+    assert!(status["availability"].is_string(), "{status}");
+    assert!(status["actions"].is_array(), "{status}");
 
     let authorization = format!("Bearer {}", inspector.token().expect("authenticated token"));
     let (cancel_head, cancel_body) = inspector.raw_request(
@@ -125,11 +130,25 @@ fn active_inspector_first_start_bootstraps_and_serves_history() {
         cancel_head.contains("200 OK"),
         "{cancel_head}: {cancel_body}"
     );
-    let cancelled =
-        serde_json::from_str::<serde_json::Value>(&cancel_body).expect("cancel status JSON");
-    assert_eq!(cancelled["servingCurrent"], false);
-    assert_eq!(cancelled["rebuildInFlight"], false);
-    assert_eq!(cancelled["rebuildPaused"], true);
+    // The POST acknowledges delivery. A newer observation must prove the
+    // same child's worker stopped and its cancellation latch is set.
+    let cancelled = inspector.wait_for_owned_status(
+        &format!("cancel completed after {cancel_head}: {cancel_body}"),
+        Some(epoch),
+        |status| {
+            status["child"]["observedAtUnixMilliseconds"]
+                .as_u64()
+                .is_some_and(|at| at > before_cancel)
+                && status["rebuildInFlight"] == false
+                && status["rebuildPaused"] == true
+                && status["child"]["operation"].is_null()
+                && status["child"]["observationPending"] == false
+        },
+    );
+    assert_eq!(cancelled["active"], true, "{cancelled}");
+    assert_eq!(cancelled["servingCurrent"], false, "{cancelled}");
+    assert_eq!(cancelled["rebuildInFlight"], false, "{cancelled}");
+    assert_eq!(cancelled["rebuildPaused"], true, "{cancelled}");
     assert!(
         cancelled["actions"]
             .as_array()
@@ -145,13 +164,31 @@ fn active_inspector_first_start_bootstraps_and_serves_history() {
             .any(|action| action == "cancel")
     );
 
+    let cancelled_at = cancelled["child"]["observedAtUnixMilliseconds"]
+        .as_u64()
+        .unwrap();
     drop(rebuild_lock);
-    std::thread::sleep(Duration::from_millis(150));
-    let (_, still_cancelled_body) = inspector.raw_get("/api/derived-access/status");
-    let still_cancelled = serde_json::from_str::<serde_json::Value>(&still_cancelled_body)
-        .expect("latched cancel status JSON");
-    assert_eq!(still_cancelled["rebuildInFlight"], false);
-    assert_eq!(still_cancelled["rebuildPaused"], true);
+    // A new observation after releasing the lock rules out merely rereading
+    // the cached cancellation response; status must not restart the worker.
+    let still_cancelled = inspector.wait_for_owned_status(
+        "cancel remains latched after lock release",
+        Some(epoch),
+        |status| {
+            status["child"]["observedAtUnixMilliseconds"]
+                .as_u64()
+                .is_some_and(|at| at > cancelled_at)
+                && status["child"]["operation"].is_null()
+                && status["child"]["observationPending"] == false
+        },
+    );
+    assert_eq!(
+        still_cancelled["rebuildInFlight"], false,
+        "{still_cancelled}"
+    );
+    assert_eq!(still_cancelled["rebuildPaused"], true, "{still_cancelled}");
+    let before_retry = still_cancelled["child"]["lastCompletedOperation"]
+        .as_u64()
+        .unwrap_or(0);
 
     let (retry_head, retry_body) = inspector.raw_request(
         "POST",
@@ -162,6 +199,25 @@ fn active_inspector_first_start_bootstraps_and_serves_history() {
         ],
     );
     assert!(retry_head.contains("200 OK"), "{retry_head}: {retry_body}");
+    let retried = inspector.wait_for_owned_status(
+        &format!("explicit retry completed after {retry_head}: {retry_body}"),
+        Some(epoch),
+        |status| {
+            status["child"]["lastCompletedOperation"]
+                .as_u64()
+                .is_some_and(|operation| operation > before_retry)
+                && status["child"]["lastCompletedKind"] == "rebuild"
+        },
+    );
+    assert_eq!(
+        retried["child"]["lastCompletedOutcome"], "succeeded",
+        "{retried}"
+    );
+    assert!(
+        retried["child"]["lastCompletedRequestId"].is_string(),
+        "{retried}"
+    );
+    assert_eq!(retried["rebuildPaused"], false, "{retried}");
 
     let deadline = Instant::now() + HANG_GUARD;
     let history = loop {
@@ -186,11 +242,17 @@ fn active_inspector_first_start_bootstraps_and_serves_history() {
             "unexpected first-start state: {body}"
         );
         let (progress_head, progress_body) = inspector.raw_get("/api/derived-access/status");
-        assert!(progress_head.contains("200 OK"), "{progress_head}");
+        assert!(
+            progress_head.contains("200 OK"),
+            "{progress_head}: {progress_body}"
+        );
         let progress = serde_json::from_str::<serde_json::Value>(&progress_body)
             .expect("derived progress JSON");
-        assert_eq!(progress["active"], true);
-        assert!(progress["availability"].is_string());
+        assert_eq!(progress["child"]["epoch"], epoch, "{progress}");
+        assert_eq!(progress["child"]["observationOnly"], true, "{progress}");
+        assert_eq!(progress["servingCurrent"], false, "{progress}");
+        assert_eq!(progress["active"], true, "{progress}");
+        assert!(progress["availability"].is_string(), "{progress}");
         if progress["availability"] == "bootstrapping" {
             assert!(progress["phase"].is_string());
             assert!(progress["completedEvents"].is_number());
@@ -345,6 +407,7 @@ fn v2_entry_routes_serve_the_elected_authoritative_fallback_with_the_header() {
     capture(repo.path());
 
     let inspector = Inspector::spawn_current_unready(repo.path());
+    inspector.wait_for_owned_child();
     for path in [
         "/api/v2/profile",
         "/api/v2/changes",
@@ -475,6 +538,7 @@ fn v2_elected_first_page_survives_a_later_derived_read_on_a_fresh_inspector() {
         let repo = three_change_ready_repo();
         // No harness profile pre-read: the process has not selected a generation yet.
         let inspector = Inspector::spawn_current_unready(repo.path());
+        inspector.wait_for_owned_child();
         let path = format!("/api/v2/{lens}");
         let elected = page(&inspector, &format!("{path}?limit=1&access=authoritative"));
         let token = elected["next"]

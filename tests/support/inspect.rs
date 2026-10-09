@@ -157,6 +157,7 @@ impl Inspector {
 
     fn spawn_with(repo: &Path, surface: InspectSurface, output: InspectOutput) -> Self {
         let inspector = Self::spawn_with_env(repo, surface, output, &[]);
+        inspector.wait_for_owned_child();
         inspector.wait_for_default_derived_generation();
         inspector
     }
@@ -347,6 +348,84 @@ impl Inspector {
         drained(&self.stderr)
     }
 
+    /// Wait for an owned-child observation, never treating the detached status
+    /// document as authority to serve data. Raw spawn helpers still wait only
+    /// for TCP so tests can deliberately inspect startup before this boundary.
+    pub fn wait_for_owned_status(
+        &self,
+        context: &str,
+        expected_epoch: Option<u64>,
+        predicate: impl Fn(&Value) -> bool,
+    ) -> Value {
+        let deadline = std::time::Instant::now() + HANG_GUARD;
+        let mut epoch = expected_epoch;
+        let mut first = None;
+        for attempt in 0_u32.. {
+            let (head, body) = self.raw_get("/api/derived-access/status");
+            first.get_or_insert_with(|| format!("{head}: {body}"));
+            let diagnostic = || {
+                format!(
+                    "{context}; first: {}; last: {head}: {body}; stderr: {}",
+                    first.as_deref().unwrap(),
+                    self.stderr_text()
+                )
+            };
+            assert!(head.starts_with("HTTP/1.1 200"), "{}", diagnostic());
+            let status: Value = serde_json::from_str(&body)
+                .unwrap_or_else(|error| panic!("{error}; {}", diagnostic()));
+            assert_eq!(
+                status["schema"],
+                "pointbreak.inspect-derived-access-status",
+                "{}",
+                diagnostic()
+            );
+            assert_eq!(status["version"], 1, "{}", diagnostic());
+            assert_eq!(status["child"]["observationOnly"], true, "{}", diagnostic());
+            assert_eq!(status["servingCurrent"], false, "{}", diagnostic());
+            let observed_epoch = status["child"]["epoch"]
+                .as_u64()
+                .filter(|value| *value > 0)
+                .unwrap_or_else(|| panic!("{}", diagnostic()));
+            assert_eq!(
+                *epoch.get_or_insert(observed_epoch),
+                observed_epoch,
+                "child replaced; {}",
+                diagnostic()
+            );
+            assert!(
+                !matches!(
+                    status["child"]["state"].as_str(),
+                    Some("unknown" | "unavailable")
+                ),
+                "child failed; {}",
+                diagnostic()
+            );
+            if predicate(&status) {
+                eprintln!("owned status reached: {}", diagnostic());
+                return status;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "not reached within {HANG_GUARD:?}; {}",
+                diagnostic()
+            );
+            thread::sleep(poll_backoff(attempt));
+        }
+        unreachable!()
+    }
+
+    /// Initialization and observation only: no profile/history pre-read and no
+    /// rebuild control. A caller can still test the first elected data read.
+    pub fn wait_for_owned_child(&self) -> Value {
+        self.wait_for_owned_status("owned child initialized", None, |status| {
+            matches!(
+                status["child"]["state"].as_str(),
+                Some("idle" | "completed")
+            ) && status["child"]["operation"].is_null()
+                && status["child"]["observationPending"] == false
+        })
+    }
+
     /// Rebuild the disposable legacy mirror's derived projection after a test
     /// appends through the current Change-aware source store. Production writes
     /// update their own sidecar; the compatibility mirror copies only authority
@@ -363,6 +442,7 @@ impl Inspector {
     }
 
     fn ensure_default_derived_generation(&self) {
+        self.wait_for_owned_child();
         if let Ok((_, body)) = self.try_get("/api/v2/profile")
             && let Ok(profile) = serde_json::from_str::<Value>(&body)
             && profile["availability"] == "ready"
