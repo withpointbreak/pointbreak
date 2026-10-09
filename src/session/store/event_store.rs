@@ -997,7 +997,8 @@ mod tests {
         assert_eq!(events.len(), 2);
         let snapshot = scope.snapshot();
         assert_eq!(snapshot.counters.directory_entries_walked, 2);
-        assert_eq!(snapshot.counters.carrier_opens, 2);
+        // Count the absent profile probe in addition to the two event reads.
+        assert_eq!(snapshot.counters.carrier_opens, 3);
         assert_eq!(snapshot.counters.carrier_bytes_read, expected_bytes);
         assert_eq!(snapshot.counters.event_decodes, 2);
         assert_eq!(snapshot.counters.event_validations, 2);
@@ -1059,7 +1060,8 @@ mod tests {
         assert_eq!(outcomes, vec![EventWriteOutcome::Created; 3]);
         let snapshot = scope.snapshot();
         assert_eq!(snapshot.counters.directory_entries_walked, 0);
-        assert_eq!(snapshot.counters.carrier_opens, 2);
+        // Count the profile probe in addition to the two capability reads.
+        assert_eq!(snapshot.counters.carrier_opens, 3);
         assert_eq!(snapshot.counters.change_capability_carriers_opened, 2);
         assert_eq!(snapshot.lock_facts.len(), 1);
         assert_eq!(
