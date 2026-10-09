@@ -3158,7 +3158,10 @@ mod tests {
                 None,
             ]
         );
-        assert_eq!(observed.counters.carrier_opens, 14);
+        assert_eq!(
+            observed.counters.carrier_opens, 17,
+            "fourteen event reads plus rebuild, population and strict-read profile probes"
+        );
         assert_eq!(observed.counters.event_decodes, 14);
         assert_eq!(observed.counters.event_validations, 14);
         assert_eq!(observed.capacity_ownership.retained_decoded_events, 0);
@@ -3683,9 +3686,10 @@ mod tests {
         let counters = scope.snapshot().counters;
         assert_eq!(counters.directory_entries_walked, 0);
         assert_eq!(
-            counters.carrier_opens, 2,
-            "restart point-reads only activation and completion carriers"
+            counters.carrier_opens, 4,
+            "restart reads the capability pair plus constructor and open profile probes"
         );
+        assert_eq!(counters.change_capability_carriers_opened, 2);
         assert_eq!(counters.event_folds, 0);
         assert_eq!(counters.projection_rebuilds, 0);
         assert_eq!(counters.state_rebuilds, 0);

@@ -197,7 +197,10 @@ mod tests {
         );
         let counters = scope.snapshot().counters;
         assert_eq!(counters.directory_entries_walked, 0);
-        assert_eq!(counters.carrier_opens, 2);
+        assert_eq!(
+            counters.carrier_opens, 3,
+            "store resolution adds one profile probe to the capability pair"
+        );
         assert_eq!(counters.change_capability_carriers_opened, 2);
         assert_eq!(counters.event_decodes, 0);
         assert_eq!(counters.event_folds, 0);

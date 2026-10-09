@@ -700,14 +700,24 @@ fn change_read_diagnostic_fixture_failure_skips_only_read_rows() {
 #[cfg(feature = "longitudinal-counting")]
 #[test]
 fn bounded_bootstrap_smoke_reports_two_pass_work_and_completed_phases() {
-    let receipt = run_qualification_derived_access_bootstrap_smoke_v1(
+    // Keep the producer root through every assertion, including unwinding.
+    let parent = tempfile::Builder::new()
+        .prefix("pointbreak-bootstrap-canary-")
+        .tempdir()
+        .expect("create bootstrap canary parent")
+        .keep();
+    eprintln!("retained bootstrap canary: {}", parent.display());
+    let receipt = super::materializer::run_bootstrap_smoke_in_root(
         QualificationDerivedAccessTierV1::D0_128,
+        &parent,
     )
     .expect("bounded D0 bootstrap smoke");
 
     receipt.validate().expect("valid bootstrap receipt");
     assert_eq!(receipt.event_count, 128);
-    assert_eq!(receipt.counters.carrier_opens, 343);
+    assert_eq!(receipt.counters.carrier_opens, 346);
+    assert_eq!(receipt.counters.event_decodes, 343);
+    assert_eq!(receipt.counters.event_validations, 343);
     #[cfg(target_os = "macos")]
     assert!(receipt.rss_observed);
     #[cfg(not(target_os = "macos"))]

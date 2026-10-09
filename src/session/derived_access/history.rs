@@ -3488,7 +3488,10 @@ mod tests {
         assert!(page.entries[0].occurred_at > page.entries[1].occurred_at);
         assert_eq!(page.facets.get("review_initialized"), Some(&7));
         let counters = scope.snapshot();
-        assert_eq!(counters.counters.carrier_opens, 2);
+        assert_eq!(
+            counters.counters.carrier_opens, 4,
+            "two selected events plus lifecycle-refresh and cold-open profile probes"
+        );
         assert_eq!(counters.counters.event_decodes, 2);
         assert_eq!(counters.counters.directory_entries_walked, 0);
         assert_eq!(

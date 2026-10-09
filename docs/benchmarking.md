@@ -757,6 +757,10 @@ values are `null` elsewhere. This non-timing developer smoke does not change the
 qualification-smoke schemas, consume a retained or owner root, or activate the derived profile for
 product reads.
 
+On bootstrap-smoke failure, the diagnostic reports and retains its temporary root; successful
+ordinary runs remove it. The D0 bootstrap owner test retains its root through all caller assertions
+on both success and failure and prints the retained path.
+
 Phase attribution is a separate diagnostic mode for revision-page, bootstrap, and governed-write work:
 
 ```sh
