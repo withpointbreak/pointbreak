@@ -67,6 +67,7 @@ fn snapshot(path: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u
     out
 }
 #[test]
+#[ignore = "requires exact source/caller review, assigned retained root/key directories, and native readiness"]
 fn owned_enrollment_binary_roundtrip() {
     let root = assigned("POINTBREAK_NATIVE_ENTRY_ROOT");
     let keys = assigned("POINTBREAK_NATIVE_ENTRY_KEYS");

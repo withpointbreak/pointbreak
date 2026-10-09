@@ -248,6 +248,15 @@ Missing setup is a failure. For these changes, `just check` alone is incomplete:
 host receipts plus the full macOS default gate. Windows native receipts do not imply a full Windows
 default-suite pass, public enrollment qualification, or Inspector validation.
 
+The operator-owned `owned_enrollment_binary_roundtrip` test in
+`tests/owned_enrollment_entry.rs` is explicitly ignored. Running it requires review of the
+exact source and caller, native readiness, and fresh absolute root and key directories
+assigned and retained by the operator through `POINTBREAK_NATIVE_ENTRY_ROOT` and
+`POINTBREAK_NATIVE_ENTRY_KEYS`. Its ordinary refusal control,
+`private_bootstrap_refuses_before_key_or_root_access`, remains selected. Neither the default
+suite nor `just test-full` runs the ignored roundtrip; passing either suite does not establish
+native enrollment qualification.
+
 ### Private Change-create consumer development
 
 The macOS-only `__owned-change-v1 <enrollment-request-hex> <mode> change create ...`
