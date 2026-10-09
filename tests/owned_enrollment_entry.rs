@@ -107,15 +107,36 @@ fn owned_enrollment_binary_roundtrip() {
 #[test]
 fn private_bootstrap_refuses_before_key_or_root_access() {
     let root = std::env::temp_dir().join("pointbreak-native-uncreated-bootstrap-20260926");
+    let key = root.join("absent-key");
     assert!(!root.exists());
+    assert!(!key.exists());
     let input = json!({"version":1,"root":root,"requestId":"../bad",
         "writer":pointbreak::session::event::Writer::shore_local("test"),
-        "occurredAt":"2026-09-26T00:00:00Z","signingKey":root.join("absent-key"),"selectedOnly":false});
+        "occurredAt":"2026-09-26T00:00:00Z","signingKey":key,"selectedOnly":false});
     let rejected = invoke("__owned-enrollment-v1", &input);
     assert_eq!(rejected.status.code(), Some(2));
+    assert!(rejected.stdout.is_empty());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("invalid private bootstrap"));
-    let unsupported = invoke("__owned-data-v1", &input);
-    assert_eq!(unsupported.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&unsupported.stderr).contains("owned_process_required"));
     assert!(!root.exists());
+    assert!(!key.exists());
+
+    // macOS rejects this version before data work or repository/native acquisition.
+    // Windows rejects the unsupported private entry before reading the request.
+    let data_input = json!({"version":0,"repository":root,"requestId":"1".repeat(64),
+        "enrollmentActor":"actor:consumer-test","operation":"identity"});
+    let data_rejected = invoke("__owned-data-v1", &data_input);
+    assert_eq!(data_rejected.status.code(), Some(2));
+    assert!(data_rejected.stdout.is_empty());
+    #[cfg(target_os = "macos")]
+    assert!(
+        String::from_utf8_lossy(&data_rejected.stderr)
+            .contains("owned_process_required; invalid data request")
+    );
+    #[cfg(windows)]
+    assert!(
+        String::from_utf8_lossy(&data_rejected.stderr)
+            .contains("owned_process_required; native data entry unsupported on this platform")
+    );
+    assert!(!root.exists());
+    assert!(!key.exists());
 }
