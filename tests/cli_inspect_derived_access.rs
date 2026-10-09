@@ -407,7 +407,6 @@ fn v2_entry_routes_serve_the_elected_authoritative_fallback_with_the_header() {
     capture(repo.path());
 
     let inspector = Inspector::spawn_current_unready(repo.path());
-    inspector.wait_for_owned_child();
     for path in [
         "/api/v2/profile",
         "/api/v2/changes",
@@ -538,7 +537,6 @@ fn v2_elected_first_page_survives_a_later_derived_read_on_a_fresh_inspector() {
         let repo = three_change_ready_repo();
         // No harness profile pre-read: the process has not selected a generation yet.
         let inspector = Inspector::spawn_current_unready(repo.path());
-        inspector.wait_for_owned_child();
         let path = format!("/api/v2/{lens}");
         let elected = page(&inspector, &format!("{path}?limit=1&access=authoritative"));
         let token = elected["next"]

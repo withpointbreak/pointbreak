@@ -37,6 +37,7 @@ fn conflicting_duplicate_proposal_timeline_is_typed_invalid_on_both_access_lanes
 
     let results = [("explicit-off", OFF), ("derived", ACTIVE)].map(|(lane, env)| {
         let inspector = Inspector::spawn_current_authenticated_with_env(&repo, env);
+        inspector.wait_for_owned_child();
         let (invalid_status, invalid_document) =
             inspector.get_error("/api/v2/history?limit=not-a-number");
         let (status, document) = inspector.get_error("/api/v2/history?limit=100&order=asc");

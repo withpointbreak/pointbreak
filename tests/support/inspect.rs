@@ -108,11 +108,15 @@ impl Inspector {
         )
     }
 
-    /// Start against the supplied authority without waiting for a ready reader.
-    /// Capability-fence tests use this to inspect a real L0 or M1 response;
-    /// ordinary v2 tests should use [`Self::spawn_current`] instead.
+    /// Start a healthy child against the supplied authority without waiting for
+    /// a ready reader. Initialization observes status only: no profile/history
+    /// pre-read or rebuild control. Capability-fence and cold first-data tests
+    /// use this; ordinary v2 tests should use [`Self::spawn_current`] instead.
     pub fn spawn_current_unready(repo: &Path) -> Self {
-        Self::spawn_with_env_mode(repo, InspectSurface::Web, InspectOutput::Text, &[], false)
+        let inspector =
+            Self::spawn_with_env_mode(repo, InspectSurface::Web, InspectOutput::Text, &[], false);
+        inspector.wait_for_owned_child();
+        inspector
     }
 
     pub fn spawn_human(repo: &Path) -> Self {
@@ -349,8 +353,8 @@ impl Inspector {
     }
 
     /// Wait for an owned-child observation, never treating the detached status
-    /// document as authority to serve data. Raw spawn helpers still wait only
-    /// for TCP so tests can deliberately inspect startup before this boundary.
+    /// document as authority to serve data. Low-level and explicit-env spawn
+    /// helpers still wait only for TCP so tests can inspect raw startup.
     pub fn wait_for_owned_status(
         &self,
         context: &str,
@@ -580,9 +584,9 @@ impl Inspector {
         self.request_with_retry(method, path, &headers)
     }
 
-    /// Retry transport failures while draining responses from the read-only
-    /// inspector. Non-GET methods are rejected before any application action,
-    /// so replaying these harness requests cannot duplicate a write.
+    /// Retry transport failures while draining responses. This also applies to
+    /// non-GET controls: a transport failure after delivery may replay a control,
+    /// so one harness invocation does not prove exactly-once transmission.
     fn request_with_retry(
         &self,
         method: &str,
