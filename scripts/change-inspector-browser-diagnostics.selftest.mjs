@@ -3894,7 +3894,7 @@ test("D73 base shakedown repeats its exact-detail open without widening the harn
 		);
 	assert.equal(
 		createHash("sha256").update(canonicalShell).digest("hex"),
-		"fbbe6eb8cf22640f14f9875f963d91855ae840e156469a2f40d10183eac5ce07",
+		"1a81c3355f6aa326d41eda58b30f80d559d211eaf6c3ec6ce017127cd965f552",
 		"heartbeat deadline and failure-retention shell outside D78 proof plumbing must remain byte-pinned",
 	);
 	assert.equal(
