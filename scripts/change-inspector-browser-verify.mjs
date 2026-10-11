@@ -1715,6 +1715,83 @@
 		};
 	}
 
+	// Failure-only, closed observations: never serialize caller objects or identities.
+	function d78ReloadFailureObservation(reloadOpen, health) {
+		const unreadable = Symbol();
+		const own = (object, key) => {
+			if (object === null || object === undefined) return undefined;
+			const descriptor = Object.getOwnPropertyDescriptor(Object(object), key);
+			return descriptor && !Object.hasOwn(descriptor, "value")
+				? unreadable : descriptor?.value;
+		};
+		const kind = (value) => value === unreadable ? "unreadable"
+			: value === undefined ? "missing" : value === null ? "null"
+			: Array.isArray(value) ? "array" : typeof value;
+		const state = (value, allowed) => allowed.includes(value) ? value
+			: typeof value === "string" ? "other" : kind(value);
+		const scalar = (value) => typeof value === "boolean" ? value
+			: typeof value === "number" ? (Number.isFinite(value) ? value : "nonfinite") : kind(value);
+		const action = own(reloadOpen, "routeVisitAction");
+		const frames = own(action, "frameEntries");
+		const certification = own(reloadOpen, "routeVisitCertification");
+		const certificationFlags = {};
+		for (const key of ["passed", "sameVisit", "pendingState", "changesHash",
+			"semanticMatchesIntended", "pageMatchesSemantic", "exactReadingReady", "routeObserved"]) {
+			certificationFlags[key] = state(own(certification, key), [true, false]);
+		}
+		const lifecycle = own(health, "requestLifecycleFailureCount");
+		const unexpected = own(health, "unexpectedRequestFailureCount");
+		const admissible = own(health, "admissibleProfileSupersessionCount");
+		const withinBound = own(health, "profileSupersessionAdmissionWithinBound");
+		const result = own(action, "resultKind");
+		const frameArray = Array.isArray(frames);
+		return {
+			schema: "pointbreak.browser-d78-reload-failure.v1",
+			checks: {
+				navigationReload: own(reloadOpen, "navigationKind") === "reload",
+				actionSchema: own(action, "schema") === "pointbreak.browser-route-action-diagnostic",
+				actionVersion: own(action, "version") === 1,
+				actionClassIneligible: own(action, "actionClass") === "ineligible",
+				eligibilityIneligible: own(action, "eligibility") === "ineligible",
+				phaseSettled: own(action, "phase") === "settled",
+				resultAllowed: result === "same-document-null" || result === "document-response",
+				current: own(action, "current") === true,
+				capturedMainFrame: own(action, "capturedMainFrame") === true,
+				sourceMatchesTarget: own(action, "sourceHash") === own(action, "intendedHash"),
+				frameArray,
+				frameNonempty: frameArray && frames.length > 0,
+				framesReload: frameArray && frames.every((entry) => own(entry, "navigationKind") === "reload"),
+				certificationPassed: Object.values(certificationFlags).every((value) => value === true),
+				lifecycleZero: lifecycle === 0,
+				unexpectedZero: unexpected === 0,
+				admissibleZero: admissible === 0,
+				admissionWithinBound: withinBound === true,
+			},
+			states: {
+				reload: kind(reloadOpen), action: kind(action), frames: kind(frames),
+				certification: kind(certification), health: kind(health),
+				navigation: state(own(reloadOpen, "navigationKind"), ["reload", "goto"]),
+				schema: state(own(action, "schema"), ["pointbreak.browser-route-action-diagnostic"]),
+				version: state(own(action, "version"), [1]),
+				actionClass: state(own(action, "actionClass"), ["ineligible", "exact-detail-changes-goto"]),
+				eligibility: state(own(action, "eligibility"), ["ineligible", "eligible"]),
+				phase: state(own(action, "phase"), ["settled", "invoked", "armed"]),
+				result: state(result, ["same-document-null", "document-response"]),
+				current: state(own(action, "current"), [true, false]),
+				capturedMainFrame: state(own(action, "capturedMainFrame"), [true, false]),
+				sourceType: kind(own(action, "sourceHash")), targetType: kind(own(action, "intendedHash")),
+				frameKindMissing: frameArray && frames.some((entry) => own(entry, "navigationKind") === undefined),
+				frameKindWrongType: frameArray && frames.some((entry) => typeof own(entry, "navigationKind") !== "string"),
+				frameKindOther: frameArray && frames.some((entry) => typeof own(entry, "navigationKind") === "string" && own(entry, "navigationKind") !== "reload"),
+			},
+			certification: certificationFlags,
+			health: {
+				requestLifecycleFailureCount: scalar(lifecycle), unexpectedRequestFailureCount: scalar(unexpected),
+				admissibleProfileSupersessionCount: scalar(admissible), profileSupersessionAdmissionWithinBound: scalar(withinBound),
+			},
+		};
+	}
+
 	function createD78RepairBaseProof({ setupOpen, reloadOpen, health } = {}) {
 		const fail = (stage) => {
 			throw new Error(`D78 repair-base proof ${stage} did not match the closed contract`);
@@ -1826,30 +1903,49 @@
 		}
 
 		const reloadAction = reloadOpen?.routeVisitAction;
-		if (
-			reloadOpen?.navigationKind !== "reload" ||
-			reloadAction?.schema !== "pointbreak.browser-route-action-diagnostic" ||
-			reloadAction.version !== 1 ||
-			reloadAction.actionClass !== "ineligible" ||
-			reloadAction.eligibility !== "ineligible" ||
-			reloadAction.phase !== "settled" ||
-			(reloadAction.resultKind !== "same-document-null" &&
-				reloadAction.resultKind !== "document-response") ||
-			reloadAction.current !== true ||
-			reloadAction.capturedMainFrame !== true ||
-			reloadAction.sourceHash !== reloadAction.intendedHash ||
-			!Array.isArray(reloadAction.frameEntries) ||
-			reloadAction.frameEntries.length === 0 ||
-			!reloadAction.frameEntries.every(
-				(entry) => entry.navigationKind === "reload",
-			) ||
-			!certificationPassed(reloadOpen.routeVisitCertification) ||
-			health?.requestLifecycleFailureCount !== 0 ||
-			health.unexpectedRequestFailureCount !== 0 ||
-			health.admissibleProfileSupersessionCount !== 0 ||
-			health.profileSupersessionAdmissionWithinBound !== true
-		) {
-			fail("reload or health");
+		try {
+			if (
+				reloadOpen?.navigationKind !== "reload" ||
+				reloadAction?.schema !== "pointbreak.browser-route-action-diagnostic" ||
+				reloadAction.version !== 1 ||
+				reloadAction.actionClass !== "ineligible" ||
+				reloadAction.eligibility !== "ineligible" ||
+				reloadAction.phase !== "settled" ||
+				(reloadAction.resultKind !== "same-document-null" &&
+					reloadAction.resultKind !== "document-response") ||
+				reloadAction.current !== true ||
+				reloadAction.capturedMainFrame !== true ||
+				reloadAction.sourceHash !== reloadAction.intendedHash ||
+				!Array.isArray(reloadAction.frameEntries) ||
+				reloadAction.frameEntries.length === 0 ||
+				!reloadAction.frameEntries.every(
+					(entry) => entry.navigationKind === "reload",
+				) ||
+				!certificationPassed(reloadOpen.routeVisitCertification) ||
+				health?.requestLifecycleFailureCount !== 0 ||
+				health.unexpectedRequestFailureCount !== 0 ||
+				health.admissibleProfileSupersessionCount !== 0 ||
+				health.profileSupersessionAdmissionWithinBound !== true
+			) {
+				fail("reload or health");
+			}
+		} catch (error) {
+			let observation = '{"schema":"pointbreak.browser-d78-reload-failure.v1","status":"unavailable"}';
+			try {
+				const encoded = JSON.stringify(d78ReloadFailureObservation(reloadOpen, health));
+				if (encoded.length + "POINTBREAK_D78_FAILURE=".length + 1 <= 4096) observation = encoded;
+			} catch { /* Observation failure must preserve the original rejection. */ }
+			// The pinned runner retains String(error), not the VM's console output.
+			try {
+				const message = Object.getOwnPropertyDescriptor(error, "message");
+				if (message && Object.hasOwn(message, "value") && message.writable && typeof message.value === "string") {
+					Object.defineProperty(error, "message", {
+						...message, value: `${message.value}\nPOINTBREAK_D78_FAILURE=${observation}`,
+					});
+				}
+			} catch { /* Preserve the same rejection if its message cannot carry observations. */ }
+			try { console.error(`POINTBREAK_D78_FAILURE=${observation}`); } catch { /* Keep failing. */ }
+			throw error;
 		}
 
 		return {

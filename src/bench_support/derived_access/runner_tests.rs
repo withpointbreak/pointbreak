@@ -2344,3 +2344,162 @@ fn change_read_root_provenance_override_binds_the_reference_root_only() {
             .expect_err("malformed authority must refuse");
     assert!(error.contains("campaign authority"), "{error}");
 }
+
+#[test]
+fn successor_original_byte_duplicates_cannot_cross_any_raw_evidence_entrance() {
+    use super::evidence::read_timeline_contract_json;
+    let package = QualificationDerivedAccessPackageV1::test_fixture();
+    let execution = QualificationDerivedAccessExpectedAuthorityV1::test_fixture().execution;
+    for nested in [
+        format!(
+            r#"{{"schema":"{}","schema":"{}"}}"#,
+            QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V3,
+            QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V2
+        ),
+        format!(
+            r#"{{"schema":"{}","schema":"{}"}}"#,
+            QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V2,
+            QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V3
+        ),
+        format!(
+            r#"{{"schema":"{}","failure":{{"setup":1,"setup":2}}}}"#,
+            QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V3
+        ),
+        format!(
+            r#"{{"evaluatorRevision":"{}","evaluatorRevision":"{}"}}"#,
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6,
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
+        ),
+        format!(
+            r#"{{"evaluatorRevision":"{}","evaluatorRevision":"{}"}}"#,
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5,
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6
+        ),
+    ] {
+        let bytes = format!(
+            r#"{{"schema":"{}","rawReceipts":[{}]}}"#,
+            QUALIFICATION_DERIVED_ACCESS_FRAGMENT_SCHEMA_V1, nested
+        )
+        .into_bytes();
+        assert!(
+            read_timeline_contract_json(&bytes)
+                .unwrap_err()
+                .contains("duplicate field")
+        );
+        let root = tempfile::tempdir().unwrap();
+        let raw = root.path().join("input.json");
+        std::fs::write(&raw, &bytes).unwrap();
+        let request = root.path().join("request.json");
+        std::fs::write(
+            &request,
+            serde_json::to_vec(&QualificationDerivedAccessFragmentRequestV1 {
+                schema: QUALIFICATION_DERIVED_ACCESS_FRAGMENT_REQUEST_SCHEMA_V1.into(),
+                execution: execution.clone(),
+                receipt_paths: vec![raw.clone()],
+                evaluator_revision: QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6.into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            build_qualification_derived_access_fragment_v1(&request)
+                .unwrap_err()
+                .contains("duplicate field")
+        );
+        let output = root.path().join("not-published");
+        assert!(
+            publish_qualification_derived_access_package_v1(
+                &output,
+                &package,
+                &[("input.json", &bytes)]
+            )
+            .unwrap_err()
+            .contains("duplicate field")
+        );
+        assert!(
+            assemble_qualification_derived_access_package_v1(&[raw.clone()], &output)
+                .unwrap_err()
+                .contains("duplicate field")
+        );
+        assert!(!output.exists());
+        let verified = root.path().join("verify");
+        publish_qualification_derived_access_package_v1(&verified, &package, &[]).unwrap();
+        std::fs::create_dir(verified.join("raw")).unwrap();
+        std::fs::write(verified.join("raw/input.json"), &bytes).unwrap();
+        let manifest_path = verified.join("manifest.json");
+        let mut manifest: QualificationDerivedAccessPackageManifestV1 =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest
+            .entries
+            .push(QualificationDerivedAccessPackageEntryV1 {
+                relative_path: "raw/input.json".into(),
+                byte_count: bytes.len() as u64,
+                sha256: crate::canonical_hash::sha256_bytes_hex(&bytes),
+            });
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert!(
+            verify_qualification_derived_access_package_v1(&verified)
+                .unwrap_err()
+                .contains("duplicate field")
+        );
+        #[cfg(feature = "longitudinal-counting")]
+        assert!(
+            run_qualification_derived_change_read(&raw)
+                .err()
+                .unwrap()
+                .contains("duplicate field")
+        );
+    }
+    // Preserve the old Value reader's last-wins behavior for legacy-only data.
+    let legacy = format!(
+        r#"{{"schema":"{}","nested":{{"x":1,"x":2}}}}"#,
+        QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V2
+    );
+    assert_eq!(
+        read_timeline_contract_json(legacy.as_bytes()).unwrap(),
+        serde_json::from_str::<serde_json::Value>(&legacy).unwrap()
+    );
+    for version in ["v0", "v4", "v999"] {
+        let bytes = format!(
+            r#"{{"schema":"pointbreak.qualification-derived-change-read-receipt.{}","x":1,"x":2}}"#,
+            version
+        );
+        assert!(read_timeline_contract_json(bytes.as_bytes()).is_err());
+    }
+}
+
+#[test]
+fn raw_v3_requires_v6_at_dispatch_before_receipt_reconstruction() {
+    let root = tempfile::tempdir().unwrap();
+    let raw = root.path().join("receipt.json");
+    let value = serde_json::json!({"schema":QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V3});
+    std::fs::write(&raw, serde_json::to_vec(&value).unwrap()).unwrap();
+    for version in [
+        QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3,
+        QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4,
+        QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5,
+    ] {
+        let request = root.path().join("request.json");
+        std::fs::write(
+            &request,
+            serde_json::to_vec(&QualificationDerivedAccessFragmentRequestV1 {
+                schema: QUALIFICATION_DERIVED_ACCESS_FRAGMENT_REQUEST_SCHEMA_V1.into(),
+                execution: QualificationDerivedAccessExpectedAuthorityV1::test_fixture().execution,
+                receipt_paths: vec![raw.clone()],
+                evaluator_revision: version.into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            build_qualification_derived_access_fragment_v1(&request).unwrap_err(),
+            "V3 Change receipt requires evaluator v6"
+        );
+        let mut package = QualificationDerivedAccessPackageV1::test_fixture();
+        package.evaluator_revision = version.into();
+        assert_eq!(
+            validate_summaries_against_raw(&package, &[value.clone()]).unwrap_err(),
+            "V3 Change receipt requires evaluator v6"
+        );
+    }
+}

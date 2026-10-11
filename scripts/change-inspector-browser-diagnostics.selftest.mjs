@@ -299,12 +299,12 @@ async function renderBrowserProgram(config) {
 	return source;
 }
 
-async function runD70BrowserSelftest(hook) {
+async function runD70BrowserSelftest(hook, diagnosticConsole = console) {
 	const source = await renderBrowserProgram(
 		'({mode: "full", server: {baseUrl: "http://127.0.0.1:4173"}, __pointbreakD70Selftest: selftestHook})',
 	);
-	const programOrResult = new Function("selftestHook", `return (${source}\n);`)(
-		hook,
+	const programOrResult = new Function("selftestHook", "console", `return (${source}\n);`)(
+		hook, diagnosticConsole,
 	);
 	return typeof programOrResult === "function"
 		? await programOrResult(new FakePage())
@@ -3100,6 +3100,8 @@ test("D78 publishes one closed repair-base proof after exact setup and reload", 
 		},
 	};
 
+	const observations = [];
+	let loggingFails = false;
 	const result = await runD70BrowserSelftest(
 		async ({ createD78RepairBaseProof, createProfileRequestLifecycle }) => {
 			assert.equal(
@@ -3257,8 +3259,167 @@ test("D78 publishes one closed repair-base proof after exact setup and reload", 
 			rejects("admission overflow", (candidate) => {
 				candidate.health.profileSupersessionAdmissionWithinBound = false;
 			});
+			const observe = (mutate, expectedCode, expectedError = /D78 repair-base proof/) => {
+				const candidate = structuredClone(input);
+				mutate(candidate);
+				observations.length = 0;
+				assert.throws(() => createD78RepairBaseProof(candidate), expectedError);
+				assert.equal(observations.length, 1);
+				const line = observations[0];
+				assert.ok(Buffer.byteLength(`${line}\n`) <= 4096);
+				assert.ok(line.startsWith("POINTBREAK_D78_FAILURE="));
+				const diagnostic = JSON.parse(line.slice("POINTBREAK_D78_FAILURE=".length));
+				assert.equal(diagnostic.schema, "pointbreak.browser-d78-reload-failure.v1");
+				assert.equal(Object.keys(diagnostic.checks).length, 18);
+				assert.equal(diagnostic.checks[expectedCode], false);
+				assert.doesNotMatch(line, /bootstrap-secret|PRIVATE-MARKER|http:\/\/|sha256:|responseBody|visitId|capability/);
+				return diagnostic;
+			};
+			const negatives = [
+				["navigationReload", (c) => { c.reloadOpen.navigationKind = "goto"; }],
+				["actionSchema", (c) => { c.reloadOpen.routeVisitAction.schema = "unknown"; }],
+				["actionVersion", (c) => { c.reloadOpen.routeVisitAction.version = 2; }],
+				["actionClassIneligible", (c) => { c.reloadOpen.routeVisitAction.actionClass = "exact-detail-changes-goto"; }],
+				["eligibilityIneligible", (c) => { c.reloadOpen.routeVisitAction.eligibility = "eligible"; }],
+				["phaseSettled", (c) => { c.reloadOpen.routeVisitAction.phase = "invoked"; }],
+				["resultAllowed", (c) => { c.reloadOpen.routeVisitAction.resultKind = "unknown"; }],
+				["current", (c) => { c.reloadOpen.routeVisitAction.current = false; }],
+				["capturedMainFrame", (c) => { c.reloadOpen.routeVisitAction.capturedMainFrame = false; }],
+				["sourceMatchesTarget", (c) => { c.reloadOpen.routeVisitAction.sourceHash = "PRIVATE-MARKER"; }],
+				["frameArray", (c) => { c.reloadOpen.routeVisitAction.frameEntries = {}; }],
+				["frameNonempty", (c) => { c.reloadOpen.routeVisitAction.frameEntries = []; }],
+				["framesReload", (c) => { c.reloadOpen.routeVisitAction.frameEntries = [{ navigationKind: "goto" }]; }],
+				["certificationPassed", (c) => { c.reloadOpen.routeVisitCertification.passed = false; }],
+				["lifecycleZero", (c) => { c.health.requestLifecycleFailureCount = 1; }],
+				["unexpectedZero", (c) => { c.health.unexpectedRequestFailureCount = 1; }],
+				["admissibleZero", (c) => { c.health.admissibleProfileSupersessionCount = 1; }],
+				["admissionWithinBound", (c) => { c.health.profileSupersessionAdmissionWithinBound = false; }],
+			];
+			for (const [code, mutate] of negatives) observe(mutate, code);
+			for (const key of Object.keys(input.reloadOpen.routeVisitCertification)) {
+				const diagnostic = observe((c) => { c.reloadOpen.routeVisitCertification[key] = false; }, "certificationPassed");
+				assert.equal(diagnostic.certification[key], false);
+			}
+			assert.equal(observe((c) => { delete c.reloadOpen; }, "navigationReload").states.reload, "missing");
+			assert.equal(observe((c) => { c.reloadOpen.routeVisitAction = null; }, "actionSchema").states.action, "null");
+			assert.equal(observe((c) => { delete c.health; }, "lifecycleZero").states.health, "missing");
+			const malformed = observe((c) => { c.reloadOpen.routeVisitAction.frameEntries = [null]; }, "framesReload", TypeError);
+			assert.equal(malformed.states.frameKindMissing, true);
+			assert.equal(malformed.states.frameKindWrongType, true);
+			const wrongTypes = observe((c) => {
+				c.reloadOpen.routeVisitCertification.pendingState = { body: "PRIVATE-MARKER" };
+				c.health.requestLifecycleFailureCount = "PRIVATE-MARKER";
+				c.health.unexpectedRequestFailureCount = null;
+				c.health.admissibleProfileSupersessionCount = Number.NaN;
+				c.health.profileSupersessionAdmissionWithinBound = [];
+			}, "certificationPassed");
+			assert.deepEqual(wrongTypes.health, { requestLifecycleFailureCount: "string", unexpectedRequestFailureCount: "null", admissibleProfileSupersessionCount: "nonfinite", profileSupersessionAdmissionWithinBound: "array" });
+			assert.equal(wrongTypes.certification.pendingState, "object");
+			const complete = observe((c) => {
+				for (const [, mutate] of negatives) mutate(c);
+				c.reloadOpen.routeVisitAction.frameEntries = {};
+				const marker = "PRIVATE-MARKER".repeat(10000);
+				Object.assign(c.reloadOpen.routeVisitAction, { schema: marker, resultKind: marker, visitId: marker, sourceHash: marker, intendedHash: `${marker}different`, responseBody: marker });
+				for (const key of Object.keys(c.reloadOpen.routeVisitCertification)) c.reloadOpen.routeVisitCertification[key] = false;
+				c.health.requestLifecycleFailureCount = Number.MAX_VALUE;
+				c.health.unexpectedRequestFailureCount = -Number.MAX_VALUE;
+				c.health.admissibleProfileSupersessionCount = 1.2345678901234567e123;
+			}, "navigationReload");
+			assert.equal(Object.values(complete.checks).every((value) => value === false), true);
+			assert.equal(Object.values(complete.certification).every((value) => value === false), true);
+			assert.equal(complete.health.requestLifecycleFailureCount, Number.MAX_VALUE);
+			const sentinel = new TypeError("original accessor failure");
+			observe((c) => { Object.defineProperty(c.reloadOpen.routeVisitAction, "phase", { get() { throw sentinel; } }); }, "phaseSettled", (error) => error === sentinel);
+			// A short-circuited accessor must not be evaluated by failure observation.
+			observe((c) => {
+				c.reloadOpen.navigationKind = "goto";
+				Object.defineProperty(c.reloadOpen.routeVisitAction, "phase", { get() { assert.fail("observer invoked an accessor"); } });
+			}, "navigationReload");
+			const inaccessible = structuredClone(input);
+			inaccessible.health.requestLifecycleFailureCount = 1;
+			inaccessible.health = new Proxy(inaccessible.health, {
+				getOwnPropertyDescriptor() { throw new Error("PRIVATE-MARKER"); },
+			});
+			observations.length = 0;
+			assert.throws(() => createD78RepairBaseProof(inaccessible), /D78 repair-base proof reload or health/);
+			assert.deepEqual(JSON.parse(observations[0].slice("POINTBREAK_D78_FAILURE=".length)), {
+				schema: "pointbreak.browser-d78-reload-failure.v1", status: "unavailable",
+			});
+			assert.equal(observations.length, 1);
+			observations.length = 0;
+			loggingFails = true;
+			try { rejects("logger failure retains rejection", (c) => { c.health.requestLifecycleFailureCount = 1; }); }
+			finally { loggingFails = false; }
+			assert.equal(observations.length, 0);
+			observations.length = 0;
+			assert.deepEqual(createD78RepairBaseProof(input), expectedProof);
+			assert.equal(observations.length, 0, "passing proofs must not emit failure observations");
+
+			// Match the pinned runner's VM boundary: no forwarded/injected console.
+			const vmSource = await renderBrowserProgram(
+				'({mode: "full", server: {baseUrl: "http://127.0.0.1:4173"}, __pointbreakD70Selftest: selftestHook})',
+			);
+			const vmProof = runInNewContext(`(${vmSource}\n)`, {
+				selftestHook: ({ createD78RepairBaseProof: proof }) => proof,
+			});
+			const transported = (mutate, expectedCode, expectedError) => {
+				const candidate = structuredClone(input);
+				mutate(candidate);
+				let rejected;
+				assert.throws(() => vmProof(candidate), (error) => { rejected = error; return true; });
+				if (expectedError) assert.equal(rejected, expectedError);
+				assert.equal(rejected.name, expectedError?.name ?? "Error");
+				const text = String(rejected);
+				assert.ok(text.startsWith(expectedError ? `${expectedError.name}: original VM accessor failure\n` : "Error: D78 repair-base proof reload or health did not match the closed contract\n"));
+				const lines = text.split("\n");
+				assert.equal(lines.length, 2);
+				assert.ok(lines[1].startsWith("POINTBREAK_D78_FAILURE="));
+				assert.ok(Buffer.byteLength(`${lines[1]}\n`) <= 4096);
+				assert.doesNotMatch(lines[1], /PRIVATE-MARKER|bootstrap-secret|http:\/\/|sha256:|responseBody|visitId|capability/);
+				const diagnostic = JSON.parse(lines[1].slice("POINTBREAK_D78_FAILURE=".length));
+				if (expectedCode) {
+					assert.equal(Object.keys(diagnostic.checks).length, 18);
+					assert.equal(diagnostic.checks[expectedCode], false);
+				}
+				return diagnostic;
+			};
+			for (const [code, mutate] of negatives) transported(mutate, code);
+			const vmComplete = transported((c) => {
+				for (const [, mutate] of negatives) mutate(c);
+				c.reloadOpen.routeVisitAction.frameEntries = {};
+				c.reloadOpen.routeVisitAction.sourceHash = "PRIVATE-MARKER".repeat(10000);
+			}, "navigationReload");
+			assert.equal(Object.values(vmComplete.checks).every((value) => value === false), true);
+			assert.equal(transported((c) => { delete c.health; }, "lifecycleZero").states.health, "missing");
+			const vmSentinel = new TypeError("original VM accessor failure");
+			transported((c) => {
+				Object.defineProperty(c.reloadOpen.routeVisitAction, "phase", { get() { throw vmSentinel; } });
+			}, "phaseSettled", vmSentinel);
+			assert.deepEqual(transported((c) => {
+				c.health.requestLifecycleFailureCount = 1;
+				c.health = new Proxy(c.health, { getOwnPropertyDescriptor() { throw new Error("PRIVATE-MARKER"); } });
+			}), { schema: "pointbreak.browser-d78-reload-failure.v1", status: "unavailable" });
+			for (const accessor of [false, true]) {
+				let gets = 0, sets = 0;
+				const immutable = new TypeError("original immutable failure");
+				const descriptor = accessor
+					? { configurable: true, get() { gets++; return "original immutable failure"; }, set() { sets++; } }
+					: { value: "original immutable failure", writable: false, configurable: false };
+				Object.defineProperty(immutable, "message", descriptor);
+				const beforeMessage = Object.getOwnPropertyDescriptor(immutable, "message");
+				const candidate = structuredClone(input);
+				Object.defineProperty(candidate.reloadOpen.routeVisitAction, "phase", { get() { throw immutable; } });
+				assert.throws(() => vmProof(candidate), (error) => error === immutable);
+				assert.equal(gets, 0, "carrier must not invoke a message getter");
+				assert.equal(sets, 0, "carrier must not invoke a message setter");
+				assert.deepEqual(Object.getOwnPropertyDescriptor(immutable, "message"), beforeMessage);
+				assert.equal(String(immutable), "TypeError: original immutable failure");
+			}
+			assert.deepEqual(JSON.parse(JSON.stringify(vmProof(input))), expectedProof);
+
 			return true;
 		},
+		{ error: (line) => { if (loggingFails) throw new Error("logger unavailable"); observations.push(line); } },
 	);
 	assert.equal(result, true);
 

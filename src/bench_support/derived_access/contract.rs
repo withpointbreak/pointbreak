@@ -9,7 +9,7 @@ use super::storage_witness::{
 use crate::bench_support::longitudinal::{
     LongitudinalCounterReceiptV1, LongitudinalCountersV1,
     LongitudinalTimelineCarrierMismatchKindV1, LongitudinalTimelinePostPinBarrierReceiptV1,
-    LongitudinalTimelinePostPinBoundaryV1,
+    LongitudinalTimelinePostPinBarrierReceiptV2, LongitudinalTimelinePostPinBoundaryV1,
 };
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
 
@@ -136,6 +136,147 @@ pub fn qualification_derived_access_evaluator_v5_procedure_sha256() -> String {
         "compiled derived-access evaluator-v5 procedure drifted"
     );
     digest
+}
+
+pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6: &str =
+    "pointbreak.qualification-derived-access-evaluator.v6";
+pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V6_PROCEDURE_SCHEMA_V1: &str =
+    "pointbreak.qualification-derived-access-evaluator-v6-procedure.v1";
+pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V6_PROCEDURE_SHA256_V1: &str =
+    "b347079378ec64f91e86d98a3d0c55eb4aeac8d3b58997d09b24ae4bf2657e0d";
+pub fn qualification_derived_access_evaluator_v6_procedure_sha256() -> String {
+    let mut steps = QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V5_STEPS_V1;
+    steps[6] = "timeline-post-pin-v2-fixed-negative-enrollment-owner-completed-pre-pin-conservation-counted-profile-setup-same-child-exact-mutation-frozen-safety-checked-final-hydration-and-abort-equations-v1";
+    let bytes = canonical_json_bytes(&serde_json::json!({"schema": QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V6_PROCEDURE_SCHEMA_V1, "steps": steps})).expect("V6 procedure is canonical");
+    let digest = sha256_bytes_hex(&bytes);
+    assert_eq!(
+        digest,
+        QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V6_PROCEDURE_SHA256_V1
+    );
+    digest
+}
+
+pub(crate) fn timeline_final_fault_counts_v2(
+    c: &LongitudinalCountersV1,
+    e: u64,
+    t: u64,
+) -> Result<(), String> {
+    let h = c
+        .timeline_selected_carriers
+        .checked_add(c.timeline_revision_candidate_carriers)
+        .and_then(|v| v.checked_add(c.timeline_correlation_support_carriers));
+    let bound = h.and_then(|h| e.checked_add(h));
+    let abort = e
+        .checked_add(c.event_validations)
+        .and_then(|v| v.checked_add(1));
+    if c.carrier_opens < t
+        || bound.is_none_or(|h| c.carrier_opens > h)
+        || abort != Some(c.carrier_opens)
+    {
+        return Err("V2 Timeline final hydration/validation equation failed".to_owned());
+    }
+    Ok(())
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn timeline_invalid_signature_run_identity_for_contract(
+    v2: bool,
+    reference: &str,
+    fault: &str,
+    product: &str,
+    event: &str,
+    key: &str,
+    clean: &str,
+    mutated: &str,
+    recipe: &str,
+    barrier: &str,
+    child: &str,
+) -> Result<String, String> {
+    let legacy = timeline_invalid_signature_run_identity_v1(
+        reference, fault, product, event, key, clean, mutated, recipe, barrier, child,
+    )?;
+    if !v2 {
+        return Ok(legacy);
+    }
+    canonical_sha256(
+        &serde_json::json!({"schema":"pointbreak.timeline-invalid-signature-run-identity.v2", "preimage":legacy, "barrier":barrier, "derivedChild":child}),
+    )
+}
+pub(crate) fn timeline_post_pin_identity_v2(
+    legacy_inputs: &str,
+    setup: &str,
+) -> Result<String, String> {
+    canonical_sha256(
+        &serde_json::json!({"schema":"pointbreak.timeline-invalid-signature-post-pin-barrier-identity.v2", "inputs":legacy_inputs,
+        "countingContractSha256": crate::bench_support::longitudinal::TIMELINE_PRE_HYDRATION_COUNTING_CONTRACT_SHA256_V2, "setupCounterReceiptSha256":setup}),
+    )
+}
+pub(crate) fn timeline_setup_identity_v2(
+    reference: &str,
+    fault: &str,
+    product: &str,
+    child: &str,
+) -> Result<String, String> {
+    canonical_sha256(
+        &serde_json::json!({"schema":"pointbreak.timeline-profile-setup-identity.v2", "referenceRoot":reference, "faultRoot":fault, "product":product, "derivedChild":child, "method":"GET", "path":"/api/v2/profile"}),
+    )
+}
+fn validate_timeline_setup_v2(input: TimelineReadRef<'_>) -> Result<(), String> {
+    let TimelineReadRef::V2(row) = input else {
+        return Ok(());
+    };
+    if row.schema != QUALIFICATION_DERIVED_TIMELINE_READ_EVIDENCE_SCHEMA_V2 {
+        return Err("unsupported Timeline row schema".to_owned());
+    }
+    let Some(f) = &row.invalid_signature_failure else {
+        return Ok(());
+    };
+    let setup = &f.setup_counter_receipt;
+    setup.validate().map_err(|e| e.to_string())?;
+    let identity = timeline_setup_identity_v2(
+        &f.reference_root_identity_sha256,
+        &f.fault_execution.root_provenance_sha256,
+        &row.product_identity_sha256,
+        &f.phase_process_identity_sha256[2],
+    )?;
+    let profile = &f.setup_profile_document;
+    if profile.get("schema").and_then(serde_json::Value::as_str)
+        != Some("pointbreak.inspect-reader-profile")
+        || profile.get("version").and_then(serde_json::Value::as_u64) != Some(1)
+        || profile
+            .get("availability")
+            .and_then(serde_json::Value::as_str)
+            != Some("ready")
+        || canonical_sha256(profile)? != setup.semantic_result_sha256
+    {
+        return Err("Timeline setup typed outcome drifted".to_owned());
+    }
+    let inputs = canonical_sha256(&serde_json::json!({
+        "schema":"pointbreak.timeline-invalid-signature-post-pin-barrier-identity.v1",
+        "referenceRoot":f.reference_root_identity_sha256, "faultRoot":f.fault_execution.root_provenance_sha256,
+        "product":row.product_identity_sha256, "carrierEventId":f.carrier_event_id,
+        "carrierKeyDigest":f.barrier_receipt.expected_carrier_key_digest, "cleanCarrier":f.clean_carrier_sha256,
+        "mutatedCarrier":f.mutated_carrier_sha256, "mutationRecipe":f.mutation_recipe_sha256,
+    }))?;
+    if timeline_post_pin_identity_v2(&inputs, &setup.receipt_sha256)?
+        != f.barrier_receipt.barrier_identity_sha256
+    {
+        return Err("Timeline V2 barrier inputs/setup identity drifted".to_owned());
+    }
+
+    if !setup.success
+        || setup.operation != "GET /api/v2/profile"
+        || setup.phase != "timeline_profile_setup_v2"
+        || setup.run_identity != identity
+        || setup.manifest_sha256 != identity
+        || setup.root_identity != f.fault_execution.root_provenance_sha256
+        || setup.base_execution_identity_sha256 != f.fault_execution.canonical_sha256()?
+        || setup.derivative_execution_identity_sha256 != row.product_identity_sha256
+        || setup.receipt_sha256 != f.barrier_receipt.setup_counter_receipt_sha256
+        || setup.schedule_sha256 != identity
+    {
+        return Err("Timeline V2 setup/child binding drifted".to_owned());
+    }
+    Ok(())
 }
 
 const DERIVATION_COMMIT_V1: &str = "a0d1519e5dc86d385114abfbd8e806b1456f0474";
@@ -1917,6 +2058,411 @@ pub struct QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1 {
     pub barrier_receipt: LongitudinalTimelinePostPinBarrierReceiptV1,
 }
 
+pub const QUALIFICATION_DERIVED_TIMELINE_READ_EVIDENCE_SCHEMA_V2: &str =
+    "pointbreak.qualification-derived-timeline-read-evidence.v2";
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedTimelineReadEvidenceV2 {
+    pub schema: String,
+    pub platform: QualificationDerivedAccessPlatformV1,
+    pub fixture: QualificationDerivedChangeFixtureV1,
+    pub fixture_inventory_sha256: String,
+    pub fixture_witness_sha256: String,
+    pub case: QualificationDerivedTimelineReadCaseV1,
+    pub semantic_process_scope: QualificationDerivedAccessProcessScopeV1,
+    pub counter_process_scope: QualificationDerivedAccessProcessScopeV1,
+    pub product_identity_sha256: String,
+    pub counter_execution_identity_sha256: String,
+    pub status: QualificationDerivedAccessStatusV1,
+    pub oracle: QualificationDerivedTimelineReadOracleV1,
+    pub strict_semantic_sha256: Option<String>,
+    pub derived_semantic_sha256: String,
+    pub wire_contract_matches: bool,
+    pub expected_typed_documents: Vec<QualificationDerivedTimelineTypedExpectationV1>,
+    pub observed_typed_documents: Vec<QualificationDerivedTimelineTypedObservationV1>,
+    pub authority: QualificationDerivedTimelineAuthorityEvidenceV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_transition: Option<QualificationDerivedTimelineTrustTransitionV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrent_trust_transition: Option<QualificationDerivedTimelineConcurrentTrustEvidenceV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid_signature_failure:
+        Option<QualificationDerivedTimelineInvalidSignatureFailureEvidenceV2>,
+    pub counter_receipts: Vec<LongitudinalCounterReceiptV1>,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedTimelineInvalidSignatureFailureEvidenceV2 {
+    pub fault_seed_receipt: QualificationDerivedTimelineFaultSeedReceiptV1,
+    pub reference_root_identity_sha256: String,
+    pub fault_execution: QualificationDerivedAccessExecutionIdentityV1,
+    pub reference_fixture_witness_sha256: String,
+    pub fault_fixture_witness_sha256: String,
+    pub carrier_event_id: String,
+    pub clean_event_record_hash: String,
+    pub mutated_event_record_hash: String,
+    pub reference_inventory_sha256: String,
+    pub reference_recovery_inventory_sha256: String,
+    pub fault_clean_inventory_sha256: String,
+    pub fault_derivative_inventory_sha256: String,
+    pub fault_restored_inventory_sha256: String,
+    pub clean_carrier_sha256: String,
+    pub mutated_carrier_sha256: String,
+    pub mutation_recipe_sha256: String,
+    pub clean_signature_status: String,
+    pub mutated_signature_status: String,
+    pub strict_observed_signature_status: String,
+    pub observed_typed_document: QualificationDerivedChangeTypedDocumentV1,
+    pub clean_semantic_sha256: String,
+    pub strict_clean_semantic_sha256: String,
+    pub strict_semantic_sha256: String,
+    pub derived_semantic_sha256: String,
+    pub strict_recovery_semantic_sha256: String,
+    pub derived_recovery_semantic_sha256: String,
+    pub recovery_signature_status: String,
+    pub reference_trust_identity_staged_sha256: String,
+    pub reference_trust_identity_restored_sha256: String,
+    pub fault_trust_identity_staged_sha256: String,
+    pub fault_trust_identity_restored_sha256: String,
+    pub phase_process_identity_sha256: [String; 6],
+    pub phase_http_status: [u16; 6],
+    pub phase_source_change_projection_stamp: [String; 5],
+    pub phase_timeline_projection_stamp: [String; 5],
+    pub phase_authority_cursor_sha256: [String; 5],
+    pub setup_counter_receipt: LongitudinalCounterReceiptV1,
+    pub setup_profile_document: serde_json::Value,
+    pub counter_receipt: LongitudinalCounterReceiptV1,
+    pub barrier_receipt: LongitudinalTimelinePostPinBarrierReceiptV2,
+}
+
+/// Closed wire dispatch: the legacy shape has no schema field, whereas V2
+/// requires it. Derived typed parsing retains nested duplicate-field errors.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum QualificationDerivedTimelineReadEvidence {
+    V1(QualificationDerivedTimelineReadEvidenceV1),
+    V2(QualificationDerivedTimelineReadEvidenceV2),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum TimelineReadRef<'a> {
+    V1(&'a QualificationDerivedTimelineReadEvidenceV1),
+    V2(&'a QualificationDerivedTimelineReadEvidenceV2),
+}
+// Immutable common facts only. Wire values and version-specific policy stay on
+// the actual variants; no legacy evidence is fabricated or serialized here.
+#[derive(Clone, Copy)]
+pub(crate) struct TimelineRowFields<'a> {
+    pub(crate) platform: QualificationDerivedAccessPlatformV1,
+    pub(crate) fixture: QualificationDerivedChangeFixtureV1,
+    pub(crate) fixture_inventory_sha256: &'a str,
+    pub(crate) fixture_witness_sha256: &'a str,
+    pub(crate) case: QualificationDerivedTimelineReadCaseV1,
+    pub(crate) semantic_process_scope: QualificationDerivedAccessProcessScopeV1,
+    pub(crate) counter_process_scope: QualificationDerivedAccessProcessScopeV1,
+    pub(crate) product_identity_sha256: &'a str,
+    pub(crate) counter_execution_identity_sha256: &'a str,
+    pub(crate) status: QualificationDerivedAccessStatusV1,
+    pub(crate) oracle: QualificationDerivedTimelineReadOracleV1,
+    pub(crate) strict_semantic_sha256: Option<&'a str>,
+    pub(crate) derived_semantic_sha256: &'a str,
+    pub(crate) wire_contract_matches: bool,
+    pub(crate) expected_typed_documents: &'a [QualificationDerivedTimelineTypedExpectationV1],
+    pub(crate) observed_typed_documents: &'a [QualificationDerivedTimelineTypedObservationV1],
+    pub(crate) authority: &'a QualificationDerivedTimelineAuthorityEvidenceV1,
+    pub(crate) trust_transition: Option<&'a QualificationDerivedTimelineTrustTransitionV1>,
+    pub(crate) concurrent_trust_transition:
+        Option<&'a QualificationDerivedTimelineConcurrentTrustEvidenceV1>,
+    pub(crate) invalid_signature_failure: Option<TimelineFailureRef<'a>>,
+    pub(crate) counter_receipts: &'a [LongitudinalCounterReceiptV1],
+}
+impl<'a> TimelineReadRef<'a> {
+    pub(crate) fn fields(self) -> TimelineRowFields<'a> {
+        macro_rules! fields {
+            ($row:expr, $variant:ident) => {
+                TimelineRowFields {
+                    platform: $row.platform,
+                    fixture: $row.fixture,
+                    fixture_inventory_sha256: &$row.fixture_inventory_sha256,
+                    fixture_witness_sha256: &$row.fixture_witness_sha256,
+                    case: $row.case,
+                    semantic_process_scope: $row.semantic_process_scope,
+                    counter_process_scope: $row.counter_process_scope,
+                    product_identity_sha256: &$row.product_identity_sha256,
+                    counter_execution_identity_sha256: &$row.counter_execution_identity_sha256,
+                    status: $row.status,
+                    oracle: $row.oracle,
+                    strict_semantic_sha256: $row.strict_semantic_sha256.as_deref(),
+                    derived_semantic_sha256: &$row.derived_semantic_sha256,
+                    wire_contract_matches: $row.wire_contract_matches,
+                    expected_typed_documents: &$row.expected_typed_documents,
+                    observed_typed_documents: &$row.observed_typed_documents,
+                    authority: &$row.authority,
+                    trust_transition: $row.trust_transition.as_ref(),
+                    concurrent_trust_transition: $row.concurrent_trust_transition.as_ref(),
+                    invalid_signature_failure: $row
+                        .invalid_signature_failure
+                        .as_ref()
+                        .map(TimelineFailureRef::$variant),
+                    counter_receipts: &$row.counter_receipts,
+                }
+            };
+        }
+        match self {
+            Self::V1(row) => fields!(row, V1),
+            Self::V2(row) => fields!(row, V2),
+        }
+    }
+}
+#[derive(Clone, Copy)]
+pub(crate) struct TimelineFailureFields<'a> {
+    pub(crate) fault_seed_receipt: &'a QualificationDerivedTimelineFaultSeedReceiptV1,
+    pub(crate) reference_root_identity_sha256: &'a str,
+    pub(crate) fault_execution: &'a QualificationDerivedAccessExecutionIdentityV1,
+    pub(crate) reference_fixture_witness_sha256: &'a str,
+    pub(crate) fault_fixture_witness_sha256: &'a str,
+    pub(crate) carrier_event_id: &'a str,
+    pub(crate) clean_event_record_hash: &'a str,
+    pub(crate) mutated_event_record_hash: &'a str,
+    pub(crate) reference_inventory_sha256: &'a str,
+    pub(crate) reference_recovery_inventory_sha256: &'a str,
+    pub(crate) fault_clean_inventory_sha256: &'a str,
+    pub(crate) fault_derivative_inventory_sha256: &'a str,
+    pub(crate) fault_restored_inventory_sha256: &'a str,
+    pub(crate) clean_carrier_sha256: &'a str,
+    pub(crate) mutated_carrier_sha256: &'a str,
+    pub(crate) mutation_recipe_sha256: &'a str,
+    pub(crate) clean_signature_status: &'a str,
+    pub(crate) mutated_signature_status: &'a str,
+    pub(crate) strict_observed_signature_status: &'a str,
+    pub(crate) observed_typed_document: &'a QualificationDerivedChangeTypedDocumentV1,
+    pub(crate) clean_semantic_sha256: &'a str,
+    pub(crate) strict_clean_semantic_sha256: &'a str,
+    pub(crate) strict_semantic_sha256: &'a str,
+    pub(crate) derived_semantic_sha256: &'a str,
+    pub(crate) strict_recovery_semantic_sha256: &'a str,
+    pub(crate) derived_recovery_semantic_sha256: &'a str,
+    pub(crate) recovery_signature_status: &'a str,
+    pub(crate) reference_trust_identity_staged_sha256: &'a str,
+    pub(crate) reference_trust_identity_restored_sha256: &'a str,
+    pub(crate) fault_trust_identity_staged_sha256: &'a str,
+    pub(crate) fault_trust_identity_restored_sha256: &'a str,
+    pub(crate) phase_process_identity_sha256: &'a [String; 6],
+    pub(crate) phase_http_status: &'a [u16; 6],
+    pub(crate) phase_source_change_projection_stamp: &'a [String; 5],
+    pub(crate) phase_timeline_projection_stamp: &'a [String; 5],
+    pub(crate) phase_authority_cursor_sha256: &'a [String; 5],
+    pub(crate) counter_receipt: &'a LongitudinalCounterReceiptV1,
+    pub(crate) barrier_receipt: TimelineBarrierRef<'a>,
+}
+#[derive(Clone, Copy)]
+pub(crate) enum TimelineFailureRef<'a> {
+    V1(&'a QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1),
+    V2(&'a QualificationDerivedTimelineInvalidSignatureFailureEvidenceV2),
+}
+impl<'a> TimelineFailureRef<'a> {
+    pub(crate) fn fields(self) -> TimelineFailureFields<'a> {
+        macro_rules! fields {
+            ($row:expr, $variant:ident) => {
+                TimelineFailureFields {
+                    fault_seed_receipt: &$row.fault_seed_receipt,
+                    reference_root_identity_sha256: &$row.reference_root_identity_sha256,
+                    fault_execution: &$row.fault_execution,
+                    reference_fixture_witness_sha256: &$row.reference_fixture_witness_sha256,
+                    fault_fixture_witness_sha256: &$row.fault_fixture_witness_sha256,
+                    carrier_event_id: &$row.carrier_event_id,
+                    clean_event_record_hash: &$row.clean_event_record_hash,
+                    mutated_event_record_hash: &$row.mutated_event_record_hash,
+                    reference_inventory_sha256: &$row.reference_inventory_sha256,
+                    reference_recovery_inventory_sha256: &$row.reference_recovery_inventory_sha256,
+                    fault_clean_inventory_sha256: &$row.fault_clean_inventory_sha256,
+                    fault_derivative_inventory_sha256: &$row.fault_derivative_inventory_sha256,
+                    fault_restored_inventory_sha256: &$row.fault_restored_inventory_sha256,
+                    clean_carrier_sha256: &$row.clean_carrier_sha256,
+                    mutated_carrier_sha256: &$row.mutated_carrier_sha256,
+                    mutation_recipe_sha256: &$row.mutation_recipe_sha256,
+                    clean_signature_status: &$row.clean_signature_status,
+                    mutated_signature_status: &$row.mutated_signature_status,
+                    strict_observed_signature_status: &$row.strict_observed_signature_status,
+                    observed_typed_document: &$row.observed_typed_document,
+                    clean_semantic_sha256: &$row.clean_semantic_sha256,
+                    strict_clean_semantic_sha256: &$row.strict_clean_semantic_sha256,
+                    strict_semantic_sha256: &$row.strict_semantic_sha256,
+                    derived_semantic_sha256: &$row.derived_semantic_sha256,
+                    strict_recovery_semantic_sha256: &$row.strict_recovery_semantic_sha256,
+                    derived_recovery_semantic_sha256: &$row.derived_recovery_semantic_sha256,
+                    recovery_signature_status: &$row.recovery_signature_status,
+                    reference_trust_identity_staged_sha256: &$row
+                        .reference_trust_identity_staged_sha256,
+                    reference_trust_identity_restored_sha256: &$row
+                        .reference_trust_identity_restored_sha256,
+                    fault_trust_identity_staged_sha256: &$row.fault_trust_identity_staged_sha256,
+                    fault_trust_identity_restored_sha256: &$row
+                        .fault_trust_identity_restored_sha256,
+                    phase_process_identity_sha256: &$row.phase_process_identity_sha256,
+                    phase_http_status: &$row.phase_http_status,
+                    phase_source_change_projection_stamp: &$row
+                        .phase_source_change_projection_stamp,
+                    phase_timeline_projection_stamp: &$row.phase_timeline_projection_stamp,
+                    phase_authority_cursor_sha256: &$row.phase_authority_cursor_sha256,
+                    counter_receipt: &$row.counter_receipt,
+                    barrier_receipt: TimelineBarrierRef::$variant(&$row.barrier_receipt),
+                }
+            };
+        }
+        match self {
+            Self::V1(row) => fields!(row, V1),
+            Self::V2(row) => fields!(row, V2),
+        }
+    }
+}
+#[derive(Clone, Copy)]
+pub(crate) struct TimelineBarrierFields<'a> {
+    pub(crate) run_identity: &'a str,
+    pub(crate) barrier_identity_sha256: &'a str,
+    pub(crate) boundary: LongitudinalTimelinePostPinBoundaryV1,
+    pub(crate) carrier_opens_before: u64,
+    pub(crate) selected_carriers_before: u64,
+    pub(crate) expected_carrier_key_digest: &'a str,
+    pub(crate) observed_mismatch_key_digest: &'a str,
+    pub(crate) mismatch_kind: LongitudinalTimelineCarrierMismatchKindV1,
+    pub(crate) clean_carrier_sha256: &'a str,
+    pub(crate) mutated_carrier_sha256: &'a str,
+    pub(crate) mutation_recipe_sha256: &'a str,
+    pub(crate) derivative_inventory_sha256: &'a str,
+}
+#[derive(Clone, Copy)]
+pub(crate) enum TimelineBarrierRef<'a> {
+    V1(&'a LongitudinalTimelinePostPinBarrierReceiptV1),
+    V2(&'a LongitudinalTimelinePostPinBarrierReceiptV2),
+}
+impl<'a> TimelineBarrierRef<'a> {
+    pub(crate) fn fields(self) -> TimelineBarrierFields<'a> {
+        macro_rules! fields {
+            ($row:expr, $variant:ident) => {
+                TimelineBarrierFields {
+                    run_identity: &$row.run_identity,
+                    barrier_identity_sha256: &$row.barrier_identity_sha256,
+                    boundary: $row.boundary,
+                    carrier_opens_before: $row.carrier_opens_before,
+                    selected_carriers_before: $row.selected_carriers_before,
+                    expected_carrier_key_digest: &$row.expected_carrier_key_digest,
+                    observed_mismatch_key_digest: &$row.observed_mismatch_key_digest,
+                    mismatch_kind: $row.mismatch_kind,
+                    clean_carrier_sha256: &$row.clean_carrier_sha256,
+                    mutated_carrier_sha256: &$row.mutated_carrier_sha256,
+                    mutation_recipe_sha256: &$row.mutation_recipe_sha256,
+                    derivative_inventory_sha256: &$row.derivative_inventory_sha256,
+                }
+            };
+        }
+        match self {
+            Self::V1(row) => fields!(row, V1),
+            Self::V2(row) => fields!(row, V2),
+        }
+    }
+}
+impl TimelineBarrierRef<'_> {
+    fn validate(self) -> Result<(), crate::bench_support::longitudinal::LongitudinalContractError> {
+        match self {
+            Self::V1(r) => r.validate(),
+            Self::V2(r) => r.validate(),
+        }
+    }
+}
+impl QualificationDerivedTimelineReadEvidence {
+    pub(crate) fn view(&self) -> TimelineReadRef<'_> {
+        match self {
+            Self::V1(row) => TimelineReadRef::V1(row),
+            Self::V2(row) => TimelineReadRef::V2(row),
+        }
+    }
+    pub(crate) fn key(
+        &self,
+    ) -> (
+        QualificationDerivedAccessPlatformV1,
+        QualificationDerivedChangeFixtureV1,
+        QualificationDerivedTimelineReadCaseV1,
+    ) {
+        let row = self.view().fields();
+        (row.platform, row.fixture, row.case)
+    }
+    pub(crate) fn restore_reference_trust(&mut self, identity: String) {
+        macro_rules! restore {
+            ($row:expr) => {
+                if let Some(failure) = &mut $row.invalid_signature_failure {
+                    failure.reference_trust_identity_restored_sha256 = identity;
+                }
+            };
+        }
+        match self {
+            Self::V1(row) => restore!(row),
+            Self::V2(row) => restore!(row),
+        }
+    }
+    pub(crate) fn into_v1(self) -> Result<QualificationDerivedTimelineReadEvidenceV1, String> {
+        match self {
+            Self::V1(row) => Ok(row),
+            Self::V2(_) => Err("V2 Timeline row cannot enter a legacy result".to_owned()),
+        }
+    }
+    pub(crate) fn into_v2(self) -> Result<QualificationDerivedTimelineReadEvidenceV2, String> {
+        match self {
+            Self::V2(row) => Ok(row),
+            Self::V1(_) => Err("legacy Timeline row cannot enter V6".to_owned()),
+        }
+    }
+}
+impl TimelineReadRef<'_> {
+    pub(crate) fn is_v2(self) -> bool {
+        matches!(self, Self::V2(_))
+    }
+    fn frozen_safety(self) -> u64 {
+        match self {
+            Self::V1(_) => 0,
+            Self::V2(row) => row.invalid_signature_failure.as_ref().map_or(0, |f| {
+                f.barrier_receipt.enrollment_safety_probe_opens_before
+            }),
+        }
+    }
+}
+
+pub(crate) enum TimelineFailureEvidence {
+    V1(QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1),
+    V2(QualificationDerivedTimelineInvalidSignatureFailureEvidenceV2),
+}
+impl TimelineFailureEvidence {
+    pub(crate) fn restore_fault(&mut self, inventory: String, trust: String, signature: String) {
+        macro_rules! restore {
+            ($failure:expr) => {{
+                $failure.fault_restored_inventory_sha256 = inventory;
+                $failure.fault_trust_identity_restored_sha256 = trust;
+                $failure.recovery_signature_status = signature;
+            }};
+        }
+        match self {
+            Self::V1(f) => restore!(f),
+            Self::V2(f) => restore!(f),
+        }
+    }
+    pub(crate) fn into_v1(
+        self,
+    ) -> Result<QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1, String> {
+        match self {
+            Self::V1(f) => Ok(f),
+            Self::V2(_) => Err("mixed Timeline failure version".to_owned()),
+        }
+    }
+    pub(crate) fn into_v2(
+        self,
+    ) -> Result<QualificationDerivedTimelineInvalidSignatureFailureEvidenceV2, String> {
+        match self {
+            Self::V2(f) => Ok(f),
+            Self::V1(_) => Err("mixed Timeline failure version".to_owned()),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QualificationDerivedTimelineForbiddenProbeKindV1 {
@@ -2224,7 +2770,7 @@ pub struct QualificationDerivedAccessPackageV1 {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub change_storage_rows: Vec<QualificationDerivedChangeStorageEvidenceV1>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub timeline_read_rows: Vec<QualificationDerivedTimelineReadEvidenceV1>,
+    pub timeline_read_rows: Vec<QualificationDerivedTimelineReadEvidence>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub timeline_storage_rows: Vec<QualificationDerivedTimelineStorageEvidenceV1>,
     pub complete: bool,
@@ -2252,6 +2798,7 @@ pub fn evaluate_qualification_derived_access_v1(
                 | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3
                 | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4
                 | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
+                | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6
         )
         || package.proposed_profile_id.trim().is_empty()
     {
@@ -2292,6 +2839,21 @@ pub fn evaluate_qualification_derived_access_v1(
     {
         return Err("evaluator v5 procedure binding drifted".to_owned());
     }
+    let v6 = package.evaluator_revision == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6;
+    if v6
+        && package.evaluator_procedure_sha256
+            != qualification_derived_access_evaluator_v6_procedure_sha256()
+    {
+        return Err("evaluator v6 procedure binding drifted".to_owned());
+    }
+    let mixed_timeline_contract = package.timeline_read_rows.iter().any(|row| {
+        row.view().is_v2() != v6
+            || matches!(row, QualificationDerivedTimelineReadEvidence::V2(row)
+                if row.schema != QUALIFICATION_DERIVED_TIMELINE_READ_EVIDENCE_SCHEMA_V2)
+    });
+    if mixed_timeline_contract {
+        return Err("mixed Timeline row/evaluator contract".to_owned());
+    }
     let missing_platforms = validate_execution_identities(package)?;
     reject_duplicate_rows(package)?;
 
@@ -2313,6 +2875,7 @@ pub fn evaluate_qualification_derived_access_v1(
         QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3
             | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4
             | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
+            | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6
     ) {
         evaluate_change_reads(package, &mut failed, &mut missing);
         evaluate_change_controls(package, &mut failed, &mut missing);
@@ -2322,6 +2885,7 @@ pub fn evaluate_qualification_derived_access_v1(
         package.evaluator_revision.as_str(),
         QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4
             | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
+            | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6
     ) {
         evaluate_timeline_reads_v1(package, &mut failed, &mut missing);
         evaluate_timeline_storage_v1(package, &mut failed, &mut missing);
@@ -2544,8 +3108,11 @@ fn validate_execution_identities(
     // Under v5 every fixture's change-read receipt shares one exact product
     // binary per platform, so byte-identical identities collapse before the
     // one-product-per-platform count; mixed identities still refuse.
-    let dedupe_identical =
-        package.evaluator_revision == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5;
+    let dedupe_identical = matches!(
+        package.evaluator_revision.as_str(),
+        QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
+            | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6
+    );
     let distinct_products = distinct_identities(&package.product_identities, dedupe_identical);
     let product_platforms = distinct_products
         .iter()
@@ -2556,6 +3123,7 @@ fn validate_execution_identities(
         QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3
             | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4
             | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
+            | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6
     ) && (product_platforms.len() != distinct_products.len()
         || !product_platforms.is_subset(&required))
     {
@@ -2847,7 +3415,7 @@ fn reject_duplicate_rows(package: &QualificationDerivedAccessPackageV1) -> Resul
     let timeline_reads = package
         .timeline_read_rows
         .iter()
-        .map(|row| (row.platform, row.fixture, row.case))
+        .map(QualificationDerivedTimelineReadEvidence::key)
         .collect::<BTreeSet<_>>();
     let expected_timeline_reads = [
         QualificationDerivedAccessPlatformV1::MacosApfs,
@@ -3703,12 +4271,10 @@ fn evaluate_timeline_reads_v1(
         let authorities = package
             .timeline_read_rows
             .iter()
-            .filter(|row| row.fixture == fixture)
+            .filter(|row| row.key().1 == fixture)
             .map(|row| {
-                (
-                    row.fixture_inventory_sha256.as_str(),
-                    row.fixture_witness_sha256.as_str(),
-                )
+                let row = row.view().fields();
+                (row.fixture_inventory_sha256, row.fixture_witness_sha256)
             })
             .collect::<BTreeSet<_>>();
         if authorities.len() > 1 {
@@ -3731,19 +4297,23 @@ fn evaluate_timeline_reads_v1(
         for fixture in QualificationDerivedChangeFixtureV1::ALL {
             for &case in required_timeline_cases_v1(fixture) {
                 let criterion = format!("{platform:?}/{fixture:?}/{case:?} Timeline read");
-                let Some(row) = package.timeline_read_rows.iter().find(|row| {
-                    row.platform == platform && row.fixture == fixture && row.case == case
-                }) else {
+                let Some(row) = package
+                    .timeline_read_rows
+                    .iter()
+                    .find(|row| row.key() == (platform, fixture, case))
+                else {
                     missing.push(criterion);
                     continue;
                 };
 
+                let view = row.view();
+                let row = view.fields();
                 // The row's own reference execution identity (the trust suite's
                 // fault identity is derived from it); under v4 this is the
                 // platform's first packaged identity as before.
                 let row_execution = executions.iter().copied().find(|identity| {
                     identity.canonical_sha256().ok().as_deref()
-                        == Some(row.counter_execution_identity_sha256.as_str())
+                        == Some(row.counter_execution_identity_sha256)
                 });
                 let source_authority_matches = package.change_read_rows.iter().any(|change| {
                     change.platform == platform
@@ -3752,8 +4322,12 @@ fn evaluate_timeline_reads_v1(
                         && change.fixture_inventory_sha256 == row.fixture_inventory_sha256
                         && change.fixture_witness_sha256 == row.fixture_witness_sha256
                 });
-                if !product_identity_sha256s.contains(&row.product_identity_sha256)
-                    || !execution_identity_sha256s.contains(&row.counter_execution_identity_sha256)
+                if !product_identity_sha256s
+                    .iter()
+                    .any(|identity| identity == row.product_identity_sha256)
+                    || !execution_identity_sha256s
+                        .iter()
+                        .any(|identity| identity == row.counter_execution_identity_sha256)
                     || products.is_empty()
                     || products.iter().any(|identity| {
                         !identity
@@ -3822,7 +4396,7 @@ fn evaluate_timeline_reads_v1(
                     qualification_derived_timeline_expected_oracle_v1(platform, fixture);
                 let semantic_parity = match row.oracle {
                     QualificationDerivedTimelineReadOracleV1::StrictParity => {
-                        row.strict_semantic_sha256.as_deref().is_some_and(|strict| {
+                        row.strict_semantic_sha256.is_some_and(|strict| {
                             validate_hex(strict, 64, "strict Timeline semantic receipt").is_ok()
                                 && strict == row.derived_semantic_sha256
                         })
@@ -3854,10 +4428,10 @@ fn evaluate_timeline_reads_v1(
                     || !semantic_receipts_match
                     || !semantic_parity
                     || !typed_documents_match
-                    || !timeline_authority_valid_v1(row)
-                    || !timeline_trust_transition_valid_v1(row)
-                    || !timeline_concurrent_trust_valid_v1(row)
-                    || !timeline_invalid_signature_failure_valid_v1(row, row_execution)
+                    || !timeline_authority_valid_v1(view)
+                    || !timeline_trust_transition_valid_v1(view)
+                    || !timeline_concurrent_trust_valid_v1(view)
+                    || !timeline_invalid_signature_failure_valid(view, row_execution)
                 {
                     failed.push(criterion);
                 }
@@ -3916,7 +4490,11 @@ fn packaged_execution_identities_v1(
         .execution_identities
         .iter()
         .filter(|identity| identity.platform == platform);
-    if package.evaluator_revision == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5 {
+    if matches!(
+        package.evaluator_revision.as_str(),
+        QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
+            | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6
+    ) {
         on_platform.collect()
     } else {
         on_platform.take(1).collect()
@@ -3931,7 +4509,11 @@ fn packaged_product_identities_v1(
         .product_identities
         .iter()
         .filter(|identity| identity.platform == platform);
-    if package.evaluator_revision == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5 {
+    if matches!(
+        package.evaluator_revision.as_str(),
+        QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
+            | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6
+    ) {
         on_platform.collect()
     } else {
         on_platform.take(1).collect()
@@ -3970,7 +4552,8 @@ fn timeline_operation_is_typed_failure_v1(operation: &str) -> bool {
     )
 }
 
-fn timeline_authority_valid_v1(row: &QualificationDerivedTimelineReadEvidenceV1) -> bool {
+fn timeline_authority_valid_v1(input: TimelineReadRef<'_>) -> bool {
+    let row = input.fields();
     let authority = &row.authority;
     let hashes_valid = [
         &authority.request_schedule_sha256,
@@ -4056,7 +4639,8 @@ fn positive_counts_match_exact_keys_v1<const N: usize>(
             .all(|event_type| counts.get(*event_type).is_some_and(|count| *count > 0))
 }
 
-fn timeline_trust_transition_valid_v1(row: &QualificationDerivedTimelineReadEvidenceV1) -> bool {
+fn timeline_trust_transition_valid_v1(input: TimelineReadRef<'_>) -> bool {
+    let row = input.fields();
     let expected = row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
         && row.case == QualificationDerivedTimelineReadCaseV1::TrustSuite;
     let Some(transition) = &row.trust_transition else {
@@ -4086,7 +4670,8 @@ fn timeline_trust_transition_valid_v1(row: &QualificationDerivedTimelineReadEvid
         && transition.status_after_by_event == expected_after
 }
 
-fn timeline_concurrent_trust_valid_v1(row: &QualificationDerivedTimelineReadEvidenceV1) -> bool {
+fn timeline_concurrent_trust_valid_v1(input: TimelineReadRef<'_>) -> bool {
+    let row = input.fields();
     let expected = row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
         && row.case == QualificationDerivedTimelineReadCaseV1::ProcessLifecycleSuite;
     let Some(transition) = &row.concurrent_trust_transition else {
@@ -4124,6 +4709,15 @@ fn timeline_concurrent_trust_valid_v1(row: &QualificationDerivedTimelineReadEvid
             .all(|status| matches!(status.as_str(), "untrusted_key" | "valid"))
 }
 
+fn timeline_invalid_signature_failure_valid(
+    row: TimelineReadRef<'_>,
+    execution: Option<&QualificationDerivedAccessExecutionIdentityV1>,
+) -> bool {
+    match row {
+        TimelineReadRef::V1(row) => timeline_invalid_signature_failure_valid_v1(row, execution),
+        TimelineReadRef::V2(_) => timeline_invalid_signature_failure_check(row, execution).is_ok(),
+    }
+}
 pub(super) fn timeline_invalid_signature_failure_valid_v1(
     row: &QualificationDerivedTimelineReadEvidenceV1,
     execution: Option<&QualificationDerivedAccessExecutionIdentityV1>,
@@ -4141,6 +4735,17 @@ pub(super) fn timeline_invalid_signature_failure_check_v1(
     row: &QualificationDerivedTimelineReadEvidenceV1,
     execution: Option<&QualificationDerivedAccessExecutionIdentityV1>,
 ) -> Result<(), String> {
+    timeline_invalid_signature_failure_check(TimelineReadRef::V1(row), execution)
+}
+
+pub(super) fn timeline_invalid_signature_failure_check(
+    input: TimelineReadRef<'_>,
+    execution: Option<&QualificationDerivedAccessExecutionIdentityV1>,
+) -> Result<(), String> {
+    let v2 = input.is_v2();
+    let frozen_safety = input.frozen_safety();
+    validate_timeline_setup_v2(input)?;
+    let row = input.fields();
     let case = row.case;
     let expected = row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
         && row.case == QualificationDerivedTimelineReadCaseV1::TrustSuite;
@@ -4157,6 +4762,7 @@ pub(super) fn timeline_invalid_signature_failure_check_v1(
             "{case:?} Timeline row carries an unexpected invalid-signature failure"
         ));
     }
+    let failure = failure.fields();
     let Some(reference_execution) = execution else {
         return Err(format!(
             "{case:?} Timeline invalid-signature check requires the reference execution identity"
@@ -4177,72 +4783,72 @@ pub(super) fn timeline_invalid_signature_failure_check_v1(
             "{case:?} Timeline invalid-signature carrier event id is empty"
         ));
     }
-    let counter = &failure.counter_receipt;
+    let counter = failure.counter_receipt;
     for (value, field) in [
         (
-            &failure.reference_root_identity_sha256,
+            failure.reference_root_identity_sha256,
             "reference root identity",
         ),
         (
-            &failure.reference_fixture_witness_sha256,
+            failure.reference_fixture_witness_sha256,
             "reference fixture witness",
         ),
         (
-            &failure.fault_fixture_witness_sha256,
+            failure.fault_fixture_witness_sha256,
             "fault fixture witness",
         ),
-        (&failure.reference_inventory_sha256, "reference inventory"),
+        (failure.reference_inventory_sha256, "reference inventory"),
         (
-            &failure.reference_recovery_inventory_sha256,
+            failure.reference_recovery_inventory_sha256,
             "reference recovery inventory",
         ),
         (
-            &failure.fault_clean_inventory_sha256,
+            failure.fault_clean_inventory_sha256,
             "fault clean inventory",
         ),
         (
-            &failure.fault_derivative_inventory_sha256,
+            failure.fault_derivative_inventory_sha256,
             "fault derivative inventory",
         ),
         (
-            &failure.fault_restored_inventory_sha256,
+            failure.fault_restored_inventory_sha256,
             "fault restored inventory",
         ),
-        (&failure.clean_carrier_sha256, "clean carrier"),
-        (&failure.mutated_carrier_sha256, "mutated carrier"),
+        (failure.clean_carrier_sha256, "clean carrier"),
+        (failure.mutated_carrier_sha256, "mutated carrier"),
         (
             &failure.observed_typed_document.canonical_sha256,
             "observed typed document",
         ),
-        (&failure.clean_semantic_sha256, "clean semantic"),
+        (failure.clean_semantic_sha256, "clean semantic"),
         (
-            &failure.strict_clean_semantic_sha256,
+            failure.strict_clean_semantic_sha256,
             "strict clean semantic",
         ),
-        (&failure.strict_semantic_sha256, "strict semantic"),
-        (&failure.derived_semantic_sha256, "derived semantic"),
+        (failure.strict_semantic_sha256, "strict semantic"),
+        (failure.derived_semantic_sha256, "derived semantic"),
         (
-            &failure.strict_recovery_semantic_sha256,
+            failure.strict_recovery_semantic_sha256,
             "strict recovery semantic",
         ),
         (
-            &failure.derived_recovery_semantic_sha256,
+            failure.derived_recovery_semantic_sha256,
             "derived recovery semantic",
         ),
         (
-            &failure.reference_trust_identity_staged_sha256,
+            failure.reference_trust_identity_staged_sha256,
             "reference trust identity staged",
         ),
         (
-            &failure.reference_trust_identity_restored_sha256,
+            failure.reference_trust_identity_restored_sha256,
             "reference trust identity restored",
         ),
         (
-            &failure.fault_trust_identity_staged_sha256,
+            failure.fault_trust_identity_staged_sha256,
             "fault trust identity staged",
         ),
         (
-            &failure.fault_trust_identity_restored_sha256,
+            failure.fault_trust_identity_restored_sha256,
             "fault trust identity restored",
         ),
     ] {
@@ -4307,12 +4913,12 @@ pub(super) fn timeline_invalid_signature_failure_check_v1(
     let mut expected_fault_execution = reference_execution.clone();
     expected_fault_execution.root_provenance_sha256 =
         failure.fault_execution.root_provenance_sha256.clone();
-    if failure.fault_execution != expected_fault_execution {
+    if *failure.fault_execution != expected_fault_execution {
         return Err(format!(
             "{case:?} Timeline invalid-signature fault execution drifted from its reference in: {}",
             super::evidence::execution_identity_mismatches(
                 &expected_fault_execution,
-                &failure.fault_execution,
+                failure.fault_execution,
             )
             .join(", ")
         ));
@@ -4403,20 +5009,22 @@ pub(super) fn timeline_invalid_signature_failure_check_v1(
         }
     }
     let counters = &counter.counters;
-    let barrier = &failure.barrier_receipt;
+    let barrier_input = failure.barrier_receipt;
+    let barrier = barrier_input.fields();
     counter.validate().map_err(|error| {
         format!("{case:?} Timeline invalid-signature counter receipt is invalid: {error}")
     })?;
-    let expected_run_identity = timeline_invalid_signature_run_identity_v1(
-        &failure.reference_root_identity_sha256,
+    let expected_run_identity = timeline_invalid_signature_run_identity_for_contract(
+        v2,
+        failure.reference_root_identity_sha256,
         &failure.fault_execution.root_provenance_sha256,
-        &row.product_identity_sha256,
-        &failure.carrier_event_id,
-        &barrier.expected_carrier_key_digest,
-        &failure.clean_carrier_sha256,
-        &failure.mutated_carrier_sha256,
-        &failure.mutation_recipe_sha256,
-        &barrier.barrier_identity_sha256,
+        row.product_identity_sha256,
+        failure.carrier_event_id,
+        barrier.expected_carrier_key_digest,
+        failure.clean_carrier_sha256,
+        failure.mutated_carrier_sha256,
+        failure.mutation_recipe_sha256,
+        barrier.barrier_identity_sha256,
         &failure.phase_process_identity_sha256[2],
     )
     .map_err(|error| {
@@ -4429,7 +5037,7 @@ pub(super) fn timeline_invalid_signature_failure_check_v1(
             counter.run_identity
         ));
     }
-    barrier.validate().map_err(|error| {
+    barrier_input.validate().map_err(|error| {
         format!("{case:?} Timeline invalid-signature barrier receipt is invalid: {error}")
     })?;
     for (holds, condition) in [
@@ -4442,7 +5050,8 @@ pub(super) fn timeline_invalid_signature_failure_check_v1(
             "barrier boundary is not carrier_locators_selected",
         ),
         (
-            barrier.carrier_opens_before == 0,
+            (v2 && counters.carrier_opens >= barrier.carrier_opens_before)
+                || (!v2 && barrier.carrier_opens_before == 0),
             "barrier observed carrier opens before the pin",
         ),
         (
@@ -4630,26 +5239,30 @@ pub(super) fn timeline_invalid_signature_failure_check_v1(
     // exact abort point is witnessed by the validation count: every opened
     // carrier before the mutated one validated, and the mutated one failed
     // before validation.
-    let primary_hydration_carriers = counters
-        .timeline_selected_carriers
-        .saturating_add(counters.timeline_revision_candidate_carriers)
-        .saturating_add(counters.timeline_correlation_support_carriers);
-    if counters.carrier_opens > primary_hydration_carriers {
-        return Err(format!(
-            "{case:?} Timeline invalid-signature counters carrier opens ({}) exceed the primary \
+    if v2 {
+        timeline_final_fault_counts_v2(counters, frozen_safety, barrier.carrier_opens_before)?;
+    } else {
+        let primary_hydration_carriers = counters
+            .timeline_selected_carriers
+            .saturating_add(counters.timeline_revision_candidate_carriers)
+            .saturating_add(counters.timeline_correlation_support_carriers);
+        if counters.carrier_opens > primary_hydration_carriers {
+            return Err(format!(
+                "{case:?} Timeline invalid-signature counters carrier opens ({}) exceed the primary \
              hydration set ({} selected + {} candidates + {} correlation)",
-            counters.carrier_opens,
-            counters.timeline_selected_carriers,
-            counters.timeline_revision_candidate_carriers,
-            counters.timeline_correlation_support_carriers
-        ));
-    }
-    if counters.event_validations != counters.carrier_opens.saturating_sub(1) {
-        return Err(format!(
-            "{case:?} Timeline invalid-signature counters event validations ({}) do not witness \
+                counters.carrier_opens,
+                counters.timeline_selected_carriers,
+                counters.timeline_revision_candidate_carriers,
+                counters.timeline_correlation_support_carriers
+            ));
+        }
+        if counters.event_validations != counters.carrier_opens.saturating_sub(1) {
+            return Err(format!(
+                "{case:?} Timeline invalid-signature counters event validations ({}) do not witness \
              an abort at the mutated carrier (carrier opens {})",
-            counters.event_validations, counters.carrier_opens
-        ));
+                counters.event_validations, counters.carrier_opens
+            ));
+        }
     }
     if counters.timeline_sqlite_window_rows != counters.timeline_selected_carriers {
         return Err(format!(
@@ -4728,7 +5341,7 @@ pub(super) fn timeline_invalid_signature_failure_check_v1(
              processes"
         ));
     }
-    if failure.phase_http_status != [200, 200, 503, 200, 200, 200] {
+    if *failure.phase_http_status != [200, 200, 503, 200, 200, 200] {
         return Err(format!(
             "{case:?} Timeline invalid-signature phase HTTP statuses drifted: observed {:?}",
             failure.phase_http_status
@@ -4813,7 +5426,7 @@ pub(super) fn timeline_invalid_signature_failure_check_v1(
         ),
         (
             validate_prefixed_sha256_v1(
-                &failure.clean_event_record_hash,
+                failure.clean_event_record_hash,
                 "clean signature event record",
             ),
             "clean event record hash is not a prefixed sha256",
@@ -5382,6 +5995,41 @@ fn canonical_sha256<T: Serialize>(value: &T) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v6_frozen_safety_equations_refuse_extra_reads_and_each_overflow() {
+        for (e, t, c, v, h, candidate, correlation, ok) in [
+            (0, 0, 1, 0, 1, 0, 0, true),
+            (2, 2, 3, 0, 1, 0, 0, true),
+            (2, 2, 4, 1, 2, 0, 0, true),
+            (2, 4, 3, 0, 1, 0, 0, false),
+            (2, 2, 4, 0, 2, 0, 0, false),
+            (2, 2, 4, 1, 1, 0, 0, false),
+            (0, 0, 1, 0, u64::MAX, 1, 0, false),
+            (0, 0, 1, 0, u64::MAX, 0, 1, false),
+            (u64::MAX, 0, 1, 0, 1, 0, 0, false),
+            (u64::MAX, 0, 1, 1, 0, 0, 0, false),
+            (0, 0, u64::MAX, u64::MAX, u64::MAX, 0, 0, false),
+        ] {
+            let counts = LongitudinalCountersV1 {
+                carrier_opens: c,
+                event_validations: v,
+                timeline_selected_carriers: h,
+                timeline_revision_candidate_carriers: candidate,
+                timeline_correlation_support_carriers: correlation,
+                ..Default::default()
+            };
+            assert_eq!(timeline_final_fault_counts_v2(&counts, e, t).is_ok(), ok);
+        }
+        assert_eq!(
+            qualification_derived_access_evaluator_v6_procedure_sha256(),
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V6_PROCEDURE_SHA256_V1
+        );
+        assert_eq!(
+            qualification_derived_access_evaluator_v5_procedure_sha256(),
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V5_PROCEDURE_SHA256_V1
+        );
+    }
 
     #[test]
     fn explicit_off_strict_reader_control_names_one_existing_exact_test() {
@@ -6192,7 +6840,8 @@ mod tests {
                         })
                 })
         })
-        .collect();
+        .map(QualificationDerivedTimelineReadEvidence::V1)
+            .collect();
 
         package.timeline_storage_rows = package
             .change_storage_rows
@@ -7234,6 +7883,10 @@ mod tests {
         let fallback_receipt = fallback_timeline
             .timeline_read_rows
             .iter_mut()
+            .filter_map(|row| match row {
+                QualificationDerivedTimelineReadEvidence::V1(row) => Some(row),
+                _ => None,
+            })
             .find(|row| {
                 row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
                     && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
@@ -7258,6 +7911,10 @@ mod tests {
         let structured_receipt = structured_as_exhaustive
             .timeline_read_rows
             .iter_mut()
+            .filter_map(|row| match row {
+                QualificationDerivedTimelineReadEvidence::V1(row) => Some(row),
+                _ => None,
+            })
             .find(|row| {
                 row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
                     && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
@@ -7282,6 +7939,10 @@ mod tests {
         let concurrent_receipt = over_limit_concurrent
             .timeline_read_rows
             .iter_mut()
+            .filter_map(|row| match row {
+                QualificationDerivedTimelineReadEvidence::V1(row) => Some(row),
+                _ => None,
+            })
             .find(|row| {
                 row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
                     && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
@@ -7313,6 +7974,10 @@ mod tests {
         let exhaustive_receipt = zero_exhaustive_hydration
             .timeline_read_rows
             .iter_mut()
+            .filter_map(|row| match row {
+                QualificationDerivedTimelineReadEvidence::V1(row) => Some(row),
+                _ => None,
+            })
             .find(|row| {
                 row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
                     && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
@@ -7337,6 +8002,10 @@ mod tests {
         copied_typed_error
             .timeline_read_rows
             .iter_mut()
+            .filter_map(|row| match row {
+                QualificationDerivedTimelineReadEvidence::V1(row) => Some(row),
+                _ => None,
+            })
             .find(|row| {
                 row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
                     && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
@@ -7359,6 +8028,10 @@ mod tests {
         let structured_authority = &mut mixed_authority
             .timeline_read_rows
             .iter_mut()
+            .filter_map(|row| match row {
+                QualificationDerivedTimelineReadEvidence::V1(row) => Some(row),
+                _ => None,
+            })
             .find(|row| {
                 row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
                     && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
@@ -7463,6 +8136,10 @@ mod tests {
         missing_source_family
             .timeline_read_rows
             .iter_mut()
+            .filter_map(|row| match row {
+                QualificationDerivedTimelineReadEvidence::V1(row) => Some(row),
+                _ => None,
+            })
             .find(|row| {
                 row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
                     && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
@@ -7483,6 +8160,10 @@ mod tests {
         invalid_trust_transition
             .timeline_read_rows
             .iter_mut()
+            .filter_map(|row| match row {
+                QualificationDerivedTimelineReadEvidence::V1(row) => Some(row),
+                _ => None,
+            })
             .find(|row| {
                 row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
                     && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
@@ -7505,6 +8186,10 @@ mod tests {
         incomplete_concurrent_transition
             .timeline_read_rows
             .iter_mut()
+            .filter_map(|row| match row {
+                QualificationDerivedTimelineReadEvidence::V1(row) => Some(row),
+                _ => None,
+            })
             .find(|row| {
                 row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
                     && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
@@ -7526,6 +8211,10 @@ mod tests {
         let signature_row = complete_timeline
             .timeline_read_rows
             .iter()
+            .filter_map(|row| match row {
+                QualificationDerivedTimelineReadEvidence::V1(row) => Some(row),
+                _ => None,
+            })
             .find(|row| {
                 row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
                     && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
@@ -7537,6 +8226,135 @@ mod tests {
             .iter()
             .find(|identity| identity.platform == signature_row.platform)
             .expect("invalid-signature execution");
+        // Synthetic V2 evidence is authored with new setup/run/barrier identities;
+        // the production ingestion path never promotes a legacy receipt this way.
+        let legacy_bytes = serde_json::to_vec(signature_row).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&QualificationDerivedTimelineReadEvidence::V1(
+                signature_row.clone()
+            ))
+            .unwrap(),
+            legacy_bytes
+        );
+        let mut wire = serde_json::to_value(signature_row).unwrap();
+        wire["schema"] = QUALIFICATION_DERIVED_TIMELINE_READ_EVIDENCE_SCHEMA_V2.into();
+        let old = signature_row.invalid_signature_failure.as_ref().unwrap();
+        let profile = serde_json::json!({"schema":"pointbreak.inspect-reader-profile","version":1,"availability":"ready"});
+        let setup_id = timeline_setup_identity_v2(
+            &old.reference_root_identity_sha256,
+            &old.fault_execution.root_provenance_sha256,
+            &signature_row.product_identity_sha256,
+            &old.phase_process_identity_sha256[2],
+        )
+        .unwrap();
+        let mut setup = old.counter_receipt.clone();
+        setup.run_identity = setup_id.clone();
+        setup.manifest_sha256 = setup_id.clone();
+        setup.schedule_sha256 = setup_id;
+        setup.operation = "GET /api/v2/profile".into();
+        setup.phase = "timeline_profile_setup_v2".into();
+        setup.success = true;
+        setup.semantic_result_sha256 = canonical_sha256(&profile).unwrap();
+        setup.counters = LongitudinalCountersV1::default();
+        setup.receipt_sha256 = setup.canonical_sha256().unwrap();
+        let f = &mut wire["invalidSignatureFailure"];
+        f["setupCounterReceipt"] = serde_json::to_value(&setup).unwrap();
+        f["setupProfileDocument"] = profile;
+        let b = &mut f["barrierReceipt"];
+        b["schema"]=crate::bench_support::longitudinal::LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_RECEIPT_SCHEMA_V2.into();
+        b["countingContractSha256"] =
+            crate::bench_support::longitudinal::TIMELINE_PRE_HYDRATION_COUNTING_CONTRACT_SHA256_V2
+                .into();
+        b["setupCounterReceiptSha256"] = setup.receipt_sha256.into();
+        for (field, value) in [
+            ("carrierOpensBefore", 2),
+            ("enrollmentSafetyProbeOpensBefore", 2),
+            ("otherCarrierOpensBefore", 0),
+            ("enrollmentSafetyProbeAbsentBefore", 2),
+            ("enrollmentSafetyProbePresentBefore", 0),
+        ] {
+            b[field] = value.into();
+        }
+        let mut v2: QualificationDerivedTimelineReadEvidenceV2 =
+            serde_json::from_value(wire).unwrap();
+        let f = v2.invalid_signature_failure.as_mut().unwrap();
+        let inputs=canonical_sha256(&serde_json::json!({"schema":"pointbreak.timeline-invalid-signature-post-pin-barrier-identity.v1",
+            "referenceRoot":f.reference_root_identity_sha256,"faultRoot":f.fault_execution.root_provenance_sha256,
+            "product":v2.product_identity_sha256,"carrierEventId":f.carrier_event_id,"carrierKeyDigest":f.barrier_receipt.expected_carrier_key_digest,
+            "cleanCarrier":f.clean_carrier_sha256,"mutatedCarrier":f.mutated_carrier_sha256,"mutationRecipe":f.mutation_recipe_sha256})).unwrap();
+        f.barrier_receipt.barrier_identity_sha256 =
+            timeline_post_pin_identity_v2(&inputs, &f.setup_counter_receipt.receipt_sha256)
+                .unwrap();
+        let run = timeline_invalid_signature_run_identity_for_contract(
+            true,
+            &f.reference_root_identity_sha256,
+            &f.fault_execution.root_provenance_sha256,
+            &v2.product_identity_sha256,
+            &f.carrier_event_id,
+            &f.barrier_receipt.expected_carrier_key_digest,
+            &f.clean_carrier_sha256,
+            &f.mutated_carrier_sha256,
+            &f.mutation_recipe_sha256,
+            &f.barrier_receipt.barrier_identity_sha256,
+            &f.phase_process_identity_sha256[2],
+        )
+        .unwrap();
+        f.barrier_receipt.run_identity = run.clone();
+        f.counter_receipt.run_identity = run;
+        f.counter_receipt.manifest_sha256 = f.barrier_receipt.barrier_identity_sha256.clone();
+        f.counter_receipt.counters.carrier_opens = 3;
+        f.counter_receipt.receipt_sha256 = f.counter_receipt.canonical_sha256().unwrap();
+        f.barrier_receipt.receipt_sha256 = f.barrier_receipt.canonical_sha256().unwrap();
+        timeline_invalid_signature_failure_check(TimelineReadRef::V2(&v2), Some(execution))
+            .unwrap();
+        let falsifiers: [fn(&mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV2);
+            7] = [
+            |f| f.phase_process_identity_sha256[2] = digest("wrong child"),
+            |f| f.setup_counter_receipt.run_identity = digest("wrong setup"),
+            |f| f.counter_receipt.counters.carrier_opens += 1,
+            |f| f.counter_receipt.counters.event_validations += 1,
+            |f| {
+                f.barrier_receipt.enrollment_safety_probe_opens_before = 3;
+                f.barrier_receipt.enrollment_safety_probe_absent_before = 3;
+                f.barrier_receipt.carrier_opens_before = 3;
+            },
+            |f| f.barrier_receipt.observed_mismatch_key_digest = digest("wrong key"),
+            |f| f.fault_restored_inventory_sha256 = digest("missing restore"),
+        ];
+        for falsify in falsifiers {
+            let mut row = v2.clone();
+            let f = row.invalid_signature_failure.as_mut().unwrap();
+            falsify(f);
+            f.setup_counter_receipt.receipt_sha256 =
+                f.setup_counter_receipt.canonical_sha256().unwrap();
+            f.counter_receipt.receipt_sha256 = f.counter_receipt.canonical_sha256().unwrap();
+            f.barrier_receipt.receipt_sha256 = f.barrier_receipt.canonical_sha256().unwrap();
+            assert!(
+                timeline_invalid_signature_failure_check(
+                    TimelineReadRef::V2(&row),
+                    Some(execution)
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(serde_json::to_vec(signature_row).unwrap(), legacy_bytes);
+        let mut mixed = complete_timeline.clone();
+        mixed.timeline_read_rows[0] = QualificationDerivedTimelineReadEvidence::V2(v2);
+        assert!(super::super::evidence::validate_summaries_against_raw(&mixed, &[]).is_err());
+        assert!(
+            evaluate_qualification_derived_access_v1(&mixed)
+                .unwrap_err()
+                .contains("mixed Timeline")
+        );
+        let mut promoted = complete_timeline.clone();
+        promoted.evaluator_revision = QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6.into();
+        promoted.evaluator_procedure_sha256 =
+            qualification_derived_access_evaluator_v6_procedure_sha256();
+        assert!(
+            evaluate_qualification_derived_access_v1(&promoted)
+                .unwrap_err()
+                .contains("mixed Timeline")
+        );
         for falsify in [
             (|failure: &mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1| {
                 failure

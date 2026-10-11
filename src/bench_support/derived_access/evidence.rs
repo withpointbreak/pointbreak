@@ -27,8 +27,9 @@ use super::{
     QualificationDerivedChangeEvidencePurposeV1, QualificationDerivedChangeFixtureV1,
     QualificationDerivedChangeReadCaseV1, QualificationDerivedChangeReadEvidenceV1,
     QualificationDerivedChangeStorageEvidenceV1, QualificationDerivedChangeStoragePhaseV1,
-    QualificationDerivedTimelineReadEvidenceV1, QualificationDerivedTimelineStorageEvidenceV1,
-    evaluate_qualification_derived_access_v1,
+    QualificationDerivedTimelineReadEvidence, QualificationDerivedTimelineReadEvidenceV1,
+    QualificationDerivedTimelineReadEvidenceV2, QualificationDerivedTimelineStorageEvidenceV1,
+    TimelineReadRef, evaluate_qualification_derived_access_v1,
 };
 use crate::bench_support::foundation::qualification_host_identity_sha256;
 #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -449,21 +450,122 @@ impl QualificationDerivedChangeReadReceiptV2 {
     /// per-row guards. The accept/reject set is identical to the historical
     /// first-failure form: a receipt is valid exactly when this is empty.
     pub fn validation_failures(&self) -> Vec<String> {
-        if self.schema != QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V2
-            || !self.complete
-            || self.timeline_read_rows.is_empty()
-            || self.timeline_storage_rows.is_empty()
-        {
+        TimelineSuccessorRef {
+            base: &self.base,
+            rows: self
+                .timeline_read_rows
+                .iter()
+                .map(TimelineReadRef::V1)
+                .collect(),
+            storage: &self.timeline_storage_rows,
+            complete: self.complete,
+            schema_valid: self.schema == QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V2,
+            receipt_sha256: &self.receipt_sha256,
+            canonical: self.canonical_sha256(),
+        }
+        .validation_failures()
+    }
+}
+
+pub const QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V3: &str =
+    "pointbreak.qualification-derived-change-read-receipt.v3";
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedChangeReadReceiptV3 {
+    pub schema: String,
+    pub base: QualificationDerivedChangeReadReceiptV1,
+    pub timeline_read_rows: Vec<QualificationDerivedTimelineReadEvidenceV2>,
+    pub timeline_storage_rows: Vec<QualificationDerivedTimelineStorageEvidenceV1>,
+    pub complete: bool,
+    pub receipt_sha256: String,
+}
+impl QualificationDerivedChangeReadReceiptV3 {
+    fn canonical_sha256(&self) -> Result<String, String> {
+        let mut preimage = self.clone();
+        preimage.receipt_sha256.clear();
+        serde_json::to_vec(&preimage)
+            .map(|b| sha256_bytes_hex(&b))
+            .map_err(|e| e.to_string())
+    }
+    pub fn refresh_sha256(&mut self) -> Result<(), String> {
+        self.receipt_sha256 = self.canonical_sha256()?;
+        Ok(())
+    }
+    pub fn validation_failures(&self) -> Vec<String> {
+        TimelineSuccessorRef {
+            base: &self.base,
+            rows: self
+                .timeline_read_rows
+                .iter()
+                .map(TimelineReadRef::V2)
+                .collect(),
+            storage: &self.timeline_storage_rows,
+            complete: self.complete,
+            schema_valid: self.schema == QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V3,
+            receipt_sha256: &self.receipt_sha256,
+            canonical: self.canonical_sha256(),
+        }
+        .validation_failures()
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        let failures = self.validation_failures();
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join(" | "))
+        }
+    }
+}
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum QualificationDerivedChangeReadReceipt {
+    V2(QualificationDerivedChangeReadReceiptV2),
+    V3(QualificationDerivedChangeReadReceiptV3),
+}
+impl QualificationDerivedChangeReadReceipt {
+    pub(crate) fn refresh_sha256(&mut self) -> Result<(), String> {
+        match self {
+            Self::V2(r) => r.refresh_sha256(),
+            Self::V3(r) => r.refresh_sha256(),
+        }
+    }
+    pub(crate) fn validation_failures(&self) -> Vec<String> {
+        match self {
+            Self::V2(r) => r.validation_failures(),
+            Self::V3(r) => r.validation_failures(),
+        }
+    }
+}
+
+struct TimelineSuccessorRef<'a> {
+    base: &'a QualificationDerivedChangeReadReceiptV1,
+    rows: Vec<TimelineReadRef<'a>>,
+    storage: &'a [QualificationDerivedTimelineStorageEvidenceV1],
+    complete: bool,
+    schema_valid: bool,
+    receipt_sha256: &'a str,
+    canonical: Result<String, String>,
+}
+impl TimelineSuccessorRef<'_> {
+    fn validation_failures(self) -> Vec<String> {
+        let Self {
+            base,
+            rows,
+            storage,
+            complete,
+            schema_valid,
+            receipt_sha256,
+            canonical,
+        } = self;
+        if !schema_valid || !complete || rows.is_empty() || storage.is_empty() {
             return vec!["derived Change read successor receipt is incomplete".to_owned()];
         }
-        if let Err(error) = self.base.validate() {
+        if let Err(error) = base.validate() {
             return vec![error];
         }
-        if self.base.purpose
-            != QualificationDerivedChangeEvidencePurposeV1::ExactSourceQualification
-            || !self.base.product.is_exact_source_for(&self.base.execution)
-            || !self
-                .base
+        if base.purpose != QualificationDerivedChangeEvidencePurposeV1::ExactSourceQualification
+            || !base.product.is_exact_source_for(&base.execution)
+            || !base
                 .product
                 .enabled_features
                 .iter()
@@ -471,49 +573,51 @@ impl QualificationDerivedChangeReadReceiptV2 {
         {
             return vec!["Change read successor receipt is not exact-source evidence".to_owned()];
         }
-        if let Err(error) = validate_digest(&self.receipt_sha256, "Change read successor receipt") {
+        if let Err(error) = validate_digest(&receipt_sha256, "Change read successor receipt") {
             return vec![error];
         }
-        match self.canonical_sha256() {
-            Ok(canonical) if canonical == self.receipt_sha256 => {}
+        match canonical {
+            Ok(canonical) if canonical == receipt_sha256 => {}
             Ok(_) => {
                 return vec!["derived Change read successor receipt hash drifted".to_owned()];
             }
             Err(error) => return vec![error],
         }
-        let product_identity_sha256 = match self.base.product.canonical_sha256() {
+        let product_identity_sha256 = match base.product.canonical_sha256() {
             Ok(digest) => digest,
             Err(error) => return vec![error],
         };
-        let execution_identity_sha256 = match self.base.execution.canonical_sha256() {
+        let execution_identity_sha256 = match base.execution.canonical_sha256() {
             Ok(digest) => digest,
             Err(error) => return vec![error],
         };
-        let expected_cases = super::required_timeline_cases_v1(self.base.fixture)
+        let expected_cases = super::required_timeline_cases_v1(base.fixture)
             .iter()
             .copied()
             .collect::<BTreeSet<_>>();
-        let observed_cases = self
-            .timeline_read_rows
+        let observed_cases = rows
             .iter()
-            .map(|row| row.case)
+            .map(|row| {
+                let row = (*row).fields();
+                row.case
+            })
             .collect::<BTreeSet<_>>();
-        if observed_cases != expected_cases || observed_cases.len() != self.timeline_read_rows.len()
-        {
+        if observed_cases != expected_cases || observed_cases.len() != rows.len() {
             return vec!["derived Timeline receipt omitted required cases".to_owned()];
         }
 
         let mut failures = Vec::new();
         let mut run_identities = BTreeSet::new();
-        for row in &self.timeline_read_rows {
+        for view in &rows {
+            let row = (*view).fields();
             let case = row.case;
-            let schedule = super::timeline_request_schedule_v1(self.base.fixture, row.case);
-            if let Err(error) = validate_qualification_derived_timeline_read_row_v1(
-                row,
-                self.base.execution.platform,
-                self.base.fixture,
-                &self.base.fixture_inventory_sha256,
-                &self.base.fixture_witness_sha256,
+            let schedule = super::timeline_request_schedule_v1(base.fixture, row.case);
+            if let Err(error) = validate_timeline_read_row(
+                *view,
+                base.execution.platform,
+                base.fixture,
+                &base.fixture_inventory_sha256,
+                &base.fixture_witness_sha256,
                 &product_identity_sha256,
                 &execution_identity_sha256,
             ) {
@@ -536,7 +640,7 @@ impl QualificationDerivedChangeReadReceiptV2 {
                     "{case:?} Timeline strict semantic digest is not bare 64-hex"
                 ));
             }
-            if !timeline_typed_documents_valid_v1(row) {
+            if !timeline_typed_documents_valid(*view) {
                 failures.push(format!("{case:?} Timeline typed-document receipt drifted"));
             }
             if row.counter_receipts.len() != schedule.len() {
@@ -563,7 +667,7 @@ impl QualificationDerivedChangeReadReceiptV2 {
                     for (holds, condition) in [
                         (receipt.operation == *operation, "operation drifted"),
                         (
-                            receipt.root_identity == self.base.execution.root_provenance_sha256,
+                            receipt.root_identity == base.execution.root_provenance_sha256,
                             "root identity differs from the execution root provenance",
                         ),
                         (
@@ -575,7 +679,7 @@ impl QualificationDerivedChangeReadReceiptV2 {
                             "derivative execution identity drifted",
                         ),
                         (
-                            receipt.manifest_sha256 == self.base.fixture_inventory_sha256,
+                            receipt.manifest_sha256 == base.fixture_inventory_sha256,
                             "manifest differs from the fixture inventory",
                         ),
                         (
@@ -609,41 +713,36 @@ impl QualificationDerivedChangeReadReceiptV2 {
                      receipt"
                 ));
             }
-            if let Err(error) = validate_qualification_derived_timeline_invalid_signature_row_v1(
-                row,
-                &self.base.execution,
+            if let Err(error) = validate_timeline_invalid_signature_row(
+                *view,
+                &base.execution,
                 &product_identity_sha256,
                 &execution_identity_sha256,
             ) {
                 failures.push(error);
             }
-            if let Err(error) = validate_qualification_derived_timeline_concurrent_trust_row_v1(row)
-            {
+            if let Err(error) = validate_timeline_concurrent_trust_row(*view) {
                 failures.push(error);
             }
         }
 
-        let expected_phases = match self.base.fixture {
+        let expected_phases = match base.fixture {
             QualificationDerivedChangeFixtureV1::TopologyV1 => BTreeSet::from([
                 QualificationDerivedChangeStoragePhaseV1::InitialPublication,
                 QualificationDerivedChangeStoragePhaseV1::PostAppendCheckpoint,
             ]),
             _ => BTreeSet::from([QualificationDerivedChangeStoragePhaseV1::InitialPublication]),
         };
-        let observed_phases = self
-            .timeline_storage_rows
-            .iter()
-            .map(|row| row.phase)
-            .collect::<BTreeSet<_>>();
+        let observed_phases = storage.iter().map(|row| row.phase).collect::<BTreeSet<_>>();
         if observed_phases != expected_phases {
             failures.push("derived Timeline storage receipt phases drifted".to_owned());
         }
-        if observed_phases.len() != self.timeline_storage_rows.len() {
+        if observed_phases.len() != storage.len() {
             failures.push("derived Timeline storage receipt duplicates a phase".to_owned());
         }
-        for row in &self.timeline_storage_rows {
+        for row in storage {
             let phase = row.phase;
-            let base_storage_matches = self.base.storage_rows.iter().any(|base| {
+            let base_storage_matches = base.storage_rows.iter().any(|base| {
                 base.platform == row.platform
                     && base.fixture == row.fixture
                     && base.phase == row.phase
@@ -653,17 +752,14 @@ impl QualificationDerivedChangeReadReceiptV2 {
                     && base.execution_identity_sha256 == row.execution_identity_sha256
             });
             for (holds, condition) in [
+                (row.platform == base.execution.platform, "platform drifted"),
+                (row.fixture == base.fixture, "fixture drifted"),
                 (
-                    row.platform == self.base.execution.platform,
-                    "platform drifted",
-                ),
-                (row.fixture == self.base.fixture, "fixture drifted"),
-                (
-                    row.fixture_inventory_sha256 == self.base.fixture_inventory_sha256,
+                    row.fixture_inventory_sha256 == base.fixture_inventory_sha256,
                     "fixture inventory drifted",
                 ),
                 (
-                    row.fixture_witness_sha256 == self.base.fixture_witness_sha256,
+                    row.fixture_witness_sha256 == base.fixture_witness_sha256,
                     "fixture witness drifted",
                 ),
                 (
@@ -766,6 +862,47 @@ pub fn validate_qualification_derived_timeline_read_row_v1(
     product_identity_sha256: &str,
     execution_identity_sha256: &str,
 ) -> Result<(), String> {
+    validate_timeline_read_row(
+        TimelineReadRef::V1(row),
+        platform,
+        fixture,
+        fixture_inventory_sha256,
+        fixture_witness_sha256,
+        product_identity_sha256,
+        execution_identity_sha256,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+pub fn validate_qualification_derived_timeline_read_row_v2(
+    row: &super::QualificationDerivedTimelineReadEvidenceV2,
+    platform: super::QualificationDerivedAccessPlatformV1,
+    fixture: super::QualificationDerivedChangeFixtureV1,
+    fixture_inventory_sha256: &str,
+    fixture_witness_sha256: &str,
+    product_identity_sha256: &str,
+    execution_identity_sha256: &str,
+) -> Result<(), String> {
+    validate_timeline_read_row(
+        TimelineReadRef::V2(row),
+        platform,
+        fixture,
+        fixture_inventory_sha256,
+        fixture_witness_sha256,
+        product_identity_sha256,
+        execution_identity_sha256,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_timeline_read_row(
+    input: TimelineReadRef<'_>,
+    platform: super::QualificationDerivedAccessPlatformV1,
+    fixture: super::QualificationDerivedChangeFixtureV1,
+    fixture_inventory_sha256: &str,
+    fixture_witness_sha256: &str,
+    product_identity_sha256: &str,
+    execution_identity_sha256: &str,
+) -> Result<(), String> {
+    let row = input.fields();
     let case = row.case;
     if row.platform != platform {
         return Err(format!("{case:?} Timeline row platform drifted"));
@@ -851,7 +988,8 @@ pub fn validate_qualification_derived_timeline_read_row_v1(
     Ok(())
 }
 
-fn timeline_typed_documents_valid_v1(row: &QualificationDerivedTimelineReadEvidenceV1) -> bool {
+fn timeline_typed_documents_valid(input: TimelineReadRef<'_>) -> bool {
+    let row = input.fields();
     let expected = super::expected_timeline_typed_documents_v1(row.platform, row.fixture, row.case);
     row.expected_typed_documents == expected
         && row.observed_typed_documents.len() == expected.len()
@@ -880,10 +1018,21 @@ fn timeline_typed_documents_valid_v1(row: &QualificationDerivedTimelineReadEvide
 pub fn validate_qualification_derived_timeline_concurrent_trust_row_v1(
     row: &QualificationDerivedTimelineReadEvidenceV1,
 ) -> Result<(), String> {
+    validate_timeline_concurrent_trust_row(TimelineReadRef::V1(row))
+}
+pub fn validate_qualification_derived_timeline_concurrent_trust_row_v2(
+    row: &QualificationDerivedTimelineReadEvidenceV2,
+) -> Result<(), String> {
+    validate_timeline_concurrent_trust_row(TimelineReadRef::V2(row))
+}
+pub(crate) fn validate_timeline_concurrent_trust_row(
+    input: TimelineReadRef<'_>,
+) -> Result<(), String> {
+    let row = input.fields();
     let case = row.case;
     let expected = row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
         && row.case == super::QualificationDerivedTimelineReadCaseV1::ProcessLifecycleSuite;
-    let Some(transition) = &row.concurrent_trust_transition else {
+    let Some(transition) = row.concurrent_trust_transition else {
         if expected {
             return Err(format!(
                 "{case:?} Timeline concurrent-trust transition evidence is absent"
@@ -988,6 +1137,33 @@ pub fn validate_qualification_derived_timeline_invalid_signature_row_v1(
     product_identity_sha256: &str,
     execution_identity_sha256: &str,
 ) -> Result<(), String> {
+    validate_timeline_invalid_signature_row(
+        TimelineReadRef::V1(row),
+        execution,
+        product_identity_sha256,
+        execution_identity_sha256,
+    )
+}
+pub fn validate_qualification_derived_timeline_invalid_signature_row_v2(
+    row: &QualificationDerivedTimelineReadEvidenceV2,
+    execution: &QualificationDerivedAccessExecutionIdentityV1,
+    product_identity_sha256: &str,
+    execution_identity_sha256: &str,
+) -> Result<(), String> {
+    validate_timeline_invalid_signature_row(
+        TimelineReadRef::V2(row),
+        execution,
+        product_identity_sha256,
+        execution_identity_sha256,
+    )
+}
+pub(crate) fn validate_timeline_invalid_signature_row(
+    input: TimelineReadRef<'_>,
+    execution: &QualificationDerivedAccessExecutionIdentityV1,
+    product_identity_sha256: &str,
+    execution_identity_sha256: &str,
+) -> Result<(), String> {
+    let row = input.fields();
     let case = row.case;
     // These three conditions hold for EVERY row (the historical combined
     // predicate applied them unconditionally), not only rows that carry the
@@ -1003,7 +1179,7 @@ pub fn validate_qualification_derived_timeline_invalid_signature_row_v1(
             "{case:?} Timeline row counter execution identity drifted"
         ));
     }
-    super::contract::timeline_invalid_signature_failure_check_v1(row, Some(execution))
+    super::contract::timeline_invalid_signature_failure_check(input, Some(execution))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -4089,7 +4265,39 @@ pub(super) fn validate_summaries_against_raw(
                     &mut expected_change_reads,
                     &receipt.base,
                 );
-                expected_timeline_reads.extend(receipt.timeline_read_rows);
+                expected_timeline_reads.extend(
+                    receipt
+                        .timeline_read_rows
+                        .into_iter()
+                        .map(QualificationDerivedTimelineReadEvidence::V1),
+                );
+                expected_timeline_storage.extend(receipt.timeline_storage_rows);
+            }
+            Some(QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V3) => {
+                if package.evaluator_revision
+                    != super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6
+                {
+                    return Err("V3 Change receipt requires evaluator v6".to_owned());
+                }
+                record_change_receipt_schema(&mut change_receipt_schema, "v3")?;
+                let receipt: QualificationDerivedChangeReadReceiptV3 =
+                    serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+                receipt.validate()?;
+                require_packaged_execution(package, &receipt.base.execution)?;
+                append_exact_source_change_read_receipt(
+                    &mut expected_products,
+                    &mut expected_control_binaries,
+                    &mut expected_change_controls,
+                    &mut expected_change_storage,
+                    &mut expected_change_reads,
+                    &receipt.base,
+                );
+                expected_timeline_reads.extend(
+                    receipt
+                        .timeline_read_rows
+                        .into_iter()
+                        .map(QualificationDerivedTimelineReadEvidence::V2),
+                );
                 expected_timeline_storage.extend(receipt.timeline_storage_rows);
             }
             Some(QUALIFICATION_DERIVED_ACCESS_NATIVE_SMOKE_RECEIPT_SCHEMA_V1) => {
@@ -4167,6 +4375,12 @@ pub(super) fn validate_summaries_against_raw(
         }
     }
     match change_receipt_schema {
+        Some("v3")
+            if package.evaluator_revision
+                != super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6 =>
+        {
+            return Err("V3 Change receipt requires evaluator v6".to_owned());
+        }
         Some("v1")
             if package.evaluator_revision
                 != super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3 =>
@@ -4318,6 +4532,10 @@ pub fn build_qualification_derived_access_fragment_v1(
             super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5,
             super::qualification_derived_access_evaluator_v5_procedure_sha256(),
         ),
+        super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6 => (
+            super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6,
+            super::qualification_derived_access_evaluator_v6_procedure_sha256(),
+        ),
         _ => {
             return Err(
                 "derived-access fragment request names an unsupported evaluator revision"
@@ -4352,8 +4570,7 @@ pub fn build_qualification_derived_access_fragment_v1(
     for path in &request.receipt_paths {
         validate_receipt_input_path(path)?;
         let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
-        let value: serde_json::Value =
-            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        let value: serde_json::Value = read_timeline_contract_json(&bytes)?;
         reject_derived_change_diagnostic_evidence_input_v1(path, &value)?;
         let schema = value
             .get("schema")
@@ -4386,6 +4603,11 @@ pub fn build_qualification_derived_access_fragment_v1(
                 package.change_read_rows.extend(receipt.rows);
             }
             QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V2 => {
+                if package.evaluator_revision
+                    == super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6
+                {
+                    return Err("legacy Change receipt cannot enter evaluator v6".to_owned());
+                }
                 record_change_receipt_schema(&mut change_receipt_schema, "v2")?;
                 let receipt: QualificationDerivedChangeReadReceiptV2 =
                     serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
@@ -4418,9 +4640,50 @@ pub fn build_qualification_derived_access_fragment_v1(
                     .change_storage_rows
                     .extend(receipt.base.storage_rows.clone());
                 package.change_read_rows.extend(receipt.base.rows.clone());
+                package.timeline_read_rows.extend(
+                    receipt
+                        .timeline_read_rows
+                        .into_iter()
+                        .map(QualificationDerivedTimelineReadEvidence::V1),
+                );
                 package
-                    .timeline_read_rows
-                    .extend(receipt.timeline_read_rows);
+                    .timeline_storage_rows
+                    .extend(receipt.timeline_storage_rows);
+            }
+            QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V3 => {
+                if package.evaluator_revision
+                    != super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6
+                {
+                    return Err("V3 Change receipt requires evaluator v6".to_owned());
+                }
+                record_change_receipt_schema(&mut change_receipt_schema, "v3")?;
+                let receipt: QualificationDerivedChangeReadReceiptV3 =
+                    serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+                receipt.validate()?;
+                if receipt.base.execution != request.execution {
+                    return Err("Change read successor receipt authority drifted".to_owned());
+                }
+                if !package.product_identities.contains(&receipt.base.product) {
+                    package
+                        .product_identities
+                        .push(receipt.base.product.clone());
+                }
+                package
+                    .change_control_binary_identities
+                    .extend(receipt.base.control_binary_identities.clone());
+                package
+                    .change_control_rows
+                    .extend(receipt.base.control_rows.clone());
+                package
+                    .change_storage_rows
+                    .extend(receipt.base.storage_rows.clone());
+                package.change_read_rows.extend(receipt.base.rows.clone());
+                package.timeline_read_rows.extend(
+                    receipt
+                        .timeline_read_rows
+                        .into_iter()
+                        .map(QualificationDerivedTimelineReadEvidence::V2),
+                );
                 package
                     .timeline_storage_rows
                     .extend(receipt.timeline_storage_rows);
@@ -4737,8 +5000,7 @@ pub fn publish_qualification_derived_access_package_v1(
         .map(|(name, bytes)| {
             let relative = PathBuf::from("raw").join(name);
             validate_qualification_evidence_relative_path_v1(&relative)?;
-            let value: serde_json::Value =
-                serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+            let value: serde_json::Value = read_timeline_contract_json(bytes)?;
             reject_derived_change_diagnostic_evidence_input_v1(&relative, &value)?;
             match value.get("schema").and_then(serde_json::Value::as_str) {
                 Some(QUALIFICATION_DERIVED_ACCESS_FRAGMENT_SCHEMA_V1) => Ok(relative),
@@ -5102,8 +5364,9 @@ fn write_json_create_new<T: Serialize>(path: &Path, value: &T) -> Result<(), Str
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
-    let file = File::open(path).map_err(|error| error.to_string())?;
-    serde_json::from_reader(file).map_err(|error| error.to_string())
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    read_timeline_contract_json(&bytes)?;
+    serde_json::from_slice(&bytes).map_err(|error| error.to_string())
 }
 
 fn list_package_files(root: &Path) -> Result<BTreeSet<String>, String> {
@@ -5429,4 +5692,106 @@ impl QualificationDerivedAccessPackageV1 {
             complete: false,
         }
     }
+}
+
+/// The successor's byte entrances share this local reader. Seeing either side
+/// of a duplicate new/legacy selector activates strict nested duplicate checks;
+/// a last-wins Value cannot launder a successor into a legacy branch.
+pub(crate) fn read_timeline_contract_json(bytes: &[u8]) -> Result<serde_json::Value, String> {
+    use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
+    struct State {
+        successor: bool,
+        duplicate: bool,
+    }
+    struct Seed<'a>(&'a mut State);
+    impl<'de> DeserializeSeed<'de> for Seed<'_> {
+        type Value = serde_json::Value;
+        fn deserialize<D: serde::Deserializer<'de>>(self, de: D) -> Result<Self::Value, D::Error> {
+            de.deserialize_any(self)
+        }
+    }
+    impl<'de> Visitor<'de> for Seed<'_> {
+        type Value = serde_json::Value;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Timeline evidence JSON")
+        }
+        fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
+            Ok(v.into())
+        }
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(v.into())
+        }
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(v.into())
+        }
+        fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
+            serde_json::Number::from_f64(v)
+                .map(serde_json::Value::Number)
+                .ok_or_else(|| E::custom("nonfinite JSON"))
+        }
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            Ok(v.into())
+        }
+        fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+            Ok(v.into())
+        }
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(serde_json::Value::Null)
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut a: A) -> Result<Self::Value, A::Error> {
+            let mut values = Vec::new();
+            while let Some(v) = a.next_element_seed(Seed(&mut *self.0))? {
+                values.push(v);
+            }
+            Ok(values.into())
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut a: A) -> Result<Self::Value, A::Error> {
+            let mut values = serde_json::Map::new();
+            while let Some(k) = a.next_key::<String>()? {
+                let v = a.next_value_seed(Seed(&mut *self.0))?;
+                if matches!(k.as_str(), "schema" | "evaluatorRevision")
+                    && let Some(v) = v.as_str()
+                {
+                    self.0.successor |= [
+                        (
+                            "pointbreak.qualification-derived-change-read-request.v",
+                            &["1", "2"][..],
+                        ),
+                        (
+                            "pointbreak.qualification-derived-change-read-receipt.v",
+                            &["1", "2"][..],
+                        ),
+                        (
+                            "pointbreak.qualification-derived-timeline-read-evidence.v",
+                            &[][..],
+                        ),
+                        (
+                            "pointbreak.qualification-derived-access-evaluator.v",
+                            &["2", "3", "4", "5"][..],
+                        ),
+                    ]
+                    .iter()
+                    .any(|(prefix, legacy)| {
+                        v.strip_prefix(prefix)
+                            .is_some_and(|version| !legacy.contains(&version))
+                    });
+                }
+                self.0.duplicate |= values.insert(k, v).is_some();
+            }
+            Ok(values.into())
+        }
+    }
+    let mut state = State {
+        successor: false,
+        duplicate: false,
+    };
+    let mut de = serde_json::Deserializer::from_slice(bytes);
+    let value = Seed(&mut state)
+        .deserialize(&mut de)
+        .map_err(|e| e.to_string())?;
+    de.end().map_err(|e| e.to_string())?;
+    if state.successor && state.duplicate {
+        return Err("duplicate field in Timeline successor input".to_owned());
+    }
+    Ok(value)
 }

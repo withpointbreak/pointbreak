@@ -40,6 +40,24 @@ impl LocalJournal {
         }
     }
 
+    /// Only the negative enrollment fence may classify this fixed-key attempt.
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    pub(in crate::session::store) fn read_negative_enrollment_fence(
+        &self,
+    ) -> Result<(
+        Option<Vec<u8>>,
+        crate::bench_support::longitudinal::EnrollmentSafetyProbe,
+    )> {
+        let completion = crate::bench_support::longitudinal::begin_enrollment_safety_probe();
+        let bytes = self.storage.read_bytes_if_exists(
+            &self.event_path(crate::session::store::capabilities::ROOT_ACTIVATION_LOGICAL_KEY_V1),
+        )?;
+        if let Some(bytes) = &bytes {
+            crate::bench_support::longitudinal::record_carrier_bytes(bytes.len());
+        }
+        Ok((bytes, completion))
+    }
+
     fn events_dir(&self) -> PathBuf {
         self.store_dir.join("events")
     }

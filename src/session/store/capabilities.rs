@@ -31,7 +31,11 @@ pub(in crate::session) fn refuse_progress_store(root: &std::path::Path) -> Resul
         Err(error) => return Err(ShoreError::Message(error.to_string())),
     }
     let journal = crate::session::store::backend::LocalJournal::new(root);
-    if let Some(bytes) = journal.read_event_bytes(ROOT_ACTIVATION_LOGICAL_KEY_V1)? {
+    #[cfg(not(any(test, feature = "longitudinal-counting")))]
+    let bytes = journal.read_event_bytes(ROOT_ACTIVATION_LOGICAL_KEY_V1)?;
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    let (bytes, completion) = journal.read_negative_enrollment_fence()?;
+    if let Some(bytes) = bytes {
         let probe: serde_json::Value = serde_json::from_slice(&bytes)?;
         if probe
             .get("minimumReaderProfile")
@@ -42,6 +46,21 @@ pub(in crate::session) fn refuse_progress_store(root: &std::path::Path) -> Resul
                 "progress_reader_unavailable; enrolled strict/admin access requires the future progress reader",
             );
         }
+        // Classification is observation only: retain the fence's original
+        // acceptance/error policy even when these bytes cannot earn credit.
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        if probe.get("schema").and_then(serde_json::Value::as_str) == Some(ACTIVATION_SCHEMA_V1)
+            && probe.get("version").and_then(serde_json::Value::as_u64) == Some(1)
+            && probe
+                .get("minimumReaderProfile")
+                .and_then(serde_json::Value::as_str)
+                == Some(REVIEW_CHANGE_REVISION_COHORT_V1)
+        {
+            completion.complete(true);
+        }
+    } else {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        completion.complete(false);
     }
     Ok(())
 }
@@ -110,7 +129,7 @@ const ACTIVATION_TBS_PAYLOAD_TYPE_V1: &str =
     "application/vnd.pointbreak.store-capability-activation-tbs.v1+json";
 const COMPLETION_TBS_PAYLOAD_TYPE_V1: &str =
     "application/vnd.pointbreak.bulk-adoption-completion-tbs.v1+json";
-const ROOT_ACTIVATION_LOGICAL_KEY_V1: &str =
+pub(in crate::session::store) const ROOT_ACTIVATION_LOGICAL_KEY_V1: &str =
     "store_capability_activation:review_change_revision_v1:root";
 
 /// Check only whether the frozen Change-cohort activation carrier exists.
@@ -2503,6 +2522,88 @@ mod tests {
 
     fn backfill_cohort_of(backend: &StoreBackend) -> Result<BackfillCohort> {
         backfill_cohort(backend.journal().as_ref())
+    }
+
+    #[test]
+    fn negative_fence_classification_is_fixed_owner_and_completion_specific() {
+        use crate::bench_support::longitudinal::TIMELINE_ENROLLMENT_FENCE_KEY_DIGEST_V2;
+        assert_eq!(
+            sha256_bytes_hex(ROOT_ACTIVATION_LOGICAL_KEY_V1.as_bytes()),
+            TIMELINE_ENROLLMENT_FENCE_KEY_DIGEST_V2
+        );
+        let legacy = serde_json::json!({
+            "schema": ACTIVATION_SCHEMA_V1, "version": 1,
+            "minimumReaderProfile": REVIEW_CHANGE_REVISION_COHORT_V1,
+        })
+        .to_string();
+        let wrong_family = serde_json::json!({
+            "schema": "wrong", "version": 1,
+            "minimumReaderProfile": REVIEW_CHANGE_REVISION_COHORT_V1,
+        })
+        .to_string();
+        let progress = serde_json::json!({
+            "minimumReaderProfile": "review_change_revision_progress_v1",
+        })
+        .to_string();
+        for (bytes, ok, completed) in [
+            (None, true, true),
+            (Some(legacy), true, true),
+            (Some("{".into()), false, false),
+            (Some("{}".into()), true, false),
+            (Some(wrong_family), true, false),
+            (Some(progress), false, false),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let journal = crate::session::store::backend::LocalJournal::new(root.path());
+            if let Some(bytes) = &bytes {
+                journal
+                    .create_event_once(ROOT_ACTIVATION_LOGICAL_KEY_V1, bytes.as_bytes())
+                    .unwrap();
+            }
+            let scope = LongitudinalCountingScopeV1::new("a".repeat(64)).unwrap();
+            let _guard = scope.enter();
+            assert_eq!(refuse_progress_store(root.path()).is_ok(), ok);
+            let absent = u64::from(completed && bytes.is_none());
+            let present = u64::from(completed && bytes.is_some());
+            assert_eq!(
+                scope.timeline_read_classes_for_test(),
+                [1, 1, 0, absent, present]
+            );
+            assert_eq!(scope.snapshot().counters.event_validations, 0);
+            assert_eq!(
+                scope.snapshot().counters.carrier_bytes_read,
+                bytes.as_ref().map_or(0, |s| s.len() as u64)
+            );
+            journal
+                .read_event_bytes(ROOT_ACTIVATION_LOGICAL_KEY_V1)
+                .unwrap();
+            crate::session::store::backend::QualificationLocalJournal::new(root.path())
+                .read_event_bytes_by_key_digest(TIMELINE_ENROLLMENT_FENCE_KEY_DIGEST_V2)
+                .unwrap();
+            assert_eq!(&scope.timeline_read_classes_for_test()[..3], &[3, 1, 2]);
+            let _cold = backfill_cohort(&journal);
+            assert!(scope.timeline_read_classes_for_test()[2] > 2);
+            assert_eq!(scope.timeline_read_classes_for_test()[1], 1);
+        }
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(
+            root.path()
+                .join("events")
+                .join(format!("{TIMELINE_ENROLLMENT_FENCE_KEY_DIGEST_V2}.json")),
+        )
+        .unwrap();
+        let scope = LongitudinalCountingScopeV1::new("b".repeat(64)).unwrap();
+        let _g = scope.enter();
+        assert!(refuse_progress_store(root.path()).is_err());
+        assert_eq!(scope.timeline_read_classes_for_test(), [1, 1, 0, 0, 0]);
+        std::fs::create_dir(root.path().join("append-progress")).unwrap();
+        assert!(
+            refuse_progress_store(root.path())
+                .unwrap_err()
+                .to_string()
+                .contains("progress_reader_unavailable")
+        );
+        assert_eq!(scope.timeline_read_classes_for_test(), [1, 1, 0, 0, 0]);
     }
 
     #[test]

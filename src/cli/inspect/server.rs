@@ -83,9 +83,81 @@ struct LongitudinalCountingRequest {
     run_identity: String,
     context: pointbreak::bench_support::longitudinal::LongitudinalCounterReceiptContextV1,
     #[serde(default)]
-    timeline_post_pin_barrier: Option<
-        pointbreak::bench_support::longitudinal::LongitudinalTimelinePostPinBarrierRequestV1,
-    >,
+    timeline_post_pin_barrier: Option<LongitudinalBarrierRequest>,
+}
+
+#[cfg(feature = "longitudinal-counting")]
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum LongitudinalBarrierRequest {
+    V1(pointbreak::bench_support::longitudinal::LongitudinalTimelinePostPinBarrierRequestV1),
+    V2(pointbreak::bench_support::longitudinal::LongitudinalTimelinePostPinBarrierRequestV2),
+}
+#[cfg(feature = "longitudinal-counting")]
+impl LongitudinalBarrierRequest {
+    fn identity(&self) -> &str {
+        match self {
+            Self::V1(r) => &r.barrier_identity_sha256,
+            Self::V2(r) => &r.barrier_identity_sha256,
+        }
+    }
+    fn arm(
+        self,
+        scope: pointbreak::bench_support::longitudinal::LongitudinalCountingScopeV1,
+        root: PathBuf,
+    ) -> Result<pointbreak::bench_support::longitudinal::LongitudinalCountingScopeV1, String> {
+        match self {
+            Self::V1(r) => scope.with_timeline_post_pin_barrier(root, r),
+            Self::V2(r) => scope.with_timeline_post_pin_barrier_v2(root, r),
+        }
+    }
+}
+#[cfg(feature = "longitudinal-counting")]
+fn longitudinal_counting_error(code: &str, detail: &str) -> Response {
+    let detail: String = detail.chars().take(600).collect();
+    Response::new("400 Bad Request", "application/json; charset=utf-8", serde_json::json!({
+        "schema":"pointbreak.longitudinal-counting-error.v1", "version":1, "code":code, "detail":detail,
+    }).to_string().into_bytes())
+}
+
+// Classification for an already rejected envelope only. Visit every barrier
+// selector before last-wins decoding could hide a successor. Legacy malformed
+// headers retain their original I/O error; this does not admit any request.
+#[cfg(feature = "longitudinal-counting")]
+fn requests_successor_barrier(request: &RequestHead) -> bool {
+    use serde::de::{IgnoredAny, MapAccess, Visitor};
+    struct Probe(bool);
+    impl<'de> serde::Deserialize<'de> for Probe {
+        fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+            struct Fields;
+            impl<'de> Visitor<'de> for Fields {
+                type Value = Probe;
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("counting barrier fields")
+                }
+                fn visit_map<A: MapAccess<'de>>(self, mut a: A) -> Result<Probe, A::Error> {
+                    let mut successor = false;
+                    while let Some(key) = a.next_key::<String>()? {
+                        match key.as_str() {
+                            "timelinePostPinBarrier" => successor |= a.next_value::<Option<Probe>>()?.is_some_and(|p| p.0),
+                            "schema" => successor |= a.next_value::<String>()? != pointbreak::bench_support::longitudinal::LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_REQUEST_SCHEMA_V1,
+                            "countingContractSha256" | "setupCounterReceiptSha256" => { successor = true; a.next_value::<IgnoredAny>()?; }
+                            _ => { a.next_value::<IgnoredAny>()?; }
+                        }
+                    }
+                    Ok(Probe(successor))
+                }
+            }
+            de.deserialize_map(Fields)
+        }
+    }
+    request.longitudinal_counting.iter().any(|encoded| {
+        URL_SAFE_NO_PAD
+            .decode(encoded)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Probe>(&bytes).ok())
+            .is_some_and(|p| p.0)
+    })
 }
 
 #[derive(Debug)]
@@ -943,28 +1015,56 @@ pub(super) fn counted_data_response(
     };
     let (path, query) = split_target(&request.target);
     #[cfg(feature = "longitudinal-counting")]
-    if let Some(counting_request) = longitudinal_counting_request(&request)? {
+    if let Some(counting_request) = match longitudinal_counting_request(&request) {
+        Ok(request) => request,
+        Err(error) => {
+            if !requests_successor_barrier(&request) {
+                return Err(error);
+            }
+            return Ok(longitudinal_counting_error(
+                "unsupported_barrier_contract",
+                &error.to_string(),
+            ));
+        }
+    } {
         let LongitudinalCountingRequest {
             run_identity,
             context,
             timeline_post_pin_barrier,
         } = counting_request;
+        if context.phase == "timeline_profile_setup_v2"
+            && (request.method != "GET"
+                || path != "/api/v2/profile"
+                || context.operation != "GET /api/v2/profile"
+                || timeline_post_pin_barrier.is_some())
+        {
+            return Ok(longitudinal_counting_error(
+                "unsupported_barrier_contract",
+                "setup is one non-barrier GET profile request",
+            ));
+        }
         let mut scope =
             pointbreak::bench_support::longitudinal::LongitudinalCountingScopeV1::new(run_identity)
                 .map_err(std::io::Error::other)?;
         if let Some(barrier) = timeline_post_pin_barrier {
+            let v2 = matches!(&barrier, LongitudinalBarrierRequest::V2(_));
+            let refuse = |detail: &str| {
+                if v2 {
+                    longitudinal_counting_error("unsupported_barrier_contract", detail)
+                } else {
+                    Response::text("400 Bad Request", detail)
+                }
+            };
             // A failed-closed barrier must still answer with a typed response:
             // a dropped connection leaves the controller unable to attribute
             // the refusal, while nothing here has touched request state yet.
             if request.method != "GET" || path != "/api/v2/history" {
-                return Ok(Response::text(
-                    "400 Bad Request",
+                return Ok(refuse(
                     "Timeline post-pin barrier is valid only for one derived Timeline request",
                 ));
             }
-            if context.manifest_sha256 != barrier.barrier_identity_sha256 {
-                return Ok(Response::text(
-                    "400 Bad Request",
+            if context.manifest_sha256 != barrier.identity() {
+                return Ok(refuse(
                     "Timeline post-pin barrier identity must bind the counter manifest",
                 ));
             }
@@ -972,15 +1072,20 @@ pub(super) fn counted_data_response(
                 pointbreak::bench_support::longitudinal::LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_ROOT_ENV_V1,
             ) else {
                 return Ok(
-                    Response::text(
-                        "400 Bad Request",
+                    refuse(
                         "Timeline post-pin barrier request omitted its explicit child environment root",
                     ),
                 );
             };
-            scope = match scope.with_timeline_post_pin_barrier(PathBuf::from(root), barrier) {
+            scope = match barrier.arm(scope, PathBuf::from(root)) {
                 Ok(scope) => scope,
                 Err(error) => {
+                    if v2 {
+                        return Ok(longitudinal_counting_error(
+                            "unsupported_barrier_contract",
+                            &error,
+                        ));
+                    }
                     return Ok(Response::text(
                         "400 Bad Request",
                         &format!("Timeline post-pin barrier arming failed: {error}"),
@@ -998,6 +1103,12 @@ pub(super) fn counted_data_response(
         let barrier_receipt = match longitudinal_barrier_receipt_header(&scope) {
             Ok(barrier_receipt) => barrier_receipt,
             Err(error) => {
+                if scope.has_timeline_post_pin_barrier_v2() {
+                    return Ok(longitudinal_counting_error(
+                        "invalid_read_classification",
+                        &error.to_string(),
+                    ));
+                }
                 let body_prefix: String = String::from_utf8_lossy(&response.body)
                     .chars()
                     .take(400)
@@ -1040,7 +1151,7 @@ fn longitudinal_receipt_header(
     response: &Response,
 ) -> std::io::Result<String> {
     context.success = response.status == "200 OK";
-    if scope.has_timeline_post_pin_barrier() {
+    if scope.has_timeline_post_pin_barrier() || context.phase == "timeline_profile_setup_v2" {
         context.semantic_result_sha256 =
             pointbreak::bench_support::longitudinal::canonical_longitudinal_response_semantic_sha256_v1(
                 &response.body,
@@ -1059,6 +1170,14 @@ fn longitudinal_receipt_header(
 fn longitudinal_barrier_receipt_header(
     scope: &pointbreak::bench_support::longitudinal::LongitudinalCountingScopeV1,
 ) -> std::io::Result<Option<String>> {
+    if let Some(receipt) = scope
+        .timeline_post_pin_barrier_receipt_v2()
+        .map_err(std::io::Error::other)?
+    {
+        return serde_json::to_vec(&receipt)
+            .map(|bytes| Some(URL_SAFE_NO_PAD.encode(bytes)))
+            .map_err(std::io::Error::other);
+    }
     scope
         .timeline_post_pin_barrier_receipt()
         .map_err(std::io::Error::other)?
@@ -2221,6 +2340,91 @@ mod tests {
     /// Upper bound for a test's wait on progress it expects to happen. Only a real
     /// hang should reach it, so a loaded host passes and a deadlock still fails.
     const HANG_GUARD: Duration = Duration::from_secs(60);
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn counting_v2_http_decoder_refuses_duplicate_mixed_and_unknown_barriers() {
+        use pointbreak::bench_support::longitudinal::*;
+        let barrier = serde_json::json!({"schema":LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_REQUEST_SCHEMA_V2,
+            "countingContractSha256":TIMELINE_PRE_HYDRATION_COUNTING_CONTRACT_SHA256_V2,"setupCounterReceiptSha256":"1".repeat(64),
+            "barrierIdentitySha256":"b".repeat(64),"expectedCarrierKeyDigest":"c".repeat(64),"cleanCarrierSha256":"d".repeat(64),
+            "mutatedCarrierSha256":"e".repeat(64),"mutationRecipeSha256":"f".repeat(64)});
+        let context = serde_json::json!({"rootIdentity":"b".repeat(64),"operation":"timeline_invalid_signature_fault","phase":"trust_suite",
+            "baseExecutionIdentitySha256":"c".repeat(64),"derivativeExecutionIdentitySha256":"d".repeat(64),"manifestSha256":"b".repeat(64),
+            "scheduleSha256":"f".repeat(64),"success":false,"semanticResultSha256":"1".repeat(64),"includeCapacityOwnership":false});
+        let decode = |barrier: &str| {
+            let body = format!(
+                r#"{{"runIdentity":"{}","context":{},"timelinePostPinBarrier":{}}}"#,
+                "a".repeat(64),
+                context,
+                barrier
+            );
+            let encoded = URL_SAFE_NO_PAD.encode(body);
+            let head=parse(format!("GET /api/v2/history HTTP/1.1\r\nHost: localhost\r\nX-Pointbreak-Longitudinal-Counting: {encoded}\r\n\r\n")).unwrap().unwrap();
+            if barrier.contains("countingContractSha256") {
+                assert!(requests_successor_barrier(&head));
+            }
+            longitudinal_counting_request(&head)
+        };
+        let legacy = r#"{"schema":"pointbreak.longitudinal-timeline-post-pin-barrier-request.v1"}"#;
+        assert!(decode(legacy).is_err());
+        let legacy_head = RequestHead {
+            method: "GET".into(),
+            target: "/api/v2/history".into(),
+            hosts: vec![],
+            authorizations: vec![],
+            longitudinal_counting: vec![
+                URL_SAFE_NO_PAD.encode(format!(r#"{{"timelinePostPinBarrier":{legacy}}}"#)),
+            ],
+        };
+        assert!(!requests_successor_barrier(&legacy_head));
+        let encoded = barrier.to_string();
+        assert!(matches!(
+            decode(&encoded).unwrap().unwrap().timeline_post_pin_barrier,
+            Some(LongitudinalBarrierRequest::V2(_))
+        ));
+        for duplicate in [
+            format!(r#"{{"schema":"legacy",{}"#, &encoded[1..]),
+            format!(r#"{},"schema":"legacy"}}"#, &encoded[..encoded.len() - 1]),
+        ] {
+            assert!(decode(&duplicate).is_err());
+        }
+        let mut missing = barrier.clone();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("setupCounterReceiptSha256");
+        assert!(decode(&missing.to_string()).is_err());
+        let mut unknown = barrier.clone();
+        unknown["unknown"] = true.into();
+        assert!(decode(&unknown.to_string()).is_err());
+        for schema in [
+            LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_REQUEST_SCHEMA_V1,
+            "unknown",
+        ] {
+            let mut mixed = barrier.clone();
+            mixed["schema"] = schema.into();
+            let request = decode(&mixed.to_string())
+                .unwrap()
+                .unwrap()
+                .timeline_post_pin_barrier
+                .unwrap();
+            let root = tempfile::tempdir().unwrap();
+            assert!(
+                request
+                    .arm(
+                        LongitudinalCountingScopeV1::new("a".repeat(64)).unwrap(),
+                        root.path().to_owned()
+                    )
+                    .is_err()
+            );
+            assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        }
+        let error = longitudinal_counting_error("unsupported_barrier_contract", &"x".repeat(1000));
+        let error: serde_json::Value = serde_json::from_slice(&error.body).unwrap();
+        assert_eq!(error["schema"], "pointbreak.longitudinal-counting-error.v1");
+        assert_eq!(error["detail"].as_str().unwrap().len(), 600);
+    }
 
     #[test]
     fn qualification_cli_control_binary_attests_clean_source() {
