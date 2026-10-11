@@ -2535,6 +2535,8 @@ mod tests {
             "user.name=Delegation Fixture",
             "-c",
             "user.email=delegation@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
             "commit",
             "--quiet",
             "-m",
