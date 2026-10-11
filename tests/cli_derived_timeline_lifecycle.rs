@@ -321,7 +321,10 @@ fn timeline_invalid_signature_post_mutation_failure_restores_source() {
         DerivedTimelineInvalidSignatureDiagnosticFaultV1::AfterCarrierWrite,
     )
     .expect_err("post-mutation fault must stop the diagnostic");
-    assert!(error.contains("injected post-carrier-write failure"));
+    assert!(
+        error.contains("injected post-carrier-write failure"),
+        "expected post-carrier-write failure, got: {error}"
+    );
     assert_eq!(snapshot(&reference), before);
     assert_eq!(snapshot_root(&fault_authority.repo), fault_before);
     assert_barrier_empty(barrier.path());

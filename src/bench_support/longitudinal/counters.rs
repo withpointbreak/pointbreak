@@ -1206,6 +1206,10 @@ pub fn reach_timeline_carrier_locators_selected_v1() -> Result<(), String> {
             mutation_recipe_sha256: barrier.request.mutation_recipe_sha256.clone(),
         };
         if let Err(error) = ready.validate() {
+            let error = format!(
+                "{error}; carrier_opens_before={}; selected_carriers_before={}",
+                ready.carrier_opens_before, ready.selected_carriers_before
+            );
             barrier.error = Some(error.clone());
             return Err(error);
         }

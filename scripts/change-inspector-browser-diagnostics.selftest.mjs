@@ -25,7 +25,20 @@ const currentDerivedAccessStatus = {
 	schema: "pointbreak.inspect-derived-access-status",
 	version: 1,
 	active: true,
-	servingCurrent: true,
+	actions: [],
+	servingCurrent: false,
+	child: {
+		epoch: 1,
+		state: "completed",
+		operation: null,
+		requestId: null,
+		observationOnly: true,
+		observationPending: false,
+		lastCompletedOperation: null,
+		lastCompletedRequestId: null,
+		lastCompletedKind: null,
+		lastCompletedOutcome: null,
+	},
 	availability: "current",
 	rebuildInFlight: false,
 	rebuildPaused: false,
@@ -6188,8 +6201,8 @@ test("empty ready L2 recovery is explicit, authenticated, and retained before br
 	);
 	assert.match(
 		helper,
-		/servingCurrent == true[\s\S]*availability == "current"[\s\S]*rebuildInFlight == false/,
-		"the ready record must wait for the recovered derived generation",
+		/healthy_detached_status "\$ready_tmp" current[\s\S]*completed_detached_retry/,
+		"the ready record must wait for the explicit rebuild completion",
 	);
 });
 
@@ -7261,6 +7274,7 @@ test("an aggregate failure cannot publish a passing completion manifest", async 
 		assertionCount: passingResult.assertionCount,
 		screenshotCount: passingResult.screenshotCount,
 		primaryDerivedAccessStatus: currentDerivedAccessStatus,
+		primaryDerivedAccessEpoch: 1,
 		evidenceInventory: [],
 	};
 	await mkdir(join(root, "browser-artifacts"), { recursive: true });
@@ -7444,6 +7458,7 @@ test("derived Change diagnostics are inadmissible to browser completion publicat
 		assertionCount: 0,
 		screenshotCount: 0,
 		primaryDerivedAccessStatus: currentDerivedAccessStatus,
+		primaryDerivedAccessEpoch: 1,
 		evidenceInventory: [...retainedFiles.entries()]
 			.map(([path, bytes]) => ({
 				path,
@@ -7552,6 +7567,7 @@ test("completion manifests bind a sorted SHA-256 inventory of retained browser e
 		assertionCount: browserResult.assertionCount,
 		screenshotCount: browserResult.screenshotCount,
 		primaryDerivedAccessStatus,
+		primaryDerivedAccessEpoch: 1,
 		evidenceInventory,
 	};
 
@@ -7654,6 +7670,76 @@ test("completion manifests bind a sorted SHA-256 inventory of retained browser e
 		/primary derived-access status|active\/current|match/i,
 	);
 
+	for (const [name, patch, epoch] of [
+		["serving-true", { servingCurrent: true }, 1],
+		["inactive", { active: false }, 1],
+		["stale", { availability: "stale" }, 1],
+		[
+			"unknown",
+			{ child: { ...primaryDerivedAccessStatus.child, state: "unknown" } },
+			1,
+		],
+		[
+			"unavailable",
+			{ child: { ...primaryDerivedAccessStatus.child, state: "unavailable" } },
+			1,
+		],
+		[
+			"pending",
+			{
+				child: {
+					...primaryDerivedAccessStatus.child,
+					observationPending: true,
+				},
+			},
+			1,
+		],
+		[
+			"running",
+			{
+				child: {
+					...primaryDerivedAccessStatus.child,
+					operation: 3,
+					requestId: "a".repeat(32),
+				},
+			},
+			1,
+		],
+		["wrong-epoch", {}, 2],
+	]) {
+		const status = { ...primaryDerivedAccessStatus, ...patch };
+		const bytes = `${JSON.stringify(status)}\n`;
+		const statusPath = "logs/browser-primary-derived-access-status.json";
+		await writeFile(join(evidenceRoot, statusPath), bytes);
+		const candidatePath = join(root, `.${name}-retained.json.tmp`);
+		await writeFile(
+			candidatePath,
+			JSON.stringify({
+				...candidate,
+				primaryDerivedAccessStatus: status,
+				primaryDerivedAccessEpoch: epoch,
+				evidenceInventory: evidenceInventory.map((x) =>
+					x.path === statusPath
+						? { ...x, sha256: createHash("sha256").update(bytes).digest("hex") }
+						: x,
+				),
+			}),
+		);
+		await assert.rejects(
+			publishPassingManifest({
+				candidatePath,
+				manifestPath: join(root, `${name}-retained.json`),
+				browserResult,
+				evidenceRoot,
+			}),
+			/healthy detached/,
+		);
+	}
+	await writeFile(
+		join(logDir, "browser-primary-derived-access-status.json"),
+		retainedFiles.get("logs/browser-primary-derived-access-status.json"),
+	);
+
 	const validCandidatePath = join(root, ".valid-manifest.json.tmp");
 	const validManifestPath = join(root, "valid-manifest.json");
 	const validCandidateBytes = `${JSON.stringify(candidate)}\n`;
@@ -7686,41 +7772,344 @@ test("completion manifests bind a sorted SHA-256 inventory of retained browser e
 });
 
 
-test("failed shakedown retains redacted aggregate and actual cleanup outcome", async () => {
-	const shell = await readFile(new URL("./change-inspector-browser-verify.sh", import.meta.url), "utf8");
-	const rootCleanup = shell.slice(shell.indexOf("cleanup_shakedown_root() {"), shell.indexOf('\nwhile [ "$#" -gt 0 ]'));
-	const cleanup = shell.slice(shell.indexOf("cleanup() {"), shell.indexOf("\ntrap cleanup EXIT"));
+test("failed shakedown retains bounded diagnostics without changing exit or cleanup", async () => {
+	const shell = await readFile(
+		new URL("./change-inspector-browser-verify.sh", import.meta.url),
+		"utf8",
+	);
+	const rootCleanup = shell.slice(
+		shell.indexOf("cleanup_shakedown_root() {"),
+		shell.indexOf('\nwhile [ "$#" -gt 0 ]'),
+	);
+	const cleanup = shell.slice(
+		shell.indexOf("cleanup() {"),
+		shell.indexOf("\ntrap cleanup EXIT"),
+	);
 	const parent = await mkdtemp(join(tmpdir(), "browser-failure-selftest-"));
-	const report = {status:"failed", sections:[{name:"exact", requests:[{error:"net::ERR_ABORTED"}]}], failures:[{detail:"Bearer secret:a", route:"#/?token=secret%3Aa"}], unrelated:{retained:[1,2,3]}};
+	const report = {
+		status: "failed",
+		sections: [{ name: "exact", requests: [{ error: "net::ERR_ABORTED" }] }],
+		failures: [{ detail: "Bearer secret:a", route: "#/?token=secret%3Aa" }],
+		unrelated: { retained: [1, 2, 3] },
+	};
+	const cases = [
+		{ name: "aggregate", closeStatus: 0 },
+		{ name: "close-failed", closeStatus: 7 },
+		{ name: "root-refused", closeStatus: 0, rootRefused: true },
+		{ name: "pre-browser", closeStatus: 0, noReport: true },
+		{ name: "missing-startup", closeStatus: 0, noStartup: true },
+		{ name: "malformed-startup", closeStatus: 0, malformedStartup: true },
+		{ name: "malformed-status", closeStatus: 0, malformedStatus: true },
+		{ name: "missing-status", closeStatus: 0, noStatus: true },
+		{ name: "huge", closeStatus: 0, huge: true },
+		{ name: "recorder-failed", closeStatus: 0, recorderFailed: true },
+	];
 	try {
-		for (const [closeStatus, rootRefused] of [[0, false], [7, false], [0, true]]) {
-			const root = join(parent, `pointbreak-change-inspector-shakedown.${closeStatus}-${rootRefused}`);
-			await mkdir(join(root,"logs"), {recursive:true});
-			await writeFile(join(root,"logs","inspect-startup.json"), JSON.stringify({token:"secret:a"}));
-			await writeFile(join(root,"report.json"), JSON.stringify(report));
-			const child = spawn("bash", ["-c", `set -euo pipefail
+		for (const scenario of cases) {
+			const { closeStatus, rootRefused = false } = scenario;
+			const root = join(
+				parent,
+				`pointbreak-change-inspector-shakedown.${scenario.name}`,
+			);
+			const logs = join(root, "logs");
+			await mkdir(logs, { recursive: true });
+			if (!scenario.noStartup)
+				await writeFile(
+					join(logs, "inspect-startup.json"),
+					scenario.malformedStartup
+						? '{"token":"secret:a"'
+						: JSON.stringify({ token: "secret:a" }),
+				);
+			if (!scenario.noReport)
+				await writeFile(
+					join(root, "report.json"),
+					JSON.stringify(
+						scenario.huge ? { ...report, padding: "x".repeat(100000) } : report,
+					),
+				);
+			if (!scenario.noStatus)
+				await writeFile(
+					join(logs, "browser-primary-derived-access-status.json.tmp"),
+					scenario.malformedStatus
+						? "{broken"
+						: JSON.stringify({
+								...currentDerivedAccessStatus,
+								detail: "secret:a",
+								token: "another-secret",
+							}),
+				);
+			await writeFile(
+				join(logs, "inspect-server.log"),
+				(scenario.huge ? "padding\n".repeat(15000) : "") +
+					"Bearer secret:a secret%3Aa secret%3aa\n",
+			);
+			const child = spawn("bash", [
+				"-c",
+				`set -euo pipefail
 shakedown_parent="$1"; shakedown_root="$2"; log_dir="$2/logs"; browser_result="$2/report.json"
 browser_cleanup_enabled=true; background_pids=(); close_status="$3"
+diagnostic_stage=primary-detached-status; diagnostic_http=200; diagnostic_status_path="$log_dir/browser-primary-derived-access-status.json.tmp"
 run_pw() { return "$close_status"; }
 stop_background_process() { :; }
+${scenario.recorderFailed ? "node() { return 8; }" : ""}
 ${rootCleanup}
 ${cleanup}
 trap cleanup EXIT
-exit 9`, "failure-test", rootRefused ? join(parent,"wrong-parent") : parent, root, String(closeStatus)]);
-			let output=""; for(const stream of [child.stdout,child.stderr]) stream.on("data", b=>output+=b);
-			assert.equal(await new Promise((yes,no)=>{child.on("error",no);child.on("close",yes);}),9);
-			assert.ok(!output.includes("secret:a") && !output.includes("secret%3Aa"), output);
-			const lines=output.trim().split("\n").filter(Boolean).map(JSON.parse);
-			assert.deepEqual(lines.find(x=>x.gate==="change-inspector-browser-failure").report, JSON.parse(JSON.stringify(report).replaceAll("secret:a","REDACTED").replaceAll("secret%3Aa","REDACTED")));
-			const outcome=lines.find(x=>x.gate==="change-inspector-browser-cleanup");
-			assert.equal(outcome.browserCloseStatus,closeStatus); assert.equal(outcome.rootCleanupStatus,rootRefused ? 1 : 0);
-			if (rootRefused) assert.equal(JSON.parse(await readFile(join(root,"report.json"),"utf8")).status,"failed");
-			else await assert.rejects(readFile(join(root,"report.json")), {code:"ENOENT"});
+exit 9`,
+				"failure-test",
+				rootRefused ? join(parent, "wrong-parent") : parent,
+				root,
+				String(closeStatus),
+			]);
+			let output = "";
+			for (const stream of [child.stdout, child.stderr])
+				stream.on("data", (b) => (output += b));
+			assert.equal(
+				await new Promise((yes, no) => {
+					child.on("error", no);
+					child.on("close", yes);
+				}),
+				9,
+			);
+			assert.ok(
+				!output.includes("secret:a") &&
+					!output.includes("secret%3Aa") &&
+					!output.includes("secret%3aa") &&
+					!output.includes("another-secret"),
+				output,
+			);
+			const rawLines = output.trim().split("\n").filter(Boolean);
+			const lines = rawLines.map(JSON.parse);
+			const failure = lines.find(
+				(x) => x.gate === "change-inspector-browser-failure",
+			);
+			assert.ok(
+				Buffer.byteLength(
+					rawLines.find(
+						(x) => JSON.parse(x).gate === "change-inspector-browser-failure",
+					),
+				) +
+					1 <=
+					65536,
+			);
+			if (scenario.recorderFailed) assert.equal(failure.retention, "failed");
+			else {
+				assert.equal(failure.diagnostics.stage, "primary-detached-status");
+				assert.equal(failure.diagnostics.http, "200");
+				if (
+					scenario.noReport ||
+					scenario.noStartup ||
+					scenario.malformedStartup ||
+					scenario.huge
+				)
+					assert.equal(failure.report, null);
+				else
+					assert.deepEqual(
+						failure.report,
+						JSON.parse(
+							JSON.stringify(report)
+								.replaceAll("secret:a", "REDACTED")
+								.replaceAll("secret%3Aa", "REDACTED"),
+						),
+					);
+				if (scenario.noStartup || scenario.malformedStartup) {
+					assert.equal(failure.diagnostics.startupIssues.length, 1);
+					const tail = failure.diagnostics.tails.find(
+						(x) => x.file === "inspect-server.log",
+					);
+					assert.equal(tail.text, undefined);
+					assert.ok(tail.bytes > 0);
+					assert.match(tail.sha256, /^[0-9a-f]{64}$/);
+					assert.match(tail.reason, /tokens unavailable/);
+				} else if (scenario.noStatus)
+					assert.equal(failure.diagnostics.status.reason, "missing");
+				else if (scenario.malformedStatus)
+					assert.equal(failure.diagnostics.status.reason, "invalid JSON");
+				else
+					assert.equal(
+						failure.diagnostics.status.value.child.observationOnly,
+						true,
+					);
+				if (scenario.huge) {
+					assert.equal(failure.reportEvidence.truncated, true);
+					assert.equal(
+						failure.diagnostics.tails.find(
+							(x) => x.file === "inspect-server.log",
+						).truncated,
+						true,
+					);
+				}
+			}
+			const outcome = lines.find(
+				(x) => x.gate === "change-inspector-browser-cleanup",
+			);
+			assert.equal(outcome.browserCloseStatus, closeStatus);
+			assert.equal(outcome.rootCleanupStatus, rootRefused ? 1 : 0);
+			if (rootRefused)
+				assert.equal(
+					JSON.parse(await readFile(join(root, "report.json"), "utf8")).status,
+					"failed",
+				);
+			else
+				await assert.rejects(
+					readFile(join(root, "logs", "inspect-server.log")),
+					{ code: "ENOENT" },
+				);
 		}
-	} finally { await rm(parent,{recursive:true,force:true}); }
+	} finally {
+		await rm(parent, { recursive: true, force: true });
+	}
 });
 
-
+test("detached preflight rejects authority, failed children and epoch changes; retry needs completion", async () => {
+	const shell = await readFile(
+		new URL("./change-inspector-browser-verify.sh", import.meta.url),
+		"utf8",
+	);
+	const helpers = shell.slice(
+		shell.indexOf("validate_detached_status() {"),
+		shell.indexOf('\nsession="pointbreak-change-browser-$$"'),
+	);
+	assert.ok(helpers.includes("completed_detached_retry()"));
+	const root = await mkdtemp(join(tmpdir(), "detached-status-selftest-"));
+	const completed = {
+		...currentDerivedAccessStatus,
+		child: {
+			...currentDerivedAccessStatus.child,
+			lastCompletedOperation: 8,
+			lastCompletedRequestId: "a".repeat(32),
+			lastCompletedKind: "rebuild",
+			lastCompletedOutcome: "succeeded",
+		},
+	};
+	const cases = [
+		{ name: "healthy", status: currentDerivedAccessStatus, expected: 0 },
+		{
+			name: "initialized-absent",
+			status: { ...currentDerivedAccessStatus, availability: "absent" },
+			mode: "initialized",
+			expected: 0,
+		},
+		{
+			name: "initialized-unavailable",
+			status: { ...currentDerivedAccessStatus, availability: "unavailable" },
+			mode: "initialized",
+			expected: 11,
+		},
+		{
+			name: "initialized-unknown",
+			status: { ...currentDerivedAccessStatus, availability: "unknown" },
+			mode: "initialized",
+			expected: 11,
+		},
+		{
+			name: "true-authority",
+			status: { ...currentDerivedAccessStatus, servingCurrent: true },
+			expected: 9,
+		},
+		{ name: "not-observation", child: { observationOnly: false }, expected: 9 },
+		{ name: "unknown", child: { state: "unknown" }, expected: 9 },
+		{ name: "unavailable", child: { state: "unavailable" }, expected: 9 },
+		{ name: "wrong-epoch", child: { epoch: 2 }, expected: 9 },
+		{ name: "zero-epoch", child: { epoch: 0 }, expected: 9 },
+		{ name: "pending", child: { observationPending: true }, expected: 11 },
+		{
+			name: "operation",
+			child: { operation: 1, requestId: "b".repeat(32) },
+			expected: 11,
+		},
+		{ name: "retry-completed", status: completed, retry: true, expected: 0 },
+		{
+			name: "retry-ack-only",
+			status: currentDerivedAccessStatus,
+			retry: true,
+			expected: 11,
+		},
+		{
+			name: "retry-wrong-kind",
+			status: {
+				...completed,
+				child: { ...completed.child, lastCompletedKind: "read" },
+			},
+			retry: true,
+			expected: 11,
+		},
+		{
+			name: "retry-wrong-operation",
+			status: {
+				...completed,
+				child: { ...completed.child, lastCompletedOperation: 9 },
+			},
+			retry: true,
+			expected: 11,
+		},
+		{
+			name: "retry-old-completion",
+			status: {
+				...completed,
+				child: { ...completed.child, lastCompletedOperation: 7 },
+			},
+			retry: true,
+			expected: 11,
+		},
+		{
+			name: "retry-failed",
+			status: {
+				...completed,
+				child: { ...completed.child, lastCompletedOutcome: "failed" },
+			},
+			retry: true,
+			expected: 11,
+		},
+		{
+			name: "retry-wrong-request",
+			status: completed,
+			retry: true,
+			request: "b".repeat(32),
+			expected: 11,
+		},
+	];
+	try {
+		for (const c of cases) {
+			const file = join(root, `${c.name}.json`);
+			await writeFile(
+				file,
+				JSON.stringify(
+					c.status ?? {
+						...currentDerivedAccessStatus,
+						child: { ...currentDerivedAccessStatus.child, ...c.child },
+					},
+				),
+			);
+			const child = spawn("bash", [
+				"-c",
+				`set -euo pipefail
+${helpers}
+die() { exit 9; }
+detached_epoch=1
+validate_detached_status "$1"
+healthy_detached_status "$1" "${c.mode ?? "current"}" || exit 11
+${c.retry ? 'completed_detached_retry "$1" 7 8 "$2" || exit 11' : ""}
+`,
+				"status-test",
+				file,
+				c.request ?? "a".repeat(32),
+			]);
+			let stderr = "";
+			child.stderr.on("data", (b) => (stderr += b));
+			assert.equal(
+				await new Promise((yes, no) => {
+					child.on("error", no);
+					child.on("close", yes);
+				}),
+				c.expected,
+				`${c.name}: ${stderr}`,
+			);
+		}
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
 
 test("parallel history completes destination hydration before Back and Escape", async (t) => {
 	const source = await readFile(
