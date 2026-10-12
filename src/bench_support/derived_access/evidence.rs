@@ -573,7 +573,7 @@ impl TimelineSuccessorRef<'_> {
         {
             return vec!["Change read successor receipt is not exact-source evidence".to_owned()];
         }
-        if let Err(error) = validate_digest(&receipt_sha256, "Change read successor receipt") {
+        if let Err(error) = validate_digest(receipt_sha256, "Change read successor receipt") {
             return vec![error];
         }
         match canonical {
@@ -624,7 +624,7 @@ impl TimelineSuccessorRef<'_> {
                 failures.push(error);
             }
             if validate_digest(
-                &row.derived_semantic_sha256,
+                row.derived_semantic_sha256,
                 "derived Timeline semantic receipt",
             )
             .is_err()
@@ -695,7 +695,7 @@ impl TimelineSuccessorRef<'_> {
                         }
                     }
                 }
-                match timeline_semantic_receipt_sha256(&row.counter_receipts) {
+                match timeline_semantic_receipt_sha256(row.counter_receipts) {
                     Ok(aggregate) if aggregate == row.derived_semantic_sha256 => {}
                     Ok(_) => failures.push(format!(
                         "{case:?} Timeline semantic receipt aggregate drifted"
@@ -4269,6 +4269,7 @@ pub(super) fn validate_summaries_against_raw(
                     receipt
                         .timeline_read_rows
                         .into_iter()
+                        .map(Box::new)
                         .map(QualificationDerivedTimelineReadEvidence::V1),
                 );
                 expected_timeline_storage.extend(receipt.timeline_storage_rows);
@@ -4296,6 +4297,7 @@ pub(super) fn validate_summaries_against_raw(
                     receipt
                         .timeline_read_rows
                         .into_iter()
+                        .map(Box::new)
                         .map(QualificationDerivedTimelineReadEvidence::V2),
                 );
                 expected_timeline_storage.extend(receipt.timeline_storage_rows);
@@ -4644,6 +4646,7 @@ pub fn build_qualification_derived_access_fragment_v1(
                     receipt
                         .timeline_read_rows
                         .into_iter()
+                        .map(Box::new)
                         .map(QualificationDerivedTimelineReadEvidence::V1),
                 );
                 package
@@ -4682,6 +4685,7 @@ pub fn build_qualification_derived_access_fragment_v1(
                     receipt
                         .timeline_read_rows
                         .into_iter()
+                        .map(Box::new)
                         .map(QualificationDerivedTimelineReadEvidence::V2),
                 );
                 package

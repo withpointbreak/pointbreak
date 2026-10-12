@@ -5475,18 +5475,18 @@ mod instrumented {
 }
         }; }
         Ok(match barrier_receipt {
-            TimelineBarrierReceipt::V1(barrier) => TimelineFailureEvidence::V1(failure!(
+            TimelineBarrierReceipt::V1(barrier) => TimelineFailureEvidence::V1(Box::new(failure!(
                 QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1,
                 barrier
-            )),
+            ))),
             TimelineBarrierReceipt::V2(barrier) => {
                 let (setup_counter_receipt, setup_profile_document) =
                     setup.ok_or_else(|| "V2 omitted measured setup".to_owned())?;
-                TimelineFailureEvidence::V2(
+                TimelineFailureEvidence::V2(Box::new(
                     failure!(QualificationDerivedTimelineInvalidSignatureFailureEvidenceV2, barrier,
                     setup_counter_receipt: setup_counter_receipt,
                     setup_profile_document: setup_profile_document),
-                )
+                ))
             }
         })
     }
@@ -5909,18 +5909,18 @@ mod instrumented {
 }
         }; }
         Ok(if v2 {
-            QualificationDerivedTimelineReadEvidence::V2(
+            QualificationDerivedTimelineReadEvidence::V2(Box::new(
                 row!(QualificationDerivedTimelineReadEvidenceV2,
                 invalid_signature_failure.map(TimelineFailureEvidence::into_v2).transpose()?,
                 schema: QUALIFICATION_DERIVED_TIMELINE_READ_EVIDENCE_SCHEMA_V2.to_owned()),
-            )
+            ))
         } else {
-            QualificationDerivedTimelineReadEvidence::V1(row!(
+            QualificationDerivedTimelineReadEvidence::V1(Box::new(row!(
                 QualificationDerivedTimelineReadEvidenceV1,
                 invalid_signature_failure
                     .map(TimelineFailureEvidence::into_v1)
                     .transpose()?
-            ))
+            )))
         })
     }
 

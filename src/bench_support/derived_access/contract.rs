@@ -2140,8 +2140,8 @@ pub struct QualificationDerivedTimelineInvalidSignatureFailureEvidenceV2 {
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum QualificationDerivedTimelineReadEvidence {
-    V1(QualificationDerivedTimelineReadEvidenceV1),
-    V2(QualificationDerivedTimelineReadEvidenceV2),
+    V1(Box<QualificationDerivedTimelineReadEvidenceV1>),
+    V2(Box<QualificationDerivedTimelineReadEvidenceV2>),
 }
 
 #[derive(Clone, Copy)]
@@ -2402,13 +2402,13 @@ impl QualificationDerivedTimelineReadEvidence {
     }
     pub(crate) fn into_v1(self) -> Result<QualificationDerivedTimelineReadEvidenceV1, String> {
         match self {
-            Self::V1(row) => Ok(row),
+            Self::V1(row) => Ok(*row),
             Self::V2(_) => Err("V2 Timeline row cannot enter a legacy result".to_owned()),
         }
     }
     pub(crate) fn into_v2(self) -> Result<QualificationDerivedTimelineReadEvidenceV2, String> {
         match self {
-            Self::V2(row) => Ok(row),
+            Self::V2(row) => Ok(*row),
             Self::V1(_) => Err("legacy Timeline row cannot enter V6".to_owned()),
         }
     }
@@ -2428,8 +2428,8 @@ impl TimelineReadRef<'_> {
 }
 
 pub(crate) enum TimelineFailureEvidence {
-    V1(QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1),
-    V2(QualificationDerivedTimelineInvalidSignatureFailureEvidenceV2),
+    V1(Box<QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1>),
+    V2(Box<QualificationDerivedTimelineInvalidSignatureFailureEvidenceV2>),
 }
 impl TimelineFailureEvidence {
     pub(crate) fn restore_fault(&mut self, inventory: String, trust: String, signature: String) {
@@ -2449,7 +2449,7 @@ impl TimelineFailureEvidence {
         self,
     ) -> Result<QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1, String> {
         match self {
-            Self::V1(f) => Ok(f),
+            Self::V1(f) => Ok(*f),
             Self::V2(_) => Err("mixed Timeline failure version".to_owned()),
         }
     }
@@ -2457,7 +2457,7 @@ impl TimelineFailureEvidence {
         self,
     ) -> Result<QualificationDerivedTimelineInvalidSignatureFailureEvidenceV2, String> {
         match self {
-            Self::V2(f) => Ok(f),
+            Self::V2(f) => Ok(*f),
             Self::V1(_) => Err("mixed Timeline failure version".to_owned()),
         }
     }
@@ -6840,6 +6840,7 @@ mod tests {
                         })
                 })
         })
+        .map(Box::new)
         .map(QualificationDerivedTimelineReadEvidence::V1)
             .collect();
 
@@ -8337,9 +8338,68 @@ mod tests {
                 .is_err()
             );
         }
+        // Owned dispatch preserves each contained wire shape and version across
+        // serialization, borrowing, cloning, and consuming reconstruction.
+        let legacy = QualificationDerivedTimelineReadEvidence::V1(signature_row.clone());
+        assert_eq!(
+            serde_json::from_slice::<QualificationDerivedTimelineReadEvidence>(&legacy_bytes)
+                .unwrap(),
+            legacy
+        );
+        match legacy.view() {
+            TimelineReadRef::V1(row) => assert_eq!(row, signature_row.as_ref()),
+            TimelineReadRef::V2(_) => panic!("legacy row changed version"),
+        }
+        assert_eq!(legacy.clone().into_v1().unwrap(), **signature_row);
+        assert_eq!(
+            legacy.into_v2().unwrap_err(),
+            "legacy Timeline row cannot enter V6"
+        );
+        let successor = QualificationDerivedTimelineReadEvidence::V2(Box::new(v2.clone()));
+        let successor_bytes = serde_json::to_vec(&v2).unwrap();
+        assert_eq!(serde_json::to_vec(&successor).unwrap(), successor_bytes);
+        assert_eq!(
+            serde_json::from_slice::<QualificationDerivedTimelineReadEvidence>(&successor_bytes)
+                .unwrap(),
+            successor
+        );
+        match successor.view() {
+            TimelineReadRef::V2(row) => assert_eq!(row, &v2),
+            TimelineReadRef::V1(_) => panic!("successor row changed version"),
+        }
+        assert_eq!(successor.clone().into_v2().unwrap(), v2);
+        assert_eq!(
+            successor.into_v1().unwrap_err(),
+            "V2 Timeline row cannot enter a legacy result"
+        );
+        assert_eq!(
+            TimelineFailureEvidence::V1(Box::new(old.clone()))
+                .into_v1()
+                .unwrap(),
+            *old
+        );
+        assert_eq!(
+            TimelineFailureEvidence::V1(Box::new(old.clone()))
+                .into_v2()
+                .unwrap_err(),
+            "mixed Timeline failure version"
+        );
+        let successor_failure = v2.invalid_signature_failure.as_ref().unwrap();
+        assert_eq!(
+            TimelineFailureEvidence::V2(Box::new(successor_failure.clone()))
+                .into_v2()
+                .unwrap(),
+            *successor_failure
+        );
+        assert_eq!(
+            TimelineFailureEvidence::V2(Box::new(successor_failure.clone()))
+                .into_v1()
+                .unwrap_err(),
+            "mixed Timeline failure version"
+        );
         assert_eq!(serde_json::to_vec(signature_row).unwrap(), legacy_bytes);
         let mut mixed = complete_timeline.clone();
-        mixed.timeline_read_rows[0] = QualificationDerivedTimelineReadEvidence::V2(v2);
+        mixed.timeline_read_rows[0] = QualificationDerivedTimelineReadEvidence::V2(Box::new(v2));
         assert!(super::super::evidence::validate_summaries_against_raw(&mixed, &[]).is_err());
         assert!(
             evaluate_qualification_derived_access_v1(&mixed)
