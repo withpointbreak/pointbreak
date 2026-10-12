@@ -706,7 +706,7 @@ impl TimelineSuccessorRef<'_> {
                 }
             }
             if let Some(failure) = &row.invalid_signature_failure
-                && !run_identities.insert(failure.counter_receipt.run_identity.clone())
+                && !run_identities.insert(failure.fields().counter_receipt.run_identity.clone())
             {
                 failures.push(format!(
                     "{case:?} Timeline invalid-signature counter run identity duplicates another \
