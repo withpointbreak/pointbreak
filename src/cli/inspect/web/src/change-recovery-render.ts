@@ -10,6 +10,7 @@ export interface ChangeRecoveryPresentation {
   access: ChangeInspectorAccess;
   fallbackValidated: boolean;
   pending: "fallback" | "derived" | "retry" | "cancel" | null;
+  statusPending: boolean;
 }
 
 export type ChangeRecoveryActions = Record<
@@ -83,10 +84,16 @@ export function renderChangeRecovery(
     const button = find<HTMLButtonElement>(`#derived-access-${name}`);
     if (button === null) continue;
     if (name === "wait")
-      button.textContent = canRecheck ? "Check status again" : "wait";
+      button.textContent = view.statusPending
+        ? "Checking status…"
+        : canRecheck
+          ? "Check status again"
+          : "wait";
     button.classList.toggle("hidden", !supported.has(action));
     button.disabled =
-      view.pending !== null || status?.fallbackInFlight === true;
+      view.pending !== null ||
+      status?.fallbackInFlight === true ||
+      (name === "wait" && view.statusPending);
     button.onclick = callback;
   }
   const derived = find<HTMLButtonElement>("#derived-access-use-derived");

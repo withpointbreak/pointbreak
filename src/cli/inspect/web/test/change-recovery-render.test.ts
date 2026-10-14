@@ -39,6 +39,7 @@ describe("Change recovery presentation", () => {
         access: "derived",
         fallbackValidated: false,
         pending: null,
+        statusPending: false,
       },
       actions,
     );
@@ -69,6 +70,7 @@ describe("Change recovery presentation", () => {
         access: "authoritative",
         fallbackValidated: false,
         pending: "fallback",
+        statusPending: false,
       },
       actions,
     );
@@ -90,6 +92,7 @@ describe("Change recovery presentation", () => {
         access: "authoritative",
         fallbackValidated: true,
         pending: null,
+        statusPending: false,
       },
       actions,
     );
@@ -110,6 +113,7 @@ describe("Change recovery presentation", () => {
         access: "derived",
         fallbackValidated: false,
         pending: null,
+        statusPending: false,
       },
       actions,
     );
@@ -139,6 +143,7 @@ describe("Change recovery presentation", () => {
         access: "derived",
         fallbackValidated: false,
         pending: null,
+        statusPending: false,
       },
       actions,
     );

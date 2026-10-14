@@ -11468,9 +11468,9 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       const button2 = find(`#derived-access-${name}`);
       if (button2 === null) continue;
       if (name === "wait")
-        button2.textContent = canRecheck ? "Check status again" : "wait";
+        button2.textContent = view.statusPending ? "Checking status…" : canRecheck ? "Check status again" : "wait";
       button2.classList.toggle("hidden", !supported.has(action));
-      button2.disabled = view.pending !== null || status?.fallbackInFlight === true;
+      button2.disabled = view.pending !== null || status?.fallbackInFlight === true || name === "wait" && view.statusPending;
       button2.onclick = callback;
     }
     const derived = find("#derived-access-use-derived");
@@ -11853,10 +11853,14 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         error: recoveryError,
         access,
         fallbackValidated,
-        pending: recoveryPending
+        pending: recoveryPending,
+        statusPending: recoveryController !== null && !recoveryController.signal.aborted
       },
       {
-        wait: /* @__PURE__ */ __name(() => void refreshRecoveryStatus(), "wait"),
+        wait: /* @__PURE__ */ __name(() => {
+          if (recoveryController === null || recoveryController.signal.aborted)
+            void refreshRecoveryStatus();
+        }, "wait"),
         fallback: /* @__PURE__ */ __name(() => selectRecoveryAccess("authoritative"), "fallback"),
         derived: /* @__PURE__ */ __name(() => selectRecoveryAccess("derived"), "derived"),
         retry: /* @__PURE__ */ __name(() => void controlRecovery("retry"), "retry"),
@@ -11876,6 +11880,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       recoveryController?.abort("superseded");
       const controller = new AbortController();
       recoveryController = controller;
+      renderRecovery();
       try {
         const decoded2 = decodeChangeRecoveryStatus(
           await fetchChangeInspectorJSON("/api/derived-access/status", {
@@ -11894,9 +11899,14 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         recoveryError = error instanceof Error ? error.message : String(error);
         renderRecovery();
       } finally {
-        if (recoveryController === controller) recoveryController = null;
-        if (recoveryTimer !== null) clearTimeout(recoveryTimer);
-        recoveryTimer = isCurrentComposition() && recoveryPending === null && recoveryStatus?.rebuildInFlight ? setTimeout(() => void refreshRecoveryStatus(), 750) : null;
+        if (recoveryController === controller) {
+          recoveryController = null;
+          if (isCurrentComposition()) {
+            renderRecovery();
+            if (recoveryTimer !== null) clearTimeout(recoveryTimer);
+            recoveryTimer = recoveryPending === null && recoveryStatus?.rebuildInFlight ? setTimeout(() => void refreshRecoveryStatus(), 750) : null;
+          }
+        }
       }
     }, "refreshRecoveryStatus");
     const controlRecovery = /* @__PURE__ */ __name(async (action) => {

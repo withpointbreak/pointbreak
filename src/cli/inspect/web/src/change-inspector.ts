@@ -473,9 +473,14 @@ export async function bootstrapChangeInspector(
         access,
         fallbackValidated,
         pending: recoveryPending,
+        statusPending:
+          recoveryController !== null && !recoveryController.signal.aborted,
       },
       {
-        wait: () => void refreshRecoveryStatus(),
+        wait: () => {
+          if (recoveryController === null || recoveryController.signal.aborted)
+            void refreshRecoveryStatus();
+        },
         fallback: () => selectRecoveryAccess("authoritative"),
         derived: () => selectRecoveryAccess("derived"),
         retry: () => void controlRecovery("retry"),
@@ -501,6 +506,7 @@ export async function bootstrapChangeInspector(
     recoveryController?.abort("superseded");
     const controller = new AbortController();
     recoveryController = controller;
+    renderRecovery();
     try {
       const decoded = decodeChangeRecoveryStatus(
         await fetchChangeInspectorJSON("/api/derived-access/status", {
@@ -523,14 +529,19 @@ export async function bootstrapChangeInspector(
       recoveryError = error instanceof Error ? error.message : String(error);
       renderRecovery();
     } finally {
-      if (recoveryController === controller) recoveryController = null;
-      if (recoveryTimer !== null) clearTimeout(recoveryTimer);
-      recoveryTimer =
-        isCurrentComposition() &&
-        recoveryPending === null &&
-        recoveryStatus?.rebuildInFlight
-          ? setTimeout(() => void refreshRecoveryStatus(), 750)
-          : null;
+      // Only the owning observation may clear the pending UI or reschedule.
+      // A superseded request can finish after its replacement has started.
+      if (recoveryController === controller) {
+        recoveryController = null;
+        if (isCurrentComposition()) {
+          renderRecovery();
+          if (recoveryTimer !== null) clearTimeout(recoveryTimer);
+          recoveryTimer =
+            recoveryPending === null && recoveryStatus?.rebuildInFlight
+              ? setTimeout(() => void refreshRecoveryStatus(), 750)
+              : null;
+        }
+      }
     }
   };
   const controlRecovery = async (action: "retry" | "cancel"): Promise<void> => {

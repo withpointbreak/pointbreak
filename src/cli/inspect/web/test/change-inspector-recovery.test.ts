@@ -133,6 +133,143 @@ afterEach(async () => {
 });
 
 describe("Change-first recovery integration", () => {
+  it.each([
+    "success",
+    "failure",
+    "stopped",
+  ])("keeps a status recheck single-flight until %s", async (completion) => {
+    const response = deferred<Response>();
+    let statusRequests = 0;
+    const requests: string[] = [];
+    globalThis.fetch = vi.fn(async (input, init) => {
+      const path = String(input);
+      requests.push(`${init?.method ?? "GET"} ${path}`);
+      if (path === "/api/identity")
+        return new Response(JSON.stringify(identity));
+      if (path === "/api/derived-access/status") {
+        statusRequests += 1;
+        if (statusRequests === 1) throw new Error("status unavailable");
+        if (statusRequests === 2) return response.promise;
+        return new Response(JSON.stringify(status({ actions: ["wait"] })));
+      }
+      return new Response(JSON.stringify(unavailable), { status: 503 });
+    }) as typeof fetch;
+    const { bootstrapChangeInspector, stopChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const button = document.querySelector<HTMLButtonElement>(
+      "#derived-access-wait",
+    );
+    await vi.waitFor(() =>
+      expect(button?.textContent).toBe("Check status again"),
+    );
+    button?.click();
+    await vi.waitFor(() => expect(statusRequests).toBe(2));
+    expect(button?.textContent).toBe("Checking status…");
+    expect(button?.disabled).toBe(true);
+    button?.click();
+    // Also exercise the handler guard independently of native disabled clicks.
+    if (button) button.onclick?.call(button, new PointerEvent("click"));
+    expect(statusRequests).toBe(2);
+
+    if (completion === "stopped") stopChangeInspector();
+    const presentation = document.querySelector(
+      "#derived-access-status",
+    )?.outerHTML;
+    const beforeCompletion = [...requests];
+    response.resolve(
+      completion === "failure"
+        ? new Response("unavailable", { status: 503 })
+        : new Response(JSON.stringify(status({ actions: ["wait"] }))),
+    );
+    if (completion === "stopped") {
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(document.querySelector("#derived-access-status")?.outerHTML).toBe(
+        presentation,
+      );
+      expect(requests).toEqual(beforeCompletion);
+    } else {
+      await vi.waitFor(() => {
+        expect(button?.disabled).toBe(false);
+        expect(button?.textContent).toBe(
+          completion === "failure" ? "Check status again" : "wait",
+        );
+      });
+      expect(statusRequests).toBe(2);
+      button?.click();
+      await vi.waitFor(() => {
+        expect(statusRequests).toBe(3);
+        expect(button?.disabled).toBe(false);
+        expect(button?.textContent).toBe("wait");
+      });
+    }
+    expect(requests.some((entry) => entry.startsWith("POST "))).toBe(false);
+    expect(
+      requests.some((entry) => entry.includes("access=authoritative")),
+    ).toBe(false);
+    expect(location.hash).toBe("#/changes");
+  });
+
+  it.each([
+    "retry",
+    "cancel",
+  ])("lets %s supersede a status check without an old response clearing the new pending state", async (action) => {
+    const oldStatus = deferred<Response>();
+    const newStatus = deferred<Response>();
+    let statusRequests = 0;
+    const posts: string[] = [];
+    const available = () =>
+      new Response(
+        JSON.stringify(status({ actions: ["wait", "retry", "cancel"] })),
+      );
+    globalThis.fetch = vi.fn(async (input, init) => {
+      const path = String(input);
+      if (init?.method === "POST") posts.push(path);
+      if (path === "/api/identity")
+        return new Response(JSON.stringify(identity));
+      if (path === "/api/derived-access/status") {
+        statusRequests += 1;
+        if (statusRequests === 2) return oldStatus.promise;
+        if (statusRequests === 3) return newStatus.promise;
+        return available();
+      }
+      if (path === `/api/derived-access/${action}`) return available();
+      return new Response(JSON.stringify(unavailable), { status: 503 });
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const wait = document.querySelector<HTMLButtonElement>(
+      "#derived-access-wait",
+    );
+    await vi.waitFor(() => {
+      expect(wait?.classList).not.toContain("hidden");
+      expect(wait?.disabled).toBe(false);
+    });
+    wait?.click();
+    await vi.waitFor(() => expect(statusRequests).toBe(2));
+    expect(wait?.textContent).toBe("Checking status…");
+    const control = document.querySelector<HTMLButtonElement>(
+      `#derived-access-${action}`,
+    );
+    expect(control?.disabled).toBe(false);
+    control?.click();
+    await vi.waitFor(() => expect(statusRequests).toBe(3));
+    oldStatus.resolve(available());
+    await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+    expect(wait?.textContent).toBe("Checking status…");
+    expect(wait?.disabled).toBe(true);
+    expect(statusRequests).toBe(3);
+    newStatus.resolve(available());
+    await vi.waitFor(() => {
+      expect(wait?.textContent).toBe("wait");
+      expect(wait?.disabled).toBe(false);
+    });
+    expect(posts).toEqual([`/api/derived-access/${action}`]);
+  });
+
   it("keeps the shell usable and starts fallback only after an explicit click", async () => {
     const requests: Array<{ path: string; method: string }> = [];
     globalThis.fetch = vi.fn(async (input, init) => {

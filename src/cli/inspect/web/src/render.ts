@@ -121,6 +121,7 @@ function renderDerivedAccessStatus(): void {
       access: state.authoritativeFallback ? "authoritative" : "derived",
       fallbackValidated: state.authoritativeFallback,
       pending: null,
+      statusPending: false,
     },
     {
       wait: ignore,
