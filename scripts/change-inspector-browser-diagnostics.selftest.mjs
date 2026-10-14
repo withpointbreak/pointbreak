@@ -756,9 +756,13 @@ test("profile admission requires exact Request binding and consecutive owned rou
 			});
 		}
 
-		await t.test("replaceState search route supersedes an active poll profile", async () => {
-			const sourceHash = "#/changes?q=uncommitted+poll+draft&limit=100&order=change_id_asc";
-			const targetHash = "#/changes?q=Browser+scale+Change+1&limit=100&order=change_id_asc";
+		const runSettledRoute = async (routeKind) => {
+			const sourceHash = routeKind === "hashchange"
+				? "#/changes/change%3Asha256%3Aaa"
+				: "#/changes?q=uncommitted+poll+draft&limit=100&order=change_id_asc";
+			const targetHash = routeKind === "hashchange"
+				? `${sourceHash}/revisions/rev%3Asha256%3Abb?artifactHash=sha256%3Acc`
+				: "#/changes?q=Browser+scale+Change+1&limit=100&order=change_id_asc";
 			const page = new FakePage(`${base}/#/changes?limit=100&order=change_id_asc`);
 			const timers = new ManualTimers();
 			const failures = [];
@@ -814,14 +818,30 @@ test("profile admission requires exact Request binding and consecutive owned rou
 			helpers.installClientAbortProvenanceBridge(scope, { primaryBaseUrl: base });
 			page.evaluate = async (_callback, token) =>
 				scope.__pointbreakClientAbortProvenance.take(token);
-			assert.equal(scope.history.replaceState({}, "", sourceHash), "replace-result");
+			const navigate = (hash, onRoute = () => {}) => {
+				if (routeKind === "replace-state") {
+					assert.equal(scope.history.replaceState({}, "", hash), "replace-result");
+					onRoute();
+					return;
+				}
+				const oldURL = scope.location.href;
+				const newURL = new URL(hash, oldURL).href;
+				scope.location.href = newURL;
+				page.setUrl(newURL);
+				const event = { currentTarget: scope, eventPhase: 2, oldURL, newURL };
+				listeners[0](event);
+				onRoute();
+				event.currentTarget = null;
+				event.eventPhase = 0;
+			};
+			navigate(sourceHash);
 			timers.flushDue();
+			// Polls and reading postflights can start after the source route settles.
 			const controller = new scope.AbortController();
 			const pending = scope.fetch(`${base}/api/v2/profile`, { signal: controller.signal });
 			const token = request.headers()[header];
 			assert.match(token, /^[0-9a-f-]{36}:1$/);
-			assert.equal(scope.history.replaceState({}, "", targetHash), "replace-result");
-			controller.abort("superseded");
+			navigate(targetHash, () => controller.abort("superseded"));
 			rejectFetch(Error("aborted"));
 			await pending.catch(() => {});
 			page.emit("requestfailed", request);
@@ -843,12 +863,12 @@ test("profile admission requires exact Request binding and consecutive owned rou
 				},
 				{
 					sourceHash,
-					sourceKind: "replace-state",
+					sourceKind: routeKind,
 					sourceNewHash: sourceHash,
 					sourceLive: false,
 					abortHash: targetHash,
 					abortCaller: "route-generation",
-					abortKind: "replace-state",
+					abortKind: routeKind,
 					abortOldHash: sourceHash,
 					abortNewHash: targetHash,
 					dispatchOpen: true,
@@ -860,17 +880,42 @@ test("profile admission requires exact Request binding and consecutive owned rou
 				helpers.isAdmissibleClientSupersessionFailure(failure, owner.active(), base),
 				true,
 			);
+			const health = helpers.createRequestHealthSnapshot({
+				requestFailures: failures,
+				isAdmissibleRequestFailure: () => false,
+				isAdmissibleClientFailure: (value) =>
+					helpers.isAdmissibleClientSupersessionFailure(value, owner.active(), base),
+			});
+			assert.equal(health.unexpectedRequestFailures.length, 0);
+			assert.equal(health.clientSupersessionFailureEvidence.length, 1);
+			const boundRequest = failure.request;
+			failure.request = new FakeRequest();
+			assert.equal(owner.active().clientSupersessionProof(failure), null);
+			failure.request = boundRequest;
+			assert.equal(owner.active().clientSupersessionProof(failure), proof);
 			for (const [name, mutate] of [
-				["source replace remained live", (value) => { value.sourceRouteEventLive = true; }],
-				["source was not replaceState", (value) => { value.sourceRouteEventKind = "hashchange"; }],
-				["abort was not replaceState", (value) => { value.abortRouteEventKind = "hashchange"; }],
+				["source event remained live", (value) => { value.sourceRouteEventLive = true; }],
+				["source event kind mismatch", (value) => { value.sourceRouteEventKind = routeKind === "hashchange" ? "replace-state" : "hashchange"; }],
+				["abort event kind mismatch", (value) => { value.abortRouteEventKind = routeKind === "hashchange" ? "replace-state" : "hashchange"; }],
+				["unsupported event kinds", (value) => { value.sourceRouteEventKind = value.abortRouteEventKind = "popstate"; }],
 				["source event did not establish source route", (value) => { value.sourceRouteEventNewHash = "#/attention"; }],
-				["replace did not start at source route", (value) => { value.abortRouteEventOldHash = "#/attention"; }],
-				["replace did not establish abort route", (value) => { value.abortRouteEventNewHash = "#/attention"; }],
-				["replace retained the same route", (value) => { value.abortHash = value.sourceHash; value.abortRouteEventNewHash = value.sourceHash; value.terminalHash = value.sourceHash; }],
-				["replace event gap", (value) => { value.abortRouteEventOrdinal += 1; }],
-				["replace outside live task", (value) => { value.dispatchOpen = false; }],
+				["transition did not start at source route", (value) => { value.abortRouteEventOldHash = "#/attention"; }],
+				["transition did not establish abort route", (value) => { value.abortRouteEventNewHash = "#/attention"; }],
+				["transition retained the same route", (value) => { value.abortHash = value.sourceHash; value.abortRouteEventNewHash = value.sourceHash; value.terminalHash = value.sourceHash; }],
+				["route event gap", (value) => { value.abortRouteEventOrdinal += 1; }],
+				["abort outside live task", (value) => { value.dispatchOpen = false; }],
 				["unattributed abort caller", (value) => { value.abortCaller = "unattributed"; }],
+				["missing provenance", (value) => { value.lookupStatus = "unavailable"; }],
+				["unrelated cancellation", (value) => { value.reason = "cancelled"; }],
+				["timeout", (value) => { value.reason = "postflight_budget"; }],
+				["document changed", (value) => { value.terminalDocumentGeneration += 1; }],
+				["source mismatch", (value) => { value.observedSourceHash = "#/attention"; }],
+				["destination mismatch", (value) => { value.terminalHash = "#/attention"; }],
+				["generation gap", (value) => { value.abortGeneration += 1; }],
+				["startup generation", (value) => { value.sourceGeneration = 0; value.abortGeneration = 1; }],
+				["fetch already responded", (value) => { value.fetchTerminalAtAbort = "response"; }],
+				["body already complete", (value) => { value.bodyTerminalAtAbort = "resolved:text"; }],
+				["response instead of rejected fetch", (value) => { value.fetchTerminal = "response"; }],
 			]) {
 				const candidate = structuredClone(proof);
 				mutate(candidate);
@@ -885,7 +930,7 @@ test("profile admission requires exact Request binding and consecutive owned rou
 				);
 			}
 
-			assert.equal(scope.history.replaceState({}, "", sourceHash), "replace-result");
+			navigate(sourceHash);
 			timers.flushDue();
 			const unrelatedController = new scope.AbortController();
 			const unrelatedPending = scope.fetch(`${base}/api/v2/profile`, {
@@ -894,7 +939,7 @@ test("profile admission requires exact Request binding and consecutive owned rou
 			const unrelatedRequest = request;
 			const unrelatedRejectFetch = rejectFetch;
 			timers.setTimeout(() => unrelatedController.abort("superseded"), 0);
-			assert.equal(scope.history.replaceState({}, "", targetHash), "replace-result");
+			navigate(targetHash);
 			abortStack = "Error\n    at advanceRequestEpoch\n    at unrelatedQueuedCallback";
 			timers.flushDue();
 			unrelatedRejectFetch(Error("aborted"));
@@ -903,7 +948,7 @@ test("profile admission requires exact Request binding and consecutive owned rou
 			await owner.active().settleClientFailureInspections();
 			const unrelatedFailure = failures.at(-1);
 			const unrelatedProof = owner.active().clientSupersessionProof(unrelatedFailure);
-			assert.equal(unrelatedProof.dispatchOpen, true);
+			assert.equal(unrelatedProof.dispatchOpen, routeKind === "replace-state");
 			assert.equal(unrelatedProof.abortCaller, "unattributed");
 			assert.equal(
 				helpers.isAdmissibleClientSupersessionFailure(
@@ -912,8 +957,12 @@ test("profile admission requires exact Request binding and consecutive owned rou
 					base,
 				),
 				false,
-				"a previously queued callback cannot borrow replaceState route intent",
+				"a previously queued callback cannot borrow route intent",
 			);
+		};
+		await t.test("replaceState search route supersedes an active poll profile", () => runSettledRoute("replace-state"));
+		await t.test("hashchange navigation supersedes a settled-route profile request", () => runSettledRoute("hashchange"));
+		{
 			const browser = await readFile(new URL("./change-inspector-browser-verify.mjs", import.meta.url), "utf8");
 			const composition = await readFile(new URL("../src/cli/inspect/web/src/change-inspector.ts", import.meta.url), "utf8");
 			const search = await readFile(new URL("../src/cli/inspect/web/src/change-inspector-search.ts", import.meta.url), "utf8");
@@ -929,7 +978,7 @@ test("profile admission requires exact Request binding and consecutive owned rou
 				/const onRoute = async \(\): Promise<void> => \{[\s\S]*?advanceRequestEpoch\(\);[\s\S]*?await loadGeneration\(route, newProjectionRetryBudget\(\)\);[\s\S]*?\n  \};/,
 				"onRoute must synchronously advance the request epoch before its later generation load",
 			);
-		});
+		}
 
 		const timers = new ManualTimers();
 		const listeners = [];

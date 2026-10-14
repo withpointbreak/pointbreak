@@ -409,8 +409,10 @@
 				proof.sourceRouteEventNewHash === proof.abortRouteEventOldHash &&
 				proof.abortRouteEventNewHash === proof.sourceHash &&
 				proof.sourceHash === proof.abortHash;
-			const settledReplacePair = proof.sourceRouteEventLive === false &&
-				proof.sourceRouteEventKind === "replace-state" && proof.abortRouteEventKind === "replace-state" &&
+			// Polls and reading postflights may begin after the source route dispatch settles.
+			const settledRoutePair = proof.sourceRouteEventLive === false &&
+				(proof.sourceRouteEventKind === "replace-state" || proof.sourceRouteEventKind === "hashchange") &&
+				proof.abortRouteEventKind === proof.sourceRouteEventKind &&
 				proof.sourceRouteEventNewHash === proof.sourceHash &&
 				proof.abortRouteEventOldHash === proof.sourceHash &&
 				proof.abortRouteEventNewHash === proof.abortHash &&
@@ -420,7 +422,7 @@
 				proof.abortCaller === "route-generation" &&
 				consecutiveRouteEvents &&
 				proof.dispatchOpen === true &&
-				(queuedHashchangePair || settledReplacePair) &&
+				(queuedHashchangePair || settledRoutePair) &&
 				proof.sourceHash === proof.observedSourceHash &&
 				proof.abortHash === proof.terminalHash &&
 				proof.fetchTerminalAtAbort === "pending" &&
