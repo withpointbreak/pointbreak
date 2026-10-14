@@ -11553,6 +11553,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
   var EXACT_READING_HARD_BUDGET_MS = 3e4;
   var EXACT_POSTFLIGHT_TIMEOUT_MS = 3e3;
   var IDENTITY_TIMEOUT_MS = 3e3;
+  var RECOVERY_STATUS_TIMEOUT_MS = 1e4;
   var GENERATION_LOAD_TIMEOUT_MS = 3e4;
   var POLL_HEALTHY_INTERVAL_MS = 3e3;
   var POLL_BACKOFF_CAP_MS = 3e4;
@@ -11881,24 +11882,38 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       const controller = new AbortController();
       recoveryController = controller;
       renderRecovery();
+      let onAbort;
+      const aborted = new Promise((_resolve, reject) => {
+        onAbort = /* @__PURE__ */ __name(() => reject(new ChangeInspectorRequestFailure("aborted")), "onAbort");
+        controller.signal.addEventListener("abort", onAbort, { once: true });
+      });
+      const deadline = setTimeout(
+        () => controller.abort("timeout"),
+        RECOVERY_STATUS_TIMEOUT_MS
+      );
       try {
         const decoded2 = decodeChangeRecoveryStatus(
-          await fetchChangeInspectorJSON("/api/derived-access/status", {
-            reportConnection: false,
-            signal: controller.signal
-          })
+          await Promise.race([
+            fetchChangeInspectorJSON("/api/derived-access/status", {
+              reportConnection: false,
+              signal: controller.signal
+            }),
+            aborted
+          ])
         );
         if (decoded2 === null) throw new Error("unsupported recovery status");
         if (observation !== recoveryObservationEpoch || credentialSessionChanged(credentialVersion2) || !isCurrentComposition())
           return;
         acceptRecoveryStatus(decoded2);
       } catch (error) {
-        if (controller.signal.aborted || observation !== recoveryObservationEpoch)
+        if (observation !== recoveryObservationEpoch || credentialSessionChanged(credentialVersion2) || !isCurrentComposition() || controller.signal.aborted && controller.signal.reason !== "timeout")
           return;
         recoveryStatus = null;
-        recoveryError = error instanceof Error ? error.message : String(error);
+        recoveryError = controller.signal.reason === "timeout" ? "Status check timed out" : error instanceof Error ? error.message : String(error);
         renderRecovery();
       } finally {
+        clearTimeout(deadline);
+        controller.signal.removeEventListener("abort", onAbort);
         if (recoveryController === controller) {
           recoveryController = null;
           if (isCurrentComposition()) {

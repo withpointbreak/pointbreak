@@ -120,6 +120,7 @@ const identity = {
 
 beforeEach(async () => {
   vi.resetModules();
+  sessionStorage.clear();
   mountInspectorDom();
   history.replaceState(null, "", "/#/changes");
   // Happy DOM emits a non-standard hashchange for replaceState. Drain it
@@ -128,11 +129,174 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   (await import("../src/change-inspector")).stopChangeInspector();
+  vi.useRealTimers();
   vi.restoreAllMocks();
   resetDom();
 });
 
 describe("Change-first recovery integration", () => {
+  it.each([
+    "success",
+    "failure",
+    "timeout",
+  ])("ignores a status %s from an earlier credential session", async (completion) => {
+    const response = deferred<Response>();
+    const requests: string[] = [];
+    let statusRequests = 0;
+    globalThis.fetch = vi.fn(async (input, init) => {
+      const path = String(input);
+      requests.push(`${init?.method ?? "GET"} ${path}`);
+      if (path === "/api/identity")
+        return new Response(JSON.stringify(identity));
+      if (path === "/api/derived-access/status") {
+        statusRequests += 1;
+        if (statusRequests === 2) return response.promise;
+        return new Response(
+          JSON.stringify(
+            status({
+              actions: ["wait", "retry"],
+              detail:
+                statusRequests === 1
+                  ? "initial status"
+                  : "fresh credential status",
+            }),
+          ),
+        );
+      }
+      return new Response(JSON.stringify(unavailable), { status: 503 });
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    const { setSessionToken } = await import("../src/auth");
+    await bootstrapChangeInspector({ poll: false });
+    const button = document.querySelector<HTMLButtonElement>(
+      "#derived-access-wait",
+    );
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector("#derived-access-detail")?.textContent,
+      ).toBe("initial status"),
+    );
+    vi.useFakeTimers();
+    button?.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(statusRequests).toBe(2);
+    setSessionToken("replacement-test-token");
+    const beforeCompletion = [...requests];
+    if (completion === "timeout") await vi.advanceTimersByTimeAsync(10_000);
+    else {
+      response.resolve(
+        completion === "failure"
+          ? new Response("unavailable", { status: 503 })
+          : new Response(
+              JSON.stringify(
+                status({
+                  servingCurrent: true,
+                  availability: "current",
+                  actions: [],
+                }),
+              ),
+            ),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(document.querySelector("#derived-access-detail")?.textContent).toBe(
+      "initial status",
+    );
+    expect(
+      document.querySelector("#derived-access-retry")?.classList,
+    ).not.toContain("hidden");
+    expect(button?.disabled).toBe(false);
+    expect(requests).toEqual(beforeCompletion);
+    button?.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(document.querySelector("#derived-access-detail")?.textContent).toBe(
+      "fresh credential status",
+    );
+    expect(statusRequests).toBe(3);
+  });
+
+  it.each([
+    "request",
+    "body",
+  ])("times out a stalled status %s and permits a manual recheck", async (stall) => {
+    const late = deferred<Response>();
+    const lateBody = deferred<string>();
+    const retry = deferred<Response>();
+    let statusRequests = 0;
+    let statusSignal: AbortSignal | null | undefined;
+    const requests: string[] = [];
+    globalThis.fetch = vi.fn(async (input, init) => {
+      const path = String(input);
+      requests.push(`${init?.method ?? "GET"} ${path}`);
+      if (path === "/api/identity")
+        return new Response(JSON.stringify(identity));
+      if (path === "/api/derived-access/status") {
+        statusRequests += 1;
+        if (statusRequests === 1) throw new Error("status unavailable");
+        if (statusRequests === 2) {
+          statusSignal = init?.signal;
+          if (stall === "request") return late.promise;
+          const response = new Response();
+          response.text = () => lateBody.promise;
+          return response;
+        }
+        return retry.promise;
+      }
+      return new Response(JSON.stringify(unavailable), { status: 503 });
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const button = document.querySelector<HTMLButtonElement>(
+      "#derived-access-wait",
+    );
+    await vi.waitFor(() =>
+      expect(button?.textContent).toBe("Check status again"),
+    );
+    vi.useFakeTimers();
+    button?.click();
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(button?.textContent).toBe("Checking status…");
+    expect(statusSignal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(statusSignal?.aborted).toBe(true);
+    expect(document.querySelector("#derived-access-detail")?.textContent).toBe(
+      "Status check timed out",
+    );
+    expect(button?.textContent).toBe("Check status again");
+    expect(button?.disabled).toBe(false);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(statusRequests).toBe(2);
+    button?.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(statusRequests).toBe(3);
+    const pendingRequests = [...requests];
+    // The timed-out response claims current; it must not restart the reader or
+    // clear the replacement request's pending state, even if abort is ignored.
+    const current = JSON.stringify(
+      status({ servingCurrent: true, availability: "current", actions: [] }),
+    );
+    late.resolve(new Response(current));
+    lateBody.resolve(current);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(button?.textContent).toBe("Checking status…");
+    expect(button?.disabled).toBe(true);
+    expect(requests).toEqual(pendingRequests);
+    retry.resolve(new Response(JSON.stringify(status({ actions: ["wait"] }))));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(button?.disabled).toBe(false);
+    expect(button?.textContent).toBe("wait");
+    expect(vi.getTimerCount()).toBe(0);
+    expect(requests.some((entry) => entry.startsWith("POST "))).toBe(false);
+    expect(
+      requests.some((entry) => entry.includes("access=authoritative")),
+    ).toBe(false);
+    expect(location.hash).toBe("#/changes");
+  });
+
   it.each([
     "success",
     "failure",
@@ -164,6 +328,7 @@ describe("Change-first recovery integration", () => {
     await vi.waitFor(() =>
       expect(button?.textContent).toBe("Check status again"),
     );
+    vi.useFakeTimers();
     button?.click();
     await vi.waitFor(() => expect(statusRequests).toBe(2));
     expect(button?.textContent).toBe("Checking status…");
@@ -209,6 +374,16 @@ describe("Change-first recovery integration", () => {
       requests.some((entry) => entry.includes("access=authoritative")),
     ).toBe(false);
     expect(location.hash).toBe("#/changes");
+    const settledPresentation = document.querySelector(
+      "#derived-access-status",
+    )?.outerHTML;
+    const settledRequests = [...requests];
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(document.querySelector("#derived-access-status")?.outerHTML).toBe(
+      settledPresentation,
+    );
+    expect(requests).toEqual(settledRequests);
   });
 
   it.each([
@@ -248,6 +423,7 @@ describe("Change-first recovery integration", () => {
       expect(wait?.classList).not.toContain("hidden");
       expect(wait?.disabled).toBe(false);
     });
+    vi.useFakeTimers();
     wait?.click();
     await vi.waitFor(() => expect(statusRequests).toBe(2));
     expect(wait?.textContent).toBe("Checking status…");
@@ -255,6 +431,7 @@ describe("Change-first recovery integration", () => {
       `#derived-access-${action}`,
     );
     expect(control?.disabled).toBe(false);
+    await vi.advanceTimersByTimeAsync(5_000);
     control?.click();
     await vi.waitFor(() => expect(statusRequests).toBe(3));
     oldStatus.resolve(available());
@@ -262,11 +439,17 @@ describe("Change-first recovery integration", () => {
     expect(wait?.textContent).toBe("Checking status…");
     expect(wait?.disabled).toBe(true);
     expect(statusRequests).toBe(3);
+    expect(vi.getTimerCount()).toBe(1);
+    // The old check's deadline must not cancel the replacement check.
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(wait?.textContent).toBe("Checking status…");
+    expect(wait?.disabled).toBe(true);
     newStatus.resolve(available());
     await vi.waitFor(() => {
       expect(wait?.textContent).toBe("wait");
       expect(wait?.disabled).toBe(false);
     });
+    expect(vi.getTimerCount()).toBe(0);
     expect(posts).toEqual([`/api/derived-access/${action}`]);
   });
 
