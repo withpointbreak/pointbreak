@@ -102,7 +102,7 @@ describe("Change recovery presentation", () => {
     expect(actions.derived).toHaveBeenCalledOnce();
   });
 
-  it("clears server actions when status observation fails", () => {
+  it("offers only a read-only recheck when status observation fails", () => {
     renderChangeRecovery(
       {
         status: null,
@@ -116,9 +116,33 @@ describe("Change recovery presentation", () => {
     expect(document.querySelector("#derived-access-summary")?.textContent).toBe(
       "Recovery status unavailable",
     );
-    for (const id of ["wait", "fallback", "cancel", "retry"])
+    const recheck = document.querySelector<HTMLButtonElement>(
+      "#derived-access-wait",
+    );
+    expect(recheck?.classList).not.toContain("hidden");
+    expect(recheck?.textContent).toBe("Check status again");
+    expect(recheck?.disabled).toBe(false);
+    recheck?.click();
+    expect(actions.wait).toHaveBeenCalledOnce();
+    for (const id of ["fallback", "cancel", "retry"])
       expect(
         document.querySelector(`#derived-access-${id}`)?.classList,
       ).toContain("hidden");
+    expect(actions.fallback).not.toHaveBeenCalled();
+    expect(actions.cancel).not.toHaveBeenCalled();
+    expect(actions.retry).not.toHaveBeenCalled();
+
+    renderChangeRecovery(
+      {
+        status: { ...status, actions: ["wait"] },
+        error: null,
+        access: "derived",
+        fallbackValidated: false,
+        pending: null,
+      },
+      actions,
+    );
+    expect(recheck?.textContent).toBe("wait");
+    expect(recheck?.classList).not.toContain("hidden");
   });
 });

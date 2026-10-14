@@ -11456,6 +11456,8 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       }
     }
     const supported = new Set(status?.actions ?? []);
+    const canRecheck = status === null && view.error !== null;
+    if (canRecheck) supported.add("wait");
     const buttons = [
       ["wait", "wait", callbacks.wait],
       ["fallback", "authoritative_fallback", callbacks.fallback],
@@ -11465,6 +11467,8 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     for (const [name, action, callback] of buttons) {
       const button2 = find(`#derived-access-${name}`);
       if (button2 === null) continue;
+      if (name === "wait")
+        button2.textContent = canRecheck ? "Check status again" : "wait";
       button2.classList.toggle("hidden", !supported.has(action));
       button2.disabled = view.pending !== null || status?.fallbackInFlight === true;
       button2.onclick = callback;

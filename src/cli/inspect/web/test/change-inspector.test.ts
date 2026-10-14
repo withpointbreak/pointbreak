@@ -6222,13 +6222,18 @@ describe("Change-first composition", () => {
     "status",
     "first status",
     "stale reading",
+    "status recheck",
+    "status recheck with stale reading",
   ])("revalidates the selected Revision after a fast rebuild (%s)", async (completion) => {
+    const recheck = completion.startsWith("status recheck");
+    const staleReading = completion.includes("stale reading");
     const exactHash =
       "#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact";
     history.replaceState(null, "", `/${exactHash}`);
     await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
     let rebuilt = completion === "first status";
     let profileReads = 0;
+    let statusReads = 0;
     const requests: string[] = [];
     const recoveryStatus = (current: boolean) => ({
       schema: "pointbreak.inspect-derived-access-status",
@@ -6255,8 +6260,15 @@ describe("Change-first composition", () => {
             placement: { tier: "clone", label: "clone store" },
           }),
         );
-      if (path === "/api/derived-access/status")
+      if (path === "/api/derived-access/status") {
+        statusReads += 1;
+        if (recheck) {
+          if (statusReads <= 2)
+            throw new Error("status temporarily unavailable");
+          rebuilt = true;
+        }
         return new Response(JSON.stringify(recoveryStatus(rebuilt)));
+      }
       if (path === "/api/derived-access/retry") {
         rebuilt = true;
         return new Response(
@@ -6282,7 +6294,7 @@ describe("Change-first composition", () => {
       if (path.startsWith("/api/v2/attention?"))
         return new Response(JSON.stringify(page("attention")));
       if (isExactRevisionPath(path))
-        return completion === "stale reading"
+        return staleReading
           ? staleProjectionResponse()
           : new Response(JSON.stringify(revisionDetail()));
       throw new Error(`unexpected ${path}`);
@@ -6291,7 +6303,31 @@ describe("Change-first composition", () => {
       "../src/change-inspector"
     );
     await bootstrapChangeInspector({ poll: false });
-    if (completion !== "first status") {
+    if (recheck) {
+      for (const expectedReads of [1, 2]) {
+        await vi.waitFor(() => {
+          expect(statusReads).toBe(expectedReads);
+          expect(
+            document.querySelector("#derived-access-summary")?.textContent,
+          ).toBe("Recovery status unavailable");
+          const button = document.querySelector<HTMLButtonElement>(
+            "#derived-access-wait",
+          );
+          expect(button?.classList).not.toContain("hidden");
+          expect(button?.textContent).toBe("Check status again");
+          expect(button?.disabled).toBe(false);
+        });
+        expect(profileReads).toBe(1);
+        expect(location.hash).toBe(exactHash);
+        for (const action of ["fallback", "retry", "cancel"])
+          expect(
+            document.querySelector(`#derived-access-${action}`)?.classList,
+          ).toContain("hidden");
+        document
+          .querySelector<HTMLButtonElement>("#derived-access-wait")
+          ?.click();
+      }
+    } else if (completion !== "first status") {
       await vi.waitFor(() =>
         expect(
           document.querySelector("#derived-access-retry")?.classList,
@@ -6307,7 +6343,7 @@ describe("Change-first composition", () => {
         requests.some((entry) => isExactRevisionPath(entry.slice(4))),
       ).toBe(true),
     );
-    if (completion === "stale reading") {
+    if (staleReading) {
       await vi.waitFor(() =>
         expect(document.querySelector("#master")?.textContent).toContain(
           "Reader refused",
@@ -6334,7 +6370,9 @@ describe("Change-first composition", () => {
     }
     expect(location.hash).toBe(exactHash);
     expect(requests.filter((entry) => entry.startsWith("POST "))).toEqual(
-      completion === "first status" ? [] : ["POST /api/derived-access/retry"],
+      completion === "first status" || recheck
+        ? []
+        : ["POST /api/derived-access/retry"],
     );
     expect(
       requests.some((entry) => entry.includes("access=authoritative")),
