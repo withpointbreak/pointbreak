@@ -277,6 +277,60 @@ describe("Change-first recovery integration", () => {
     );
   });
 
+  it.each([
+    "retry",
+    "cancel",
+  ])("ignores a %s completion after the Inspector is stopped", async (action) => {
+    const control = deferred<Response>();
+    const requests: string[] = [];
+    globalThis.fetch = vi.fn(async (input, init) => {
+      const path = String(input);
+      requests.push(`${init?.method ?? "GET"} ${path}`);
+      if (path === "/api/identity")
+        return new Response(JSON.stringify(identity));
+      if (path === "/api/derived-access/status")
+        return new Response(JSON.stringify(status({ actions: [action] })));
+      if (path === `/api/derived-access/${action}`) return control.promise;
+      return new Response(JSON.stringify(unavailable), { status: 503 });
+    }) as typeof fetch;
+    const { bootstrapChangeInspector, stopChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector(`#derived-access-${action}`)?.classList,
+      ).not.toContain("hidden"),
+    );
+    document
+      .querySelector<HTMLButtonElement>(`#derived-access-${action}`)
+      ?.click();
+    await vi.waitFor(() =>
+      expect(requests).toContain(`POST /api/derived-access/${action}`),
+    );
+    stopChangeInspector();
+    const stoppedRequests = [...requests];
+    const stoppedPresentation = document.querySelector(
+      "#derived-access-status",
+    )?.outerHTML;
+    control.resolve(
+      new Response(
+        JSON.stringify(
+          status({
+            availability: "current",
+            servingCurrent: true,
+            actions: [],
+          }),
+        ),
+      ),
+    );
+    await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+    expect(requests).toEqual(stoppedRequests);
+    expect(document.querySelector("#derived-access-status")?.outerHTML).toBe(
+      stoppedPresentation,
+    );
+  });
+
   it("orders status and control observations without replaying a POST", async () => {
     let statusRequests = 0;
     let releaseStale!: (response: Response) => void;
@@ -333,13 +387,17 @@ describe("Change-first recovery integration", () => {
     document.querySelector<HTMLButtonElement>("#derived-access-wait")?.click();
     await vi.waitFor(() => expect(statusRequests).toBe(2));
     document.querySelector<HTMLButtonElement>("#derived-access-retry")?.click();
-    await vi.waitFor(() => expect(statusRequests).toBe(3));
+    // Recovery can now re-read the selected surface as soon as the POST
+    // reports current; that read's refusal also refreshes recovery status.
+    await vi.waitFor(() => expect(statusRequests).toBeGreaterThanOrEqual(3));
+    const acceptedStatusRequests = statusRequests;
     releaseStale(
       new Response(
         JSON.stringify(status({ rebuildInFlight: true, actions: ["retry"] })),
       ),
     );
-    await Promise.resolve();
+    await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+    expect(statusRequests).toBe(acceptedStatusRequests);
 
     expect(methods.filter((entry) => entry.startsWith("POST "))).toEqual([
       "POST /api/derived-access/retry",

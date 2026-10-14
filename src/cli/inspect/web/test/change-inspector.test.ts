@@ -6217,6 +6217,130 @@ describe("Change-first composition", () => {
     );
   });
 
+  it.each([
+    "control",
+    "status",
+    "first status",
+    "stale reading",
+  ])("revalidates the selected Revision after a fast rebuild (%s)", async (completion) => {
+    const exactHash =
+      "#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact";
+    history.replaceState(null, "", `/${exactHash}`);
+    await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+    let rebuilt = completion === "first status";
+    let profileReads = 0;
+    const requests: string[] = [];
+    const recoveryStatus = (current: boolean) => ({
+      schema: "pointbreak.inspect-derived-access-status",
+      version: 1,
+      active: true,
+      availability: current ? "current" : "rebuild_required",
+      namespace: "stable",
+      rebuildInFlight: false,
+      rebuildPaused: false,
+      servingCurrent: current,
+      fallbackInFlight: false,
+      actions: current ? [] : ["retry"],
+    });
+    globalThis.fetch = vi.fn(async (input, init) => {
+      const path = String(input);
+      requests.push(`${init?.method ?? "GET"} ${path}`);
+      if (path === "/api/identity")
+        return new Response(
+          JSON.stringify({
+            schema: "pointbreak.inspect-identity",
+            storeIdentity: "store:sha256:recovery",
+            contextIdentity: "context:sha256:recovery",
+            repository: "recovery-pointbreak",
+            placement: { tier: "clone", label: "clone store" },
+          }),
+        );
+      if (path === "/api/derived-access/status")
+        return new Response(JSON.stringify(recoveryStatus(rebuilt)));
+      if (path === "/api/derived-access/retry") {
+        rebuilt = true;
+        return new Response(
+          JSON.stringify(recoveryStatus(completion === "control")),
+        );
+      }
+      if (path === "/api/v2/profile") profileReads += 1;
+      if (!rebuilt || (path === "/api/v2/profile" && profileReads === 1))
+        return new Response(
+          JSON.stringify({
+            schema: "pointbreak.inspect-change-projection-error",
+            version: 1,
+            code: "projection_rebuild_required",
+            message: "rebuild required",
+            retryable: false,
+          }),
+          { status: 503 },
+        );
+      if (path === "/api/v2/profile")
+        return new Response(JSON.stringify(profile));
+      if (path.startsWith("/api/v2/changes?"))
+        return new Response(JSON.stringify(page("changes")));
+      if (path.startsWith("/api/v2/attention?"))
+        return new Response(JSON.stringify(page("attention")));
+      if (isExactRevisionPath(path))
+        return completion === "stale reading"
+          ? staleProjectionResponse()
+          : new Response(JSON.stringify(revisionDetail()));
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    if (completion !== "first status") {
+      await vi.waitFor(() =>
+        expect(
+          document.querySelector("#derived-access-retry")?.classList,
+        ).not.toContain("hidden"),
+      );
+      document
+        .querySelector<HTMLButtonElement>("#derived-access-retry")
+        ?.click();
+    }
+
+    await vi.waitFor(() =>
+      expect(
+        requests.some((entry) => isExactRevisionPath(entry.slice(4))),
+      ).toBe(true),
+    );
+    if (completion === "stale reading") {
+      await vi.waitFor(() =>
+        expect(document.querySelector("#master")?.textContent).toContain(
+          "Reader refused",
+        ),
+      );
+      expect(
+        document.querySelector<HTMLElement>("#detail-body")?.dataset
+          .changeReadingKey,
+      ).toBeUndefined();
+    } else {
+      await vi.waitFor(() =>
+        expect(document.querySelector("#detail-body")?.textContent).toContain(
+          "Exact Revision",
+        ),
+      );
+      expect(
+        document.querySelector<HTMLElement>("#detail-body")?.dataset
+          .changeReadingKey,
+      ).toBeDefined();
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(
+        requests.filter((entry) => isExactRevisionPath(entry.slice(4))),
+      ).toHaveLength(1);
+    }
+    expect(location.hash).toBe(exactHash);
+    expect(requests.filter((entry) => entry.startsWith("POST "))).toEqual(
+      completion === "first status" ? [] : ["POST /api/derived-access/retry"],
+    );
+    expect(
+      requests.some((entry) => entry.includes("access=authoritative")),
+    ).toBe(false);
+  });
+
   it("a recovery refresh has the same 10 second reading expiry without a cycle bound", async () => {
     vi.useFakeTimers();
     history.replaceState(

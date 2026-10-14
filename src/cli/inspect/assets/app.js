@@ -11859,10 +11859,16 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         cancel: /* @__PURE__ */ __name(() => void controlRecovery("cancel"), "cancel")
       }
     ), "renderRecovery");
+    const acceptRecoveryStatus = /* @__PURE__ */ __name((decoded2) => {
+      const becameCurrent = decoded2.servingCurrent && (recoveryStatus?.servingCurrent !== true || recoveryStatus.rebuildInFlight);
+      recoveryStatus = decoded2;
+      recoveryError = null;
+      renderRecovery();
+      if (becameCurrent) reloadSelectedAccess();
+    }, "acceptRecoveryStatus");
     const refreshRecoveryStatus = /* @__PURE__ */ __name(async () => {
       const observation = ++recoveryObservationEpoch;
       const credentialVersion2 = sessionCredentialVersion();
-      const wasBuilding = recoveryStatus?.rebuildInFlight === true;
       recoveryController?.abort("superseded");
       const controller = new AbortController();
       recoveryController = controller;
@@ -11876,10 +11882,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         if (decoded2 === null) throw new Error("unsupported recovery status");
         if (observation !== recoveryObservationEpoch || credentialSessionChanged(credentialVersion2) || !isCurrentComposition())
           return;
-        recoveryStatus = decoded2;
-        recoveryError = null;
-        renderRecovery();
-        if (wasBuilding && decoded2.servingCurrent) reloadSelectedAccess();
+        acceptRecoveryStatus(decoded2);
       } catch (error) {
         if (controller.signal.aborted || observation !== recoveryObservationEpoch)
           return;
@@ -11896,7 +11899,10 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       if (recoveryPending !== null) return;
       recoveryPending = action;
       recoveryController?.abort("control");
+      if (recoveryTimer !== null) clearTimeout(recoveryTimer);
+      recoveryTimer = null;
       recoveryObservationEpoch += 1;
+      const credentialVersion2 = sessionCredentialVersion();
       renderRecovery();
       try {
         const path = action === "retry" ? "/api/derived-access/retry" : "/api/derived-access/cancel";
@@ -11907,16 +11913,22 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           })
         );
         if (decoded2 === null) throw new Error("unsupported recovery status");
-        recoveryStatus = decoded2;
-        recoveryError = null;
+        if (!isCurrentComposition() || credentialSessionChanged(credentialVersion2))
+          return;
+        acceptRecoveryStatus(decoded2);
       } catch (error) {
+        if (!isCurrentComposition() || credentialSessionChanged(credentialVersion2))
+          return;
         recoveryStatus = null;
         recoveryError = error instanceof Error ? error.message : String(error);
       } finally {
-        recoveryPending = null;
-        recoveryObservationEpoch += 1;
-        renderRecovery();
-        void refreshRecoveryStatus();
+        if (isCurrentComposition()) {
+          recoveryPending = null;
+          recoveryObservationEpoch += 1;
+          renderRecovery();
+          if (!credentialSessionChanged(credentialVersion2))
+            void refreshRecoveryStatus();
+        }
       }
     }, "controlRecovery");
     recoveryStop = /* @__PURE__ */ __name(() => {

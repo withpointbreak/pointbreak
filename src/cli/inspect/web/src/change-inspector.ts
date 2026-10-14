@@ -482,10 +482,22 @@ export async function bootstrapChangeInspector(
         cancel: () => void controlRecovery("cancel"),
       },
     );
+  const acceptRecoveryStatus = (decoded: ChangeRecoveryStatus): void => {
+    // A fast rebuild can finish between observations, including in the retry
+    // response itself. Re-read through the normal currentness checks once;
+    // recovery status alone never authorizes publishing a reading.
+    const becameCurrent =
+      decoded.servingCurrent &&
+      (recoveryStatus?.servingCurrent !== true ||
+        recoveryStatus.rebuildInFlight);
+    recoveryStatus = decoded;
+    recoveryError = null;
+    renderRecovery();
+    if (becameCurrent) reloadSelectedAccess();
+  };
   const refreshRecoveryStatus = async (): Promise<void> => {
     const observation = ++recoveryObservationEpoch;
     const credentialVersion = sessionCredentialVersion();
-    const wasBuilding = recoveryStatus?.rebuildInFlight === true;
     recoveryController?.abort("superseded");
     const controller = new AbortController();
     recoveryController = controller;
@@ -503,10 +515,7 @@ export async function bootstrapChangeInspector(
         !isCurrentComposition()
       )
         return;
-      recoveryStatus = decoded;
-      recoveryError = null;
-      renderRecovery();
-      if (wasBuilding && decoded.servingCurrent) reloadSelectedAccess();
+      acceptRecoveryStatus(decoded);
     } catch (error) {
       if (controller.signal.aborted || observation !== recoveryObservationEpoch)
         return;
@@ -528,7 +537,10 @@ export async function bootstrapChangeInspector(
     if (recoveryPending !== null) return;
     recoveryPending = action;
     recoveryController?.abort("control");
+    if (recoveryTimer !== null) clearTimeout(recoveryTimer);
+    recoveryTimer = null;
     recoveryObservationEpoch += 1;
+    const credentialVersion = sessionCredentialVersion();
     renderRecovery();
     try {
       const path =
@@ -542,16 +554,28 @@ export async function bootstrapChangeInspector(
         }),
       );
       if (decoded === null) throw new Error("unsupported recovery status");
-      recoveryStatus = decoded;
-      recoveryError = null;
+      if (
+        !isCurrentComposition() ||
+        credentialSessionChanged(credentialVersion)
+      )
+        return;
+      acceptRecoveryStatus(decoded);
     } catch (error) {
+      if (
+        !isCurrentComposition() ||
+        credentialSessionChanged(credentialVersion)
+      )
+        return;
       recoveryStatus = null;
       recoveryError = error instanceof Error ? error.message : String(error);
     } finally {
-      recoveryPending = null;
-      recoveryObservationEpoch += 1;
-      renderRecovery();
-      void refreshRecoveryStatus();
+      if (isCurrentComposition()) {
+        recoveryPending = null;
+        recoveryObservationEpoch += 1;
+        renderRecovery();
+        if (!credentialSessionChanged(credentialVersion))
+          void refreshRecoveryStatus();
+      }
     }
   };
   recoveryStop = () => {
