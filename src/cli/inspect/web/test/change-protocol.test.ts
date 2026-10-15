@@ -886,6 +886,92 @@ describe("bounded Change protocol", () => {
     ).toThrow("invalid changes Change page DTO");
   });
 
+  it("decodes the detail's optional current-Revision presentation member in exact order", () => {
+    const first = {
+      revisionId: "rev:sha256:a",
+      objectArtifactContentHash: "sha256:artifact-a",
+    };
+    const second = {
+      revisionId: "rev:sha256:b",
+      objectArtifactContentHash: "sha256:artifact-b",
+    };
+    const detail = (currentRevisionPresentations?: unknown) => ({
+      schema: "pointbreak.review-change",
+      version: 1,
+      summary: {
+        changeId: "change:sha256:a",
+        declarationState: "authoritative",
+        titleAssertions: [],
+        memberCount: 2,
+        topology: "parallel_current",
+        lifecycle: "in_progress",
+        attentionSummary: "in_progress",
+        availabilitySummary: "available",
+        currentRevisionRefs: [first, second],
+        projectionStamp: "sha256:generation",
+      },
+      memberRevisions: [
+        { revision: first, supportingClaimIds: [] },
+        { revision: second, supportingClaimIds: [] },
+      ],
+      unavailableMemberRevisions: [],
+      membershipClaims: [],
+      membershipWithdrawals: [],
+      relationClaims: [],
+      relationWithdrawals: [],
+      links: [],
+      effectiveSupersedes: [],
+      pendingOrConflictingEdges: [],
+      currentRevisionRefs: [first, second],
+      perCurrentRevisionQualification: [
+        { revision: first, qualified: false },
+        { revision: second, qualified: false },
+      ],
+      operativeObligations: [],
+      diagnostics: [],
+      projectionStamp: "sha256:generation",
+      ...(currentRevisionPresentations === undefined
+        ? {}
+        : { currentRevisionPresentations }),
+    });
+    const entries = [
+      {
+        revision: first,
+        revisionProposalSummary: "First proposal",
+        summarySource: "revision_proposal_summary",
+        label: "First proposal",
+      },
+      {
+        revision: second,
+        summarySource: "absent",
+        absentSummaryCue: "No summary supplied",
+      },
+    ];
+
+    expect(
+      decodeChangeDetail(detail(entries)).currentRevisionPresentations,
+    ).toEqual(entries);
+    // An older server sends no member; the decoded detail omits it too.
+    expect("currentRevisionPresentations" in decodeChangeDetail(detail())).toBe(
+      false,
+    );
+    // Out of order, short, or malformed entries fail closed.
+    expect(() => decodeChangeDetail(detail([...entries].reverse()))).toThrow(
+      "invalid Change detail DTO",
+    );
+    expect(() => decodeChangeDetail(detail(entries.slice(0, 1)))).toThrow(
+      "invalid Change detail DTO",
+    );
+    expect(() =>
+      decodeChangeDetail(
+        detail([entries[0], { ...entries[1], absentSummaryCue: "" }]),
+      ),
+    ).toThrow("invalid Change detail DTO");
+    expect(() => decodeChangeDetail(detail({}))).toThrow(
+      "invalid Change detail DTO",
+    );
+  });
+
   it("rejects malformed nested Change and exact-Revision DTOs", () => {
     const revision = {
       revisionId: "rev:sha256:a",

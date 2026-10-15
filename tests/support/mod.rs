@@ -607,3 +607,48 @@ pub fn assert_existing_paths_eq(actual: &Path, expected: &Path) {
         expected.canonicalize().expect("canonicalize expected path")
     );
 }
+
+/// Exact number of authoritative `work_object_proposed` carriers bound to the
+/// given exact current Revision refs (a `currentRevisionRefs` JSON array),
+/// read from the store itself. Counted Change detail and seek-detail pins
+/// derive their expected proposal-carrier count from this, never from an
+/// assumed one carrier per current Revision (#755).
+#[allow(dead_code)]
+pub fn proposal_carrier_count(repo_root: &Path, current_revision_refs: &serde_json::Value) -> u64 {
+    let current = current_revision_refs
+        .as_array()
+        .expect("currentRevisionRefs is an array")
+        .iter()
+        .map(|reference| {
+            (
+                reference["revisionId"]
+                    .as_str()
+                    .expect("current revision id")
+                    .to_owned(),
+                reference["objectArtifactContentHash"]
+                    .as_str()
+                    .expect("current artifact hash")
+                    .to_owned(),
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    pointbreak::session::read_events(repo_root)
+        .expect("read store events")
+        .iter()
+        .filter(|event| {
+            event.event_type == pointbreak::session::event::EventType::WorkObjectProposed
+        })
+        .filter(|event| {
+            let work_object = &event.payload["workObject"];
+            match (
+                work_object["revision"]["id"].as_str(),
+                work_object["objectArtifactContentHash"].as_str(),
+            ) {
+                (Some(revision), Some(hash)) => {
+                    current.contains(&(revision.to_owned(), hash.to_owned()))
+                }
+                _ => false,
+            }
+        })
+        .count() as u64
+}

@@ -343,7 +343,43 @@ pub(crate) fn change_seek_read_v1_inner_with_hook(
     };
     let prepared = match target {
         ChangeSeekCompositionTarget::Detail => {
-            PreparedChangeSeek::Detail(Box::new(narrowed.facade.detail_document(change_id)?))
+            // Current-Revision presentation entries (#755) hydrate their
+            // proposal carriers at this seek's pinned checkpoint.
+            let revisions = narrowed
+                .facade
+                .detail_document(change_id)?
+                .detail
+                .current_revision_refs
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>();
+            let proposals = match super::change_detail_proposals::hydrate_current_revision_proposals(
+                current.service(),
+                &revisions,
+                checkpoint.truth_cursor,
+            ) {
+                Ok(proposals) => proposals,
+                Err(super::change_detail_proposals::DetailProposalHydrationError::Stale(
+                    message,
+                )) => {
+                    return Ok(DerivedChangeOutcomeV1::retryable(
+                        DerivedProjectionFailureCodeV1::ProjectionStale,
+                        message,
+                    ));
+                }
+                Err(super::change_detail_proposals::DetailProposalHydrationError::Invalid(
+                    message,
+                )) => {
+                    return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                        DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                        message,
+                    ));
+                }
+            };
+            PreparedChangeSeek::Detail(Box::new(
+                narrowed
+                    .facade
+                    .detail_document_with_hydrated_proposals(change_id, &proposals)?,
+            ))
         }
         ChangeSeekCompositionTarget::Selector => PreparedChangeSeek::Selector(Box::new(
             DerivedChangeSeekV1::new(narrowed.view, narrowed.document_projection, narrowed.stamp),

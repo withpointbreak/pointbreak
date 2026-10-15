@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
+use super::change_detail_proposals::DetailProposalHydrationError;
 use super::change_revision_reads::ExactRevisionSessionStateV1;
 use super::lifecycle::LifecycleError;
 use super::locator::LocatorRead;
@@ -356,17 +357,88 @@ impl DerivedChangeAccess {
         &self,
         change: &ChangeId,
     ) -> Result<DerivedChangeOutcomeV1<crate::documents::ChangeDetailDocumentV1>> {
+        self.review_generation_detail_document_with_hook(change, || {})
+    }
+
+    fn review_generation_detail_document_with_hook(
+        &self,
+        change: &ChangeId,
+        after_hydration: impl FnOnce(),
+    ) -> Result<DerivedChangeOutcomeV1<crate::documents::ChangeDetailDocumentV1>> {
         let generation = self.review_generation()?;
         Ok(match generation {
             DerivedChangeOutcomeV1::Ready(generation) => {
-                let document = ChangeDocumentFacadeV1::new(
+                let facade = ChangeDocumentFacadeV1::new(
                     generation.projection().clone(),
                     generation.document_projection().clone(),
                 )?
                 .with_ordering(generation.ordering().clone())?
-                .with_generation_stamp(generation.stamp().to_owned())?
-                .detail_document(change)?;
-                DerivedChangeOutcomeV1::Ready(document)
+                .with_generation_stamp(generation.stamp().to_owned())?;
+                // Current-Revision presentation entries (#755) hydrate their
+                // proposal carriers at this generation's own checkpoint.
+                let revisions = facade
+                    .detail_document(change)?
+                    .detail
+                    .current_revision_refs
+                    .into_iter()
+                    .collect::<BTreeSet<_>>();
+                let current = match self.runtime.current() {
+                    Ok(RuntimeCurrentRead::Ready(current)) => current,
+                    Ok(RuntimeCurrentRead::Unavailable(_)) | Err(_) => {
+                        return Ok(DerivedChangeOutcomeV1::retryable(
+                            DerivedProjectionFailureCodeV1::ProjectionUnstable,
+                            "derived Change generation moved before detail composition",
+                        ));
+                    }
+                };
+                let checkpoint = match current.pin_change_reader_checkpoint() {
+                    Ok(checkpoint) => checkpoint,
+                    Err(LifecycleError::TruthChanged) => {
+                        return Ok(DerivedChangeOutcomeV1::retryable(
+                            DerivedProjectionFailureCodeV1::ProjectionUnstable,
+                            "derived Change checkpoint moved before detail composition",
+                        ));
+                    }
+                    Err(error) => return Ok(lifecycle_failure_outcome(error)),
+                };
+                if checkpoint.checkpoint_sha256 != generation.checkpoint_sha256 {
+                    return Ok(DerivedChangeOutcomeV1::retryable(
+                        DerivedProjectionFailureCodeV1::ProjectionUnstable,
+                        "derived Change checkpoint changed before detail composition",
+                    ));
+                }
+                let proposals =
+                    match super::change_detail_proposals::hydrate_current_revision_proposals(
+                        current.service(),
+                        &revisions,
+                        checkpoint.truth_cursor,
+                    ) {
+                        Ok(proposals) => proposals,
+                        Err(DetailProposalHydrationError::Stale(message)) => {
+                            return Ok(DerivedChangeOutcomeV1::retryable(
+                                DerivedProjectionFailureCodeV1::ProjectionStale,
+                                message,
+                            ));
+                        }
+                        Err(DetailProposalHydrationError::Invalid(message)) => {
+                            return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                                DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                                message,
+                            ));
+                        }
+                    };
+                after_hydration();
+                // Hydration read authoritative carriers after the generation's
+                // own terminal proof, so the detail re-proves currentness itself.
+                if let Some(outcome) = self.generation_terminal_proof_outcome(
+                    current.generation_id(),
+                    &generation.checkpoint_sha256,
+                ) {
+                    return Ok(outcome);
+                }
+                DerivedChangeOutcomeV1::Ready(
+                    facade.detail_document_with_hydrated_proposals(change, &proposals)?,
+                )
             }
             DerivedChangeOutcomeV1::AuthorityUnavailable(document) => {
                 DerivedChangeOutcomeV1::AuthorityUnavailable(document)
@@ -456,17 +528,32 @@ impl DerivedChangeAccess {
 
         hook();
 
+        if let Some(outcome) =
+            self.generation_terminal_proof_outcome(&generation_id, &checkpoint.checkpoint_sha256)
+        {
+            return Ok(outcome);
+        }
+        Ok(DerivedChangeOutcomeV1::Ready(generation))
+    }
+
+    /// Terminal currentness proof for whole-generation reads: re-read current
+    /// and require the generation and checkpoint the response was composed at.
+    fn generation_terminal_proof_outcome<T>(
+        &self,
+        generation_id: &str,
+        checkpoint_sha256: &str,
+    ) -> Option<DerivedChangeOutcomeV1<T>> {
         let final_current = match self.runtime.current() {
             Ok(RuntimeCurrentRead::Ready(current)) => current,
             Ok(RuntimeCurrentRead::Unavailable(_)) | Err(_) => {
-                return Ok(DerivedChangeOutcomeV1::retryable(
+                return Some(DerivedChangeOutcomeV1::retryable(
                     DerivedProjectionFailureCodeV1::ProjectionUnstable,
                     "derived Change generation moved before response completion",
                 ));
             }
         };
         if final_current.generation_id() != generation_id {
-            return Ok(DerivedChangeOutcomeV1::retryable(
+            return Some(DerivedChangeOutcomeV1::retryable(
                 DerivedProjectionFailureCodeV1::ProjectionUnstable,
                 "derived Change generation changed before response completion",
             ));
@@ -474,20 +561,19 @@ impl DerivedChangeAccess {
         let final_checkpoint = match final_current.pin_change_reader_checkpoint() {
             Ok(checkpoint) => checkpoint,
             Err(LifecycleError::TruthChanged) => {
-                return Ok(DerivedChangeOutcomeV1::retryable(
+                return Some(DerivedChangeOutcomeV1::retryable(
                     DerivedProjectionFailureCodeV1::ProjectionUnstable,
                     "derived Change checkpoint moved before response completion",
                 ));
             }
-            Err(error) => return Ok(lifecycle_failure_outcome(error)),
+            Err(error) => return Some(lifecycle_failure_outcome(error)),
         };
-        if final_checkpoint.checkpoint_sha256 != checkpoint.checkpoint_sha256 {
-            return Ok(DerivedChangeOutcomeV1::retryable(
+        (final_checkpoint.checkpoint_sha256 != checkpoint_sha256).then(|| {
+            DerivedChangeOutcomeV1::retryable(
                 DerivedProjectionFailureCodeV1::ProjectionUnstable,
                 "derived Change checkpoint changed before response completion",
-            ));
-        }
-        Ok(DerivedChangeOutcomeV1::Ready(generation))
+            )
+        })
     }
 
     pub fn changes(
@@ -5592,6 +5678,82 @@ mod tests {
     }
 
     #[test]
+    fn review_generation_detail_document_maps_post_hydration_drift_to_retryable() {
+        let fixture = ActiveChangeFixture::new(&[&[
+            Some("moving detail state"),
+            Some("moving detail state"),
+        ]]);
+        let change_id = fixture.changes[0].change_id.clone();
+        // The movement must come from this test's append alone. Let any worker
+        // the fixture already started finish, then park later ones at the test
+        // gate: a worker holding the derived writer lock during the hook would
+        // turn the append's acknowledgement Busy (seen on Windows CI) and leave
+        // the writer degraded for the stable reread.
+        let started = std::time::Instant::now();
+        let deadline = started + std::time::Duration::from_secs(30);
+        while fixture.runtime.maintenance_in_flight() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        fixture
+            .runtime
+            .assert_background_worker_before_deadline_with(
+                "post-hydration drift fixture",
+                started,
+                deadline,
+                String::new,
+            );
+        fixture.runtime.pause_background_worker_for_test();
+        let mut appended = false;
+        let outcome = fixture
+            .access
+            .review_generation_detail_document_with_hook(&change_id, || {
+                let journal_id =
+                    JournalId::new("journal:change-endpoint:review-detail-post-hydration");
+                let acknowledgement = fixture
+                    .store
+                    .record_event_once_acknowledged(
+                        &ShoreEvent::new(
+                            EventType::ReviewInitialized,
+                            ReviewInitializedPayload::idempotency_key(&journal_id),
+                            EventTarget::for_journal(journal_id),
+                            Writer::shore_local("change-endpoint-test"),
+                            ReviewInitializedPayload {},
+                            "2026-08-10T02:00:00Z",
+                        )
+                        .expect("build post-hydration movement"),
+                    )
+                    .expect("record post-hydration movement");
+                assert_eq!(acknowledgement.outcome, EventWriteOutcome::Created);
+                assert_eq!(
+                    acknowledgement.derived.availability,
+                    DerivedWriteAvailabilityV1::Current,
+                    "the post-hydration movement must be applied by the derived writer; \
+                     diagnostics {:?}",
+                    acknowledgement.diagnostics,
+                );
+                appended = true;
+            })
+            .expect("read the detail across post-hydration movement");
+        assert!(appended, "the post-hydration hook must run");
+        let DerivedChangeOutcomeV1::Retryable(document) = outcome else {
+            panic!("movement after proposal hydration must be retryable, not Ready");
+        };
+        assert_eq!(
+            document.code(),
+            DerivedProjectionFailureCodeV1::ProjectionUnstable
+        );
+        assert!(document.is_retryable());
+
+        let DerivedChangeOutcomeV1::Ready(_) = fixture
+            .access
+            .review_generation_detail_document(&change_id)
+            .expect("reread the detail once current is stable")
+        else {
+            panic!("a stable reread after the movement must be ready");
+        };
+    }
+
+    #[test]
     fn review_generation_detail_document_matches_the_page_stamp_and_strict_detail() {
         let fixture = ActiveChangeFixture::new(&[&[
             Some("whole generation detail"),
@@ -5632,6 +5794,14 @@ mod tests {
             .expect("bind the staged generation stamp")
             .detail_document(&change_id)
             .expect("compose strict Change detail");
+        // The detail's current-Revision presentation entries are the page's
+        // own entries for this Change (#755).
+        let mut expected = expected;
+        expected.detail.current_revision_presentations = Some(
+            page.document.presentations[&change_id]
+                .current_revisions
+                .clone(),
+        );
         assert_eq!(detail, expected);
         assert_eq!(
             detail.detail.projection_stamp,
@@ -8383,6 +8553,20 @@ mod tests {
         expected.detail.summary.projection_stamp = String::new();
         actual.detail.projection_stamp = String::new();
         actual.detail.summary.projection_stamp = String::new();
+        // Current-Revision presentation entries (#755) are the Change page's
+        // own entries for this Change.
+        let DerivedChangeOutcomeV1::Ready(page) = fixture
+            .access
+            .changes(&DerivedChangePageRequestV1::Bare)
+            .unwrap()
+        else {
+            panic!("fixture page must be ready");
+        };
+        expected.detail.current_revision_presentations = Some(
+            page.document.presentations[&change_id]
+                .current_revisions
+                .clone(),
+        );
         assert_eq!(
             actual, expected,
             "every other detail byte equals the authoritative composition"
@@ -9181,6 +9365,16 @@ mod tests {
         let actual = serde_json::to_string_pretty(&snapshot).unwrap();
         const EXPECTED: &str = r#"{
   "detail": {
+    "currentRevisionPresentations": [
+      {
+        "absentSummaryCue": "No summary supplied",
+        "revision": {
+          "objectArtifactContentHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "revisionId": "rev:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "summarySource": "absent"
+      }
+    ],
     "currentRevisionRefs": [
       {
         "objectArtifactContentHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
