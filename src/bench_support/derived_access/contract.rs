@@ -48,6 +48,12 @@ pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V5_PROCEDURE_SCHEMA_V1: &str =
     "pointbreak.qualification-derived-access-evaluator-v5-procedure.v1";
 pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V5_PROCEDURE_SHA256_V1: &str =
     "da4dc89936309fe4784c8df836fe248679f158a0b0f43a7eab77e19d66e68a00";
+pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6: &str =
+    "pointbreak.qualification-derived-access-evaluator.v6";
+pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V6_PROCEDURE_SCHEMA_V1: &str =
+    "pointbreak.qualification-derived-access-evaluator-v6-procedure.v1";
+pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V6_PROCEDURE_SHA256_V1: &str =
+    "aca4e08fb450d88fa78fbff3078aeaf5614f0930267461a6e861894bbf96c818";
 
 const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V3_STEPS_V1: [&str; 6] = [
     "change-read-parity-and-bounds-v1",
@@ -88,6 +94,29 @@ const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V5_STEPS_V1: [&str; 9] = [
     "timeline-route-parity-independent-errors-request-bounds-concurrent-trust-validated-stamps-canonical-byte-clone-seeded-disjoint-reference-fault-roots-post-pin-exact-carrier-barrier-and-asymmetric-one-bit-signature-recovery-v1",
     "receipt-proven-topology-candidate-bounds-and-cursor-ledger-attempt-token-exemption-v2",
     "typed-timeline-failures-without-strict-parity-identical-product-identity-dedupe-and-per-platform-execution-identity-membership-v1",
+];
+
+/// Evaluator v6 keeps the frozen v5 step prefix and adds fail-closed bounds
+/// for typed-failure rows, distinct from the Ready page-proportional bounds,
+/// which are unchanged. A carrier that was opened and then failed validation
+/// is accounted for explicitly (`rejectedCarrierOpens`) instead of being
+/// forced into the classified-carrier equation. Recovery is a scaling rule,
+/// not a constant: a `projection_rebuild_required` answer may walk at most the
+/// fixture's authoritative event inventory once, and a repeated request under
+/// the same key walks and opens nothing. Invariants that only describe a
+/// successful read are gated on the row's Ready oracle. The prohibitions on
+/// rebuilds, fallbacks, folds and body reads hold for every row.
+const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V6_STEPS_V1: [&str; 10] = [
+    "change-read-parity-and-bounds-v1",
+    "exact-product-and-harness-identity-v1",
+    "complete-typed-error-documents-v1",
+    "reader-v3-authority-lifecycle-concurrency-v1",
+    "immutable-schema-and-byte-inventory-v1",
+    "completion-last-independent-package-verification-v1",
+    "timeline-route-parity-independent-errors-request-bounds-concurrent-trust-validated-stamps-canonical-byte-clone-seeded-disjoint-reference-fault-roots-post-pin-exact-carrier-barrier-and-asymmetric-one-bit-signature-recovery-v1",
+    "receipt-proven-topology-candidate-bounds-and-cursor-ledger-attempt-token-exemption-v2",
+    "typed-timeline-failures-without-strict-parity-identical-product-identity-dedupe-and-per-platform-execution-identity-membership-v1",
+    "typed-failure-fail-closed-bounds-rejected-carrier-accounting-once-per-key-inventory-recovery-and-ready-only-invariants-v1",
 ];
 
 pub const QUALIFICATION_TIMELINE_INVALID_SIGNATURE_MUTATION_RECIPE_SHA256_V1: &str =
@@ -134,6 +163,21 @@ pub fn qualification_derived_access_evaluator_v5_procedure_sha256() -> String {
     assert_eq!(
         digest, QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V5_PROCEDURE_SHA256_V1,
         "compiled derived-access evaluator-v5 procedure drifted"
+    );
+    digest
+}
+
+pub fn qualification_derived_access_evaluator_v6_procedure_sha256() -> String {
+    let procedure = serde_json::json!({
+        "schema": QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V6_PROCEDURE_SCHEMA_V1,
+        "steps": QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V6_STEPS_V1,
+    });
+    let bytes = canonical_json_bytes(&procedure)
+        .expect("the derived-access evaluator-v6 procedure is canonical");
+    let digest = sha256_bytes_hex(&bytes);
+    assert_eq!(
+        digest, QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V6_PROCEDURE_SHA256_V1,
+        "compiled derived-access evaluator-v6 procedure drifted"
     );
     digest
 }
@@ -2252,6 +2296,7 @@ pub fn evaluate_qualification_derived_access_v1(
                 | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3
                 | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4
                 | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
+                | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6
         )
         || package.proposed_profile_id.trim().is_empty()
     {
@@ -2292,6 +2337,12 @@ pub fn evaluate_qualification_derived_access_v1(
     {
         return Err("evaluator v5 procedure binding drifted".to_owned());
     }
+    if package.evaluator_revision == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6
+        && package.evaluator_procedure_sha256
+            != qualification_derived_access_evaluator_v6_procedure_sha256()
+    {
+        return Err("evaluator v6 procedure binding drifted".to_owned());
+    }
     let missing_platforms = validate_execution_identities(package)?;
     reject_duplicate_rows(package)?;
 
@@ -2313,6 +2364,7 @@ pub fn evaluate_qualification_derived_access_v1(
         QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3
             | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4
             | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
+            | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6
     ) {
         evaluate_change_reads(package, &mut failed, &mut missing);
         evaluate_change_controls(package, &mut failed, &mut missing);
@@ -2322,6 +2374,7 @@ pub fn evaluate_qualification_derived_access_v1(
         package.evaluator_revision.as_str(),
         QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4
             | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
+            | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6
     ) {
         evaluate_timeline_reads_v1(package, &mut failed, &mut missing);
         evaluate_timeline_storage_v1(package, &mut failed, &mut missing);
@@ -2544,8 +2597,7 @@ fn validate_execution_identities(
     // Under v5 every fixture's change-read receipt shares one exact product
     // binary per platform, so byte-identical identities collapse before the
     // one-product-per-platform count; mixed identities still refuse.
-    let dedupe_identical =
-        package.evaluator_revision == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5;
+    let dedupe_identical = evaluator_admits_per_platform_membership_v5(package);
     let distinct_products = distinct_identities(&package.product_identities, dedupe_identical);
     let product_platforms = distinct_products
         .iter()
@@ -2556,6 +2608,7 @@ fn validate_execution_identities(
         QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3
             | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4
             | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
+            | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6
     ) && (product_platforms.len() != distinct_products.len()
         || !product_platforms.is_subset(&required))
     {
@@ -3410,7 +3463,13 @@ fn evaluate_change_reads(
             match row.status {
                 QualificationDerivedAccessStatusV1::Unknown => missing.push(criterion),
                 QualificationDerivedAccessStatusV1::Failed => failed.push(criterion),
-                QualificationDerivedAccessStatusV1::Passed if change_read_row_failed(row) => {
+                QualificationDerivedAccessStatusV1::Passed
+                    if change_read_row_failed(
+                        row,
+                        package.evaluator_revision
+                            == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6,
+                    ) =>
+                {
                     failed.push(criterion);
                 }
                 QualificationDerivedAccessStatusV1::Passed => {}
@@ -3440,7 +3499,15 @@ fn evaluate_change_reads(
                 } else {
                     0
                 };
-                if row.counters.change_capability_carriers_opened != expected_capability_opens {
+                // Evaluator v6 holds only Ready rows to the successful-read
+                // capability cache; a typed row's pair work is bounded by its
+                // own fail-closed rule (at most one pair per key).
+                let v6_typed_row = package.evaluator_revision
+                    == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6
+                    && row.oracle == QualificationDerivedChangeReadOracleV1::TypedFailure;
+                if !v6_typed_row
+                    && row.counters.change_capability_carriers_opened != expected_capability_opens
+                {
                     failed.push(format!(
                         "{platform:?}/{fixture:?}/{case:?} Change capability cache"
                     ));
@@ -3805,11 +3872,36 @@ fn evaluate_timeline_reads_v1(
                                     .contains(&receipt.derivative_execution_identity_sha256)
                                 && receipt.manifest_sha256 == row.fixture_inventory_sha256
                                 && receipt.schedule_sha256 == schedule_sha256
-                                && timeline_counter_bounds_hold_v1(
-                                    case,
-                                    operation,
-                                    &receipt.counters,
-                                )
+                                && if package.evaluator_revision
+                                    == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6
+                                {
+                                    timeline_counter_bounds_hold_v6(
+                                        case,
+                                        operation,
+                                        &receipt.counters,
+                                        (operation == &"timeline_fault_outcome"
+                                            && row.oracle
+                                                == QualificationDerivedTimelineReadOracleV1::TypedFailure)
+                                            .then(|| {
+                                                (
+                                                    fixture,
+                                                    qualification_derived_change_expected_outcome_v1(
+                                                        platform,
+                                                        fixture,
+                                                        QualificationDerivedChangeReadCaseV1::ChangesBare,
+                                                    )
+                                                    .2
+                                                    .unwrap_or_default(),
+                                                )
+                                            }),
+                                    )
+                                } else {
+                                    timeline_counter_bounds_hold_v1(
+                                        case,
+                                        operation,
+                                        &receipt.counters,
+                                    )
+                                }
                         });
                 let receipt_semantics = row
                     .counter_receipts
@@ -3904,6 +3996,18 @@ fn distinct_identities<T: Clone + PartialEq>(identities: &[T], dedupe_identical:
     distinct
 }
 
+/// Evaluator v5 introduced identical-identity dedupe and per-platform
+/// execution-identity membership; every later revision keeps them.
+fn evaluator_admits_per_platform_membership_v5(
+    package: &QualificationDerivedAccessPackageV1,
+) -> bool {
+    matches!(
+        package.evaluator_revision.as_str(),
+        QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
+            | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6
+    )
+}
+
 /// Under v5 a row may be bound to any packaged execution identity on its
 /// platform: every fixture's change-read receipt carries its own request-bound
 /// execution identity, so one package legitimately holds several per platform.
@@ -3916,7 +4020,7 @@ fn packaged_execution_identities_v1(
         .execution_identities
         .iter()
         .filter(|identity| identity.platform == platform);
-    if package.evaluator_revision == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5 {
+    if evaluator_admits_per_platform_membership_v5(package) {
         on_platform.collect()
     } else {
         on_platform.take(1).collect()
@@ -3931,7 +4035,7 @@ fn packaged_product_identities_v1(
         .product_identities
         .iter()
         .filter(|identity| identity.platform == platform);
-    if package.evaluator_revision == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5 {
+    if evaluator_admits_per_platform_membership_v5(package) {
         on_platform.collect()
     } else {
         on_platform.take(1).collect()
@@ -4943,6 +5047,77 @@ fn timeline_counter_bounds_hold_v1(
     common_bounds && exhaustive_bounds && work_present
 }
 
+/// Evaluator-v6 Timeline counter bounds. Every operation except a typed
+/// `timeline_fault_outcome` keeps the v1 bounds and rejects no carrier. A typed
+/// fault answer is held to fail-closed bounds instead:
+///
+/// - `projection_rebuild_required` selects nothing and may take one inventory
+///   of the fixture's events (the fault request is the first request of its
+///   child), plus at most one capability pair;
+/// - any other typed fault stays inside the request-bounded window: it opens
+///   no more carriers than it selected, every open is either validated or the
+///   one rejected carrier the fault detects, and it emits nothing.
+///
+/// The prohibitions on fallbacks, folds, rebuilds and body reads hold for both.
+fn timeline_counter_bounds_hold_v6(
+    case: QualificationDerivedTimelineReadCaseV1,
+    operation: &str,
+    counters: &LongitudinalCountersV1,
+    fault: Option<(QualificationDerivedChangeFixtureV1, &str)>,
+) -> bool {
+    let Some((fixture, code)) = fault else {
+        return counters.rejected_carrier_opens == 0
+            && timeline_counter_bounds_hold_v1(case, operation, counters);
+    };
+    let prohibitions = counters.authoritative_fallbacks == 0
+        && counters.full_history_fallbacks == 0
+        && counters.event_folds == 0
+        && counters.projection_rebuilds == 0
+        && counters.state_rebuilds == 0
+        && counters.body_artifact_reads == 0
+        && counters.object_artifact_reads == 0
+        && counters.timeline_sqlite_facet_rows == 0
+        && counters.timeline_exhaustive_candidates == 0
+        && counters.timeline_entries_emitted == 0
+        && matches!(counters.change_capability_carriers_opened, 0 | 2);
+    let capability = counters.change_capability_carriers_opened;
+    if code == "projection_rebuild_required" {
+        return prohibitions
+            && counters.rejected_carrier_opens == 0
+            && counters.timeline_sqlite_candidates == 0
+            && counters.timeline_sqlite_window_rows == 0
+            && counters.timeline_selected_carriers == 0
+            && counters.timeline_revision_candidate_carriers == 0
+            && counters.timeline_removal_support_carriers == 0
+            && counters.timeline_signature_support_carriers == 0
+            && counters.timeline_correlation_support_carriers == 0
+            && counters.timeline_trust_support_carriers == 0
+            && qualification_derived_change_fixture_event_entries_v1(fixture)
+                .is_some_and(|entries| counters.directory_entries_walked <= entries)
+            && counters.carrier_opens >= capability
+            && counters.carrier_opens - capability <= counters.directory_entries_walked;
+    }
+    let classified_carrier_opens = counters
+        .timeline_selected_carriers
+        .saturating_add(counters.timeline_revision_candidate_carriers)
+        .saturating_add(counters.timeline_removal_support_carriers)
+        .saturating_add(counters.timeline_signature_support_carriers)
+        .saturating_add(counters.timeline_correlation_support_carriers);
+    prohibitions
+        && counters.directory_entries_walked == 0
+        && counters.timeline_sqlite_window_rows <= counters.timeline_sqlite_candidates
+        && counters.timeline_selected_carriers == counters.timeline_sqlite_window_rows
+        && timeline_request_limit_v1(operation)
+            .is_some_and(|limit| counters.timeline_sqlite_window_rows <= limit)
+        && counters.timeline_trust_support_carriers <= counters.timeline_selected_carriers
+        && counters.rejected_carrier_opens == u64::from(typed_carrier_fault_v6(fixture, code))
+        && counters.carrier_opens
+            == capability
+                .saturating_add(counters.event_validations)
+                .saturating_add(counters.rejected_carrier_opens)
+        && counters.carrier_opens - capability <= classified_carrier_opens
+}
+
 fn timeline_request_limit_v1(operation: &str) -> Option<u64> {
     match operation {
         "timeline_all_asc"
@@ -5150,7 +5325,7 @@ pub(super) fn forbidden_bodyless_storage_name_v1(name: &str) -> bool {
     names_body_material && !names_metadata_only
 }
 
-fn change_read_row_failed(row: &QualificationDerivedChangeReadEvidenceV1) -> bool {
+fn change_read_row_failed(row: &QualificationDerivedChangeReadEvidenceV1, v6: bool) -> bool {
     // The topology fixture deliberately contains one incomplete Change with no
     // current revision, so an unfiltered read enumerates 15 candidates and
     // narrows to 14 that carry current revisions. Both values are
@@ -5227,7 +5402,10 @@ fn change_read_row_failed(row: &QualificationDerivedChangeReadEvidenceV1) -> boo
         }
         QualificationDerivedChangeReadCaseV1::SummaryQuery
         | QualificationDerivedChangeReadCaseV1::SummaryFilterSuite => {
-            counters.change_proposal_carriers_opened < counters.change_candidate_current_revisions
+            // Evaluator v6: a successful-read invariant, held only by Ready rows.
+            !(v6 && row.oracle == QualificationDerivedChangeReadOracleV1::TypedFailure)
+                && counters.change_proposal_carriers_opened
+                    < counters.change_candidate_current_revisions
         }
         _ => false,
     };
@@ -5304,9 +5482,19 @@ fn change_read_row_failed(row: &QualificationDerivedChangeReadEvidenceV1) -> boo
             | QualificationDerivedChangeReadCaseV1::AttentionBounded
             | QualificationDerivedChangeReadCaseV1::SummaryQuery,
         ) => {
+            // Support carriers are hydrated for matching Changes; under v6 a
+            // summary query that matches nothing opens none.
+            let expected_support_opens = if v6
+                && row.case == QualificationDerivedChangeReadCaseV1::SummaryQuery
+                && counters.change_matches == 0
+            {
+                0
+            } else {
+                2
+            };
             counters.change_proposal_carriers_opened != 1
                 || counters.change_proposal_carriers_validated != 1
-                || counters.change_support_carriers_opened != 2
+                || counters.change_support_carriers_opened != expected_support_opens
         }
         _ => false,
     };
@@ -5341,9 +5529,13 @@ fn change_read_row_failed(row: &QualificationDerivedChangeReadEvidenceV1) -> boo
         || row.counter_process_scope
             != QualificationDerivedAccessProcessScopeV1::QualificationHarness
         || !row.wire_contract_matches
-        || counters.directory_entries_walked != 0
-        || counters.carrier_opens != classified_opens
-        || !matches!(counters.change_capability_carriers_opened, 0 | 2)
+        || if v6 {
+            change_read_work_failed_v6(row, expected_code, classified_opens)
+        } else {
+            counters.directory_entries_walked != 0
+                || counters.carrier_opens != classified_opens
+                || !matches!(counters.change_capability_carriers_opened, 0 | 2)
+        }
         || counters.change_proposal_carriers_validated > counters.change_proposal_carriers_opened
         || row.oracle != QualificationDerivedChangeReadOracleV1::TypedFailure
             && counters.change_proposal_carriers_opened
@@ -5357,6 +5549,85 @@ fn change_read_row_failed(row: &QualificationDerivedChangeReadEvidenceV1) -> boo
         || counters.object_artifact_reads != 0
         || counters.projection_rebuilds != 0
         || counters.state_rebuilds != 0
+}
+
+/// The entries each fault fixture's authoritative `events/` directory holds
+/// once its fault is applied: the fixture's declared inventory, fixed by the
+/// deterministic materializer (a test re-derives it), never an observed
+/// receipt count. Evaluator v6 bounds a `projection_rebuild_required`
+/// answer's recovery walk by it; any other fixture has no admitted recovery.
+pub(crate) fn qualification_derived_change_fixture_event_entries_v1(
+    fixture: QualificationDerivedChangeFixtureV1,
+) -> Option<u64> {
+    match fixture {
+        QualificationDerivedChangeFixtureV1::MissingCarrierV1 => Some(6),
+        QualificationDerivedChangeFixtureV1::MutatedCarrierV1
+        | QualificationDerivedChangeFixtureV1::WrongFamilyCarrierV1 => Some(7),
+        _ => None,
+    }
+}
+
+/// Whether a typed failure is the carrier-fault class: an existing selected
+/// carrier whose bytes fail validation after it is opened.
+fn typed_carrier_fault_v6(fixture: QualificationDerivedChangeFixtureV1, code: &str) -> bool {
+    code == "projection_invalid"
+        && matches!(
+            fixture,
+            QualificationDerivedChangeFixtureV1::MutatedCarrierV1
+                | QualificationDerivedChangeFixtureV1::WrongFamilyCarrierV1
+        )
+}
+
+/// Evaluator-v6 carrier and directory work for one Change row.
+///
+/// Every carrier open is either classified, rejected (opened, then failed
+/// validation) or recovery inventory. Ready rows keep the v5 equation with no
+/// rejection and no walk. A typed carrier fault rejects exactly the one
+/// carrier it detects. A typed `projection_rebuild_required` answer may take
+/// one inventory of the fixture's events on the first request of its process
+/// (Profile, the first required case) and nothing afterwards: a repeated
+/// request under the same key walks and opens nothing. Any other typed answer
+/// does no recovery work.
+fn change_read_work_failed_v6(
+    row: &QualificationDerivedChangeReadEvidenceV1,
+    expected_code: Option<&str>,
+    classified_opens: u64,
+) -> bool {
+    let counters = &row.counters;
+    let accounted = classified_opens.saturating_add(counters.rejected_carrier_opens);
+    if counters.carrier_opens < accounted || counters.rejected_carrier_opens > 1 {
+        return true;
+    }
+    let unclassified = counters.carrier_opens - accounted;
+    if row.oracle != QualificationDerivedChangeReadOracleV1::TypedFailure {
+        return counters.rejected_carrier_opens != 0
+            || counters.directory_entries_walked != 0
+            || unclassified != 0
+            || !matches!(counters.change_capability_carriers_opened, 0 | 2);
+    }
+    let code = expected_code.unwrap_or_default();
+    if code == "projection_rebuild_required" {
+        let first_request = row.fixture.required_cases().first() == Some(&row.case);
+        return counters.rejected_carrier_opens != 0
+            || if first_request {
+                qualification_derived_change_fixture_event_entries_v1(row.fixture)
+                    .is_none_or(|entries| counters.directory_entries_walked > entries)
+                    || unclassified > counters.directory_entries_walked
+                    || !matches!(counters.change_capability_carriers_opened, 0 | 2)
+            } else {
+                counters.directory_entries_walked != 0
+                    || counters.carrier_opens != 0
+                    || counters.change_capability_carriers_opened != 0
+            };
+    }
+    let expected_rejections = u64::from(
+        typed_carrier_fault_v6(row.fixture, code)
+            && row.case != QualificationDerivedChangeReadCaseV1::Profile,
+    );
+    counters.rejected_carrier_opens != expected_rejections
+        || counters.directory_entries_walked != 0
+        || unclassified != 0
+        || !matches!(counters.change_capability_carriers_opened, 0 | 2)
 }
 
 fn validate_hex(value: &str, width: usize, label: &str) -> Result<(), String> {
@@ -6556,6 +6827,456 @@ mod tests {
             QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_PROCEDURE_SHA256_V1,
             QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V5_PROCEDURE_SHA256_V1
         );
+    }
+
+    #[test]
+    fn evaluator_v6_procedure_extends_the_frozen_v5_prefix() {
+        assert_eq!(
+            qualification_derived_access_evaluator_v6_procedure_sha256(),
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V6_PROCEDURE_SHA256_V1
+        );
+        assert_eq!(
+            &QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V6_STEPS_V1[..9],
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V5_STEPS_V1
+        );
+        assert_eq!(
+            qualification_derived_access_evaluator_v5_procedure_sha256(),
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V5_PROCEDURE_SHA256_V1,
+            "the frozen v5 digest must not move with v6"
+        );
+        assert_ne!(
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V5_PROCEDURE_SHA256_V1,
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V6_PROCEDURE_SHA256_V1
+        );
+    }
+
+    /// One passing-shaped Change row with the given counters: the oracle,
+    /// status, code and typed document follow the frozen expected outcome.
+    fn change_row_v6(
+        platform: QualificationDerivedAccessPlatformV1,
+        fixture: QualificationDerivedChangeFixtureV1,
+        case: QualificationDerivedChangeReadCaseV1,
+        counters: LongitudinalCountersV1,
+    ) -> QualificationDerivedChangeReadEvidenceV1 {
+        let semantic = digest(&format!("{platform:?}/{fixture:?}/{case:?}"));
+        let (oracle, http_status, typed_code) =
+            qualification_derived_change_expected_outcome_v1(platform, fixture, case);
+        let typed_document = typed_code.map(|code| QualificationDerivedChangeTypedDocumentV1 {
+            schema: if code == "stale_projection" {
+                "pointbreak.inspect-change-page-error"
+            } else {
+                "pointbreak.inspect-change-projection-error"
+            }
+            .to_owned(),
+            version: 1,
+            code: code.to_owned(),
+            retryable: (code != "stale_projection").then_some(false),
+            canonical_sha256: digest(&format!("{platform:?}/{fixture:?}/{case:?}/typed")),
+        });
+        QualificationDerivedChangeReadEvidenceV1 {
+            platform,
+            fixture,
+            fixture_inventory_sha256: digest("fixture inventory"),
+            fixture_witness_sha256: digest("fixture witness"),
+            case,
+            semantic_process_scope: QualificationDerivedAccessProcessScopeV1::InspectorServiceChild,
+            counter_process_scope: QualificationDerivedAccessProcessScopeV1::QualificationHarness,
+            product_identity_sha256: digest("product"),
+            counter_execution_identity_sha256: digest("execution"),
+            status: QualificationDerivedAccessStatusV1::Passed,
+            oracle,
+            strict_semantic_sha256: (oracle
+                != QualificationDerivedChangeReadOracleV1::TypedFailure)
+                .then(|| semantic.clone()),
+            derived_semantic_sha256: semantic,
+            wire_contract_matches: true,
+            expected_http_status: http_status,
+            observed_http_status: http_status,
+            expected_code: typed_code.map(str::to_owned),
+            observed_code: typed_code.map(str::to_owned),
+            expected_typed_document: typed_document.clone(),
+            observed_typed_document: typed_document,
+            counters,
+        }
+    }
+
+    fn work(
+        directory_entries_walked: u64,
+        carrier_opens: u64,
+        capability: u64,
+        rejected: u64,
+    ) -> LongitudinalCountersV1 {
+        LongitudinalCountersV1 {
+            directory_entries_walked,
+            carrier_opens,
+            change_capability_carriers_opened: capability,
+            rejected_carrier_opens: rejected,
+            ..LongitudinalCountersV1::default()
+        }
+    }
+
+    /// Evaluator v6 admits bounded fault detection on typed rows, keeps the
+    /// Ready bounds, and v5 still refuses the same rows exactly as before.
+    #[test]
+    fn evaluator_v6_bounds_typed_failures_by_accounting_and_once_per_key_recovery() {
+        use QualificationDerivedAccessPlatformV1::{MacosApfs, WindowsNtfs};
+        use QualificationDerivedChangeFixtureV1 as Fixture;
+        use QualificationDerivedChangeReadCaseV1 as Case;
+        let v5 =
+            |row: &QualificationDerivedChangeReadEvidenceV1| change_read_row_failed(row, false);
+        let v6 = |row: &QualificationDerivedChangeReadEvidenceV1| change_read_row_failed(row, true);
+
+        // Missing carrier: the first request takes one inventory of the
+        // fixture's six events and validates the pair once; every later
+        // request under the same key walks and opens nothing.
+        let first = change_row_v6(
+            MacosApfs,
+            Fixture::MissingCarrierV1,
+            Case::Profile,
+            work(6, 8, 2, 0),
+        );
+        assert!(!v6(&first));
+        assert!(v5(&first), "v5 keeps refusing any typed-row walk");
+        for case in [
+            Case::ChangesBare,
+            Case::AttentionBounded,
+            Case::SummaryQuery,
+        ] {
+            assert!(!v6(&change_row_v6(
+                MacosApfs,
+                Fixture::MissingCarrierV1,
+                case,
+                work(0, 0, 0, 0)
+            )));
+            // Repeating the inventory under an unchanged key is refused.
+            assert!(v6(&change_row_v6(
+                MacosApfs,
+                Fixture::MissingCarrierV1,
+                case,
+                work(6, 8, 2, 0)
+            )));
+        }
+        // More than one inventory, or unclassified opens beyond the walk.
+        assert!(v6(&change_row_v6(
+            MacosApfs,
+            Fixture::MissingCarrierV1,
+            Case::Profile,
+            work(7, 9, 2, 0)
+        )));
+        assert!(v6(&change_row_v6(
+            MacosApfs,
+            Fixture::MissingCarrierV1,
+            Case::Profile,
+            work(6, 9, 2, 0)
+        )));
+        // Validating the pair twice is refused.
+        assert!(v6(&change_row_v6(
+            MacosApfs,
+            Fixture::MissingCarrierV1,
+            Case::Profile,
+            work(6, 10, 4, 0)
+        )));
+        // NTFS answers rebuild_required for a mutated carrier: its inventory
+        // is the fixture's seven events.
+        assert!(!v6(&change_row_v6(
+            WindowsNtfs,
+            Fixture::MutatedCarrierV1,
+            Case::Profile,
+            work(7, 9, 2, 0)
+        )));
+        assert!(v6(&change_row_v6(
+            WindowsNtfs,
+            Fixture::MutatedCarrierV1,
+            Case::Profile,
+            work(8, 10, 2, 0)
+        )));
+
+        // Mutated or wrong-family carrier on APFS: the one opened carrier is
+        // rejected by validation, never classified.
+        for fixture in [Fixture::MutatedCarrierV1, Fixture::WrongFamilyCarrierV1] {
+            for case in [Case::ChangesBare, Case::AttentionBare, Case::SummaryQuery] {
+                let detected = LongitudinalCountersV1 {
+                    change_candidates: 1,
+                    change_candidate_current_revisions: 1,
+                    ..work(0, 1, 0, 1)
+                };
+                let row = change_row_v6(MacosApfs, fixture, case, detected.clone());
+                assert!(!v6(&row), "{fixture:?}/{case:?}");
+                assert!(v5(&row), "{fixture:?}/{case:?} stays refused by v5");
+                for wrong in [
+                    LongitudinalCountersV1 {
+                        rejected_carrier_opens: 0,
+                        ..detected.clone()
+                    },
+                    LongitudinalCountersV1 {
+                        rejected_carrier_opens: 2,
+                        carrier_opens: 2,
+                        ..detected.clone()
+                    },
+                    LongitudinalCountersV1 {
+                        directory_entries_walked: 1,
+                        ..detected.clone()
+                    },
+                    LongitudinalCountersV1 {
+                        carrier_opens: 2,
+                        ..detected.clone()
+                    },
+                ] {
+                    assert!(
+                        v6(&change_row_v6(MacosApfs, fixture, case, wrong)),
+                        "{fixture:?}/{case:?}"
+                    );
+                }
+            }
+        }
+
+        // Ready rows keep the page-proportional bounds and reject nothing.
+        let ready = LongitudinalCountersV1 {
+            change_candidates: 1,
+            change_candidate_current_revisions: 1,
+            change_proposal_carriers_opened: 2,
+            change_proposal_carriers_validated: 2,
+            change_rows_emitted: 1,
+            carrier_opens: 2,
+            ..LongitudinalCountersV1::default()
+        };
+        let ready_row = change_row_v6(
+            MacosApfs,
+            Fixture::DuplicateEqualV1,
+            Case::ChangesBare,
+            ready.clone(),
+        );
+        assert!(!v6(&ready_row) && !v5(&ready_row));
+        for wrong in [
+            LongitudinalCountersV1 {
+                rejected_carrier_opens: 1,
+                carrier_opens: 3,
+                ..ready.clone()
+            },
+            LongitudinalCountersV1 {
+                directory_entries_walked: 1,
+                ..ready.clone()
+            },
+            LongitudinalCountersV1 {
+                carrier_opens: 3,
+                ..ready.clone()
+            },
+        ] {
+            assert!(v6(&change_row_v6(
+                MacosApfs,
+                Fixture::DuplicateEqualV1,
+                Case::ChangesBare,
+                wrong
+            )));
+        }
+
+        // A summary query that matches nothing hydrates no support carriers.
+        let unmatched_query = LongitudinalCountersV1 {
+            change_candidates: 1,
+            change_candidate_current_revisions: 1,
+            change_proposal_carriers_opened: 1,
+            change_proposal_carriers_validated: 1,
+            carrier_opens: 1,
+            ..LongitudinalCountersV1::default()
+        };
+        let removal_query = change_row_v6(
+            MacosApfs,
+            Fixture::RemovalV1,
+            Case::SummaryQuery,
+            unmatched_query.clone(),
+        );
+        assert!(!v6(&removal_query));
+        assert!(
+            v5(&removal_query),
+            "v5 keeps its historical support requirement"
+        );
+        let matched_without_support = LongitudinalCountersV1 {
+            change_matches: 1,
+            ..unmatched_query
+        };
+        assert!(v6(&change_row_v6(
+            MacosApfs,
+            Fixture::RemovalV1,
+            Case::SummaryQuery,
+            matched_without_support
+        )));
+
+        // The prohibitions hold for typed rows too.
+        for prohibited in [
+            LongitudinalCountersV1 {
+                projection_rebuilds: 1,
+                ..work(6, 8, 2, 0)
+            },
+            LongitudinalCountersV1 {
+                full_history_fallbacks: 1,
+                ..work(6, 8, 2, 0)
+            },
+            LongitudinalCountersV1 {
+                event_folds: 1,
+                ..work(6, 8, 2, 0)
+            },
+            LongitudinalCountersV1 {
+                body_artifact_reads: 1,
+                ..work(6, 8, 2, 0)
+            },
+        ] {
+            assert!(v6(&change_row_v6(
+                MacosApfs,
+                Fixture::MissingCarrierV1,
+                Case::Profile,
+                prohibited
+            )));
+        }
+    }
+
+    #[test]
+    fn evaluator_v6_timeline_fault_bounds_account_for_the_rejected_carrier() {
+        use QualificationDerivedChangeFixtureV1 as Fixture;
+        use QualificationDerivedTimelineReadCaseV1::StructuredQuerySuite;
+        let fault = "timeline_fault_outcome";
+        let invalid = |fixture| Some((fixture, "projection_invalid"));
+        let rebuild = |fixture| Some((fixture, "projection_rebuild_required"));
+
+        // Receipt shape: five rows selected, three validated, the fourth open
+        // rejected, the fifth never opened.
+        let detected = LongitudinalCountersV1 {
+            timeline_sqlite_candidates: 5,
+            timeline_sqlite_window_rows: 5,
+            timeline_selected_carriers: 5,
+            carrier_opens: 4,
+            event_validations: 3,
+            rejected_carrier_opens: 1,
+            ..LongitudinalCountersV1::default()
+        };
+        for fixture in [Fixture::MutatedCarrierV1, Fixture::WrongFamilyCarrierV1] {
+            assert!(timeline_counter_bounds_hold_v6(
+                StructuredQuerySuite,
+                fault,
+                &detected,
+                invalid(fixture)
+            ));
+            assert!(!timeline_counter_bounds_hold_v1(
+                StructuredQuerySuite,
+                fault,
+                &detected
+            ));
+            // A cold child also validates the capability pair once.
+            let cold = LongitudinalCountersV1 {
+                carrier_opens: 6,
+                change_capability_carriers_opened: 2,
+                ..detected.clone()
+            };
+            assert!(timeline_counter_bounds_hold_v6(
+                StructuredQuerySuite,
+                fault,
+                &cold,
+                invalid(fixture)
+            ));
+            for wrong in [
+                LongitudinalCountersV1 {
+                    rejected_carrier_opens: 0,
+                    event_validations: 4,
+                    ..detected.clone()
+                },
+                LongitudinalCountersV1 {
+                    carrier_opens: 6,
+                    event_validations: 5,
+                    ..detected.clone()
+                },
+                LongitudinalCountersV1 {
+                    directory_entries_walked: 1,
+                    ..detected.clone()
+                },
+                LongitudinalCountersV1 {
+                    timeline_entries_emitted: 1,
+                    ..detected.clone()
+                },
+                LongitudinalCountersV1 {
+                    timeline_sqlite_window_rows: 101,
+                    timeline_sqlite_candidates: 101,
+                    timeline_selected_carriers: 101,
+                    ..detected.clone()
+                },
+                LongitudinalCountersV1 {
+                    full_history_fallbacks: 1,
+                    ..detected.clone()
+                },
+            ] {
+                assert!(!timeline_counter_bounds_hold_v6(
+                    StructuredQuerySuite,
+                    fault,
+                    &wrong,
+                    invalid(fixture)
+                ));
+            }
+        }
+
+        // Missing carrier: nothing selected, one inventory, one pair.
+        let recovery = work(6, 8, 2, 0);
+        assert!(timeline_counter_bounds_hold_v6(
+            StructuredQuerySuite,
+            fault,
+            &recovery,
+            rebuild(Fixture::MissingCarrierV1)
+        ));
+        assert!(!timeline_counter_bounds_hold_v1(
+            StructuredQuerySuite,
+            fault,
+            &recovery
+        ));
+        for wrong in [
+            work(7, 9, 2, 0),
+            work(6, 9, 2, 0),
+            work(6, 10, 4, 0),
+            work(6, 8, 2, 1),
+        ] {
+            assert!(!timeline_counter_bounds_hold_v6(
+                StructuredQuerySuite,
+                fault,
+                &wrong,
+                rebuild(Fixture::MissingCarrierV1)
+            ));
+        }
+        // A fixture without a declared inventory admits no recovery walk.
+        assert!(!timeline_counter_bounds_hold_v6(
+            StructuredQuerySuite,
+            fault,
+            &recovery,
+            rebuild(Fixture::TopologyV1)
+        ));
+
+        // Every other Timeline operation keeps the v1 bounds and rejects nothing.
+        let ready = LongitudinalCountersV1 {
+            timeline_sqlite_candidates: 2,
+            timeline_sqlite_window_rows: 2,
+            timeline_selected_carriers: 2,
+            timeline_trust_support_carriers: 2,
+            timeline_entries_emitted: 2,
+            carrier_opens: 2,
+            event_validations: 2,
+            ..LongitudinalCountersV1::default()
+        };
+        assert!(timeline_counter_bounds_hold_v1(
+            StructuredQuerySuite,
+            "timeline_all_asc",
+            &ready
+        ));
+        assert!(timeline_counter_bounds_hold_v6(
+            StructuredQuerySuite,
+            "timeline_all_asc",
+            &ready,
+            None
+        ));
+        let rejected = LongitudinalCountersV1 {
+            rejected_carrier_opens: 1,
+            ..ready
+        };
+        assert!(!timeline_counter_bounds_hold_v6(
+            StructuredQuerySuite,
+            "timeline_all_asc",
+            &rejected,
+            None
+        ));
     }
 
     #[test]

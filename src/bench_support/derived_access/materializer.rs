@@ -2438,6 +2438,39 @@ mod change_fixture_tests {
         );
     }
 
+    /// Evaluator v6 bounds a rebuild-required answer's recovery walk by each
+    /// fault fixture's declared event inventory; re-derive that table from
+    /// the materialized fixtures so it can never drift into an observed count.
+    #[test]
+    fn fault_fixture_event_inventories_match_the_evaluator_recovery_table() {
+        use crate::bench_support::derived_access::qualification_derived_change_fixture_event_entries_v1;
+
+        let parent = tempfile::tempdir().expect("fixture parent");
+        for kind in QualificationDerivedChangeFixtureKindV1::ALL {
+            let root = parent.path().join(kind.fixture_id());
+            materialize_qualification_derived_change_fixture_v1(
+                QualificationDerivedChangeFixtureRequestV1::new(&root, kind),
+            )
+            .expect("materialize Change fixture");
+            let declared =
+                qualification_derived_change_fixture_event_entries_v1(kind.contract_fixture());
+            let fault_fixture = matches!(
+                kind,
+                QualificationDerivedChangeFixtureKindV1::MissingSelectedCarrier
+                    | QualificationDerivedChangeFixtureKindV1::MutatedSelectedCarrier
+                    | QualificationDerivedChangeFixtureKindV1::WrongFamilySelectedCarrier
+            );
+            if !fault_fixture {
+                assert_eq!(declared, None, "{kind:?} admits no recovery walk");
+                continue;
+            }
+            let entries = std::fs::read_dir(root.join(".git/pointbreak/events"))
+                .expect("fixture events directory")
+                .count() as u64;
+            assert_eq!(declared, Some(entries), "{kind:?}");
+        }
+    }
+
     #[test]
     fn change_fixtures_exercise_their_declared_derived_outcomes() {
         let parent = tempfile::tempdir().expect("fixture parent");

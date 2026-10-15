@@ -4178,9 +4178,10 @@ pub(super) fn validate_summaries_against_raw(
                 package.evaluator_revision.as_str(),
                 super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4
                     | super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
+                    | super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6
             ) =>
         {
-            return Err("V2 Change receipt requires evaluator v4 or v5".to_owned());
+            return Err("V2 Change receipt requires evaluator v4, v5 or v6".to_owned());
         }
         _ => {}
     }
@@ -4318,6 +4319,10 @@ pub fn build_qualification_derived_access_fragment_v1(
             super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5,
             super::qualification_derived_access_evaluator_v5_procedure_sha256(),
         ),
+        super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6 => (
+            super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6,
+            super::qualification_derived_access_evaluator_v6_procedure_sha256(),
+        ),
         _ => {
             return Err(
                 "derived-access fragment request names an unsupported evaluator revision"
@@ -4393,11 +4398,13 @@ pub fn build_qualification_derived_access_fragment_v1(
                 if receipt.base.execution != request.execution {
                     return Err("Change read successor receipt authority drifted".to_owned());
                 }
-                // A successor receipt lifts a v3 request to v4; a v5 request
-                // keeps its own procedure binding.
-                if package.evaluator_revision
-                    != super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
-                {
+                // A successor receipt lifts a v3 request to v4; a v5 or v6
+                // request keeps its own procedure binding.
+                if !matches!(
+                    package.evaluator_revision.as_str(),
+                    super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
+                        | super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V6
+                ) {
                     package.evaluator_revision =
                         super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4.to_owned();
                     package.evaluator_procedure_sha256 =
