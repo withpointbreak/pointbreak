@@ -11503,6 +11503,8 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       }
     }
     const supported = new Set(status?.actions ?? []);
+    const canRecheck = status === null && view.error !== null;
+    if (canRecheck) supported.add("wait");
     const buttons = [
       ["wait", "wait", callbacks.wait],
       ["fallback", "authoritative_fallback", callbacks.fallback],
@@ -11512,8 +11514,10 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     for (const [name, action, callback] of buttons) {
       const button2 = find(`#derived-access-${name}`);
       if (button2 === null) continue;
+      if (name === "wait")
+        button2.textContent = view.statusPending ? "Checking status…" : canRecheck ? "Check status again" : "wait";
       button2.classList.toggle("hidden", !supported.has(action));
-      button2.disabled = view.pending !== null || status?.fallbackInFlight === true;
+      button2.disabled = view.pending !== null || status?.fallbackInFlight === true || name === "wait" && view.statusPending;
       button2.onclick = callback;
     }
     const derived = find("#derived-access-use-derived");
@@ -11596,6 +11600,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
   var EXACT_READING_HARD_BUDGET_MS = 3e4;
   var EXACT_POSTFLIGHT_TIMEOUT_MS = 3e3;
   var IDENTITY_TIMEOUT_MS = 3e3;
+  var RECOVERY_STATUS_TIMEOUT_MS = 1e4;
   var GENERATION_LOAD_TIMEOUT_MS = 3e4;
   var POLL_HEALTHY_INTERVAL_MS = 3e3;
   var POLL_BACKOFF_CAP_MS = 3e4;
@@ -11896,58 +11901,89 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         error: recoveryError,
         access,
         fallbackValidated,
-        pending: recoveryPending
+        pending: recoveryPending,
+        statusPending: recoveryController !== null && !recoveryController.signal.aborted
       },
       {
-        wait: /* @__PURE__ */ __name(() => void refreshRecoveryStatus(), "wait"),
+        wait: /* @__PURE__ */ __name(() => {
+          if (recoveryController === null || recoveryController.signal.aborted)
+            void refreshRecoveryStatus();
+        }, "wait"),
         fallback: /* @__PURE__ */ __name(() => selectRecoveryAccess("authoritative"), "fallback"),
         derived: /* @__PURE__ */ __name(() => selectRecoveryAccess("derived"), "derived"),
         retry: /* @__PURE__ */ __name(() => void controlRecovery("retry"), "retry"),
         cancel: /* @__PURE__ */ __name(() => void controlRecovery("cancel"), "cancel")
       }
     ), "renderRecovery");
+    const acceptRecoveryStatus = /* @__PURE__ */ __name((decoded2) => {
+      const becameCurrent = decoded2.servingCurrent && (recoveryStatus?.servingCurrent !== true || recoveryStatus.rebuildInFlight);
+      const completedRebuild = decoded2.child?.lastCompletedKind === "rebuild" && decoded2.child.lastCompletedOutcome === "succeeded" && decoded2.child.state === "completed" && decoded2.child.lastCompletedRequestId !== recoveryStatus?.child?.lastCompletedRequestId;
+      recoveryStatus = decoded2;
+      recoveryError = null;
+      renderRecovery();
+      if (becameCurrent || completedRebuild) reloadSelectedAccess();
+    }, "acceptRecoveryStatus");
     const refreshRecoveryStatus = /* @__PURE__ */ __name(async () => {
+      if (recoveryTimer !== null) clearTimeout(recoveryTimer);
+      recoveryTimer = null;
       const observation = ++recoveryObservationEpoch;
       const credentialVersion2 = sessionCredentialVersion();
-      const wasBuilding = recoveryStatus?.rebuildInFlight === true;
-      const previousCompleted = recoveryStatus?.child?.lastCompletedRequestId;
       recoveryController?.abort("superseded");
       const controller = new AbortController();
       recoveryController = controller;
+      renderRecovery();
+      let onAbort;
+      const aborted = new Promise((_resolve, reject) => {
+        onAbort = /* @__PURE__ */ __name(() => reject(new ChangeInspectorRequestFailure("aborted")), "onAbort");
+        controller.signal.addEventListener("abort", onAbort, { once: true });
+      });
+      const deadline = setTimeout(
+        () => controller.abort("timeout"),
+        RECOVERY_STATUS_TIMEOUT_MS
+      );
       try {
         const decoded2 = decodeChangeRecoveryStatus(
-          await fetchChangeInspectorJSON("/api/derived-access/status", {
-            reportConnection: false,
-            signal: controller.signal
-          })
+          await Promise.race([
+            fetchChangeInspectorJSON("/api/derived-access/status", {
+              reportConnection: false,
+              signal: controller.signal
+            }),
+            aborted
+          ])
         );
         if (decoded2 === null) throw new Error("unsupported recovery status");
         if (observation !== recoveryObservationEpoch || credentialSessionChanged(credentialVersion2) || !isCurrentComposition())
           return;
-        recoveryStatus = decoded2;
-        recoveryError = null;
-        renderRecovery();
-        if (wasBuilding && decoded2.servingCurrent || decoded2.child?.lastCompletedKind === "rebuild" && decoded2.child.lastCompletedOutcome === "succeeded" && decoded2.child.state === "completed" && decoded2.child.lastCompletedRequestId !== previousCompleted)
-          reloadSelectedAccess();
+        acceptRecoveryStatus(decoded2);
       } catch (error) {
-        if (controller.signal.aborted || observation !== recoveryObservationEpoch)
+        if (observation !== recoveryObservationEpoch || credentialSessionChanged(credentialVersion2) || !isCurrentComposition() || controller.signal.aborted && controller.signal.reason !== "timeout")
           return;
         recoveryStatus = null;
-        recoveryError = error instanceof Error ? error.message : String(error);
+        recoveryError = controller.signal.reason === "timeout" ? "Status check timed out" : error instanceof Error ? error.message : String(error);
         renderRecovery();
       } finally {
-        if (recoveryController === controller) recoveryController = null;
-        if (recoveryTimer !== null) clearTimeout(recoveryTimer);
-        recoveryTimer = isCurrentComposition() && recoveryPending === null && (recoveryStatus?.rebuildInFlight || recoveryStatus?.child?.observationPending || ["starting", "initializing", "running"].includes(
-          recoveryStatus?.child?.state ?? ""
-        )) ? setTimeout(() => void refreshRecoveryStatus(), 750) : null;
+        clearTimeout(deadline);
+        controller.signal.removeEventListener("abort", onAbort);
+        if (recoveryController === controller) {
+          recoveryController = null;
+          if (isCurrentComposition()) {
+            renderRecovery();
+            if (recoveryTimer !== null) clearTimeout(recoveryTimer);
+            recoveryTimer = recoveryPending === null && (recoveryStatus?.rebuildInFlight || recoveryStatus?.child?.observationPending || ["starting", "initializing", "running"].includes(
+              recoveryStatus?.child?.state ?? ""
+            )) ? setTimeout(() => void refreshRecoveryStatus(), 750) : null;
+          }
+        }
       }
     }, "refreshRecoveryStatus");
     const controlRecovery = /* @__PURE__ */ __name(async (action) => {
       if (recoveryPending !== null) return;
       recoveryPending = action;
       recoveryController?.abort("control");
+      if (recoveryTimer !== null) clearTimeout(recoveryTimer);
+      recoveryTimer = null;
       recoveryObservationEpoch += 1;
+      const credentialVersion2 = sessionCredentialVersion();
       renderRecovery();
       try {
         const path = action === "retry" ? "/api/derived-access/retry" : "/api/derived-access/cancel";
@@ -11958,16 +11994,22 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           })
         );
         if (decoded2 === null) throw new Error("unsupported recovery status");
-        recoveryStatus = decoded2;
-        recoveryError = null;
+        if (!isCurrentComposition() || credentialSessionChanged(credentialVersion2))
+          return;
+        acceptRecoveryStatus(decoded2);
       } catch (error) {
+        if (!isCurrentComposition() || credentialSessionChanged(credentialVersion2))
+          return;
         recoveryStatus = null;
         recoveryError = error instanceof Error ? error.message : String(error);
       } finally {
-        recoveryPending = null;
-        recoveryObservationEpoch += 1;
-        renderRecovery();
-        void refreshRecoveryStatus();
+        if (isCurrentComposition()) {
+          recoveryPending = null;
+          recoveryObservationEpoch += 1;
+          renderRecovery();
+          if (!credentialSessionChanged(credentialVersion2))
+            void refreshRecoveryStatus();
+        }
       }
     }, "controlRecovery");
     recoveryStop = /* @__PURE__ */ __name(() => {

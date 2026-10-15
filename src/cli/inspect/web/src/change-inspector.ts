@@ -123,6 +123,7 @@ const EXACT_READING_SOFT_BUDGET_MS = 10_000;
 const EXACT_READING_HARD_BUDGET_MS = 30_000;
 const EXACT_POSTFLIGHT_TIMEOUT_MS = 3_000;
 const IDENTITY_TIMEOUT_MS = 3_000;
+const RECOVERY_STATUS_TIMEOUT_MS = 10_000;
 const GENERATION_LOAD_TIMEOUT_MS = 30_000;
 const POLL_HEALTHY_INTERVAL_MS = 3_000;
 const POLL_BACKOFF_CAP_MS = 30_000;
@@ -473,29 +474,68 @@ export async function bootstrapChangeInspector(
         access,
         fallbackValidated,
         pending: recoveryPending,
+        statusPending:
+          recoveryController !== null && !recoveryController.signal.aborted,
       },
       {
-        wait: () => void refreshRecoveryStatus(),
+        wait: () => {
+          if (recoveryController === null || recoveryController.signal.aborted)
+            void refreshRecoveryStatus();
+        },
         fallback: () => selectRecoveryAccess("authoritative"),
         derived: () => selectRecoveryAccess("derived"),
         retry: () => void controlRecovery("retry"),
         cancel: () => void controlRecovery("cancel"),
       },
     );
+  const acceptRecoveryStatus = (decoded: ChangeRecoveryStatus): void => {
+    // A fast rebuild can finish between observations, including in the retry
+    // response itself. Re-read through the normal currentness checks once;
+    // recovery status alone never authorizes publishing a reading.
+    const becameCurrent =
+      decoded.servingCurrent &&
+      (recoveryStatus?.servingCurrent !== true ||
+        recoveryStatus.rebuildInFlight);
+    const completedRebuild =
+      decoded.child?.lastCompletedKind === "rebuild" &&
+      decoded.child.lastCompletedOutcome === "succeeded" &&
+      decoded.child.state === "completed" &&
+      decoded.child.lastCompletedRequestId !==
+        recoveryStatus?.child?.lastCompletedRequestId;
+    recoveryStatus = decoded;
+    recoveryError = null;
+    renderRecovery();
+    if (becameCurrent || completedRebuild) reloadSelectedAccess();
+  };
   const refreshRecoveryStatus = async (): Promise<void> => {
+    // This observation replaces any queued rebuild poll, including when the
+    // reader explicitly checks status before that poll's deadline.
+    if (recoveryTimer !== null) clearTimeout(recoveryTimer);
+    recoveryTimer = null;
     const observation = ++recoveryObservationEpoch;
     const credentialVersion = sessionCredentialVersion();
-    const wasBuilding = recoveryStatus?.rebuildInFlight === true;
-    const previousCompleted = recoveryStatus?.child?.lastCompletedRequestId;
     recoveryController?.abort("superseded");
     const controller = new AbortController();
     recoveryController = controller;
+    renderRecovery();
+    let onAbort!: () => void;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(new ChangeInspectorRequestFailure("aborted"));
+      controller.signal.addEventListener("abort", onAbort, { once: true });
+    });
+    const deadline = setTimeout(
+      () => controller.abort("timeout"),
+      RECOVERY_STATUS_TIMEOUT_MS,
+    );
     try {
       const decoded = decodeChangeRecoveryStatus(
-        await fetchChangeInspectorJSON("/api/derived-access/status", {
-          reportConnection: false,
-          signal: controller.signal,
-        }),
+        await Promise.race([
+          fetchChangeInspectorJSON("/api/derived-access/status", {
+            reportConnection: false,
+            signal: controller.signal,
+          }),
+          aborted,
+        ]),
       );
       if (decoded === null) throw new Error("unsupported recovery status");
       if (
@@ -504,43 +544,54 @@ export async function bootstrapChangeInspector(
         !isCurrentComposition()
       )
         return;
-      recoveryStatus = decoded;
-      recoveryError = null;
-      renderRecovery();
-      if (
-        (wasBuilding && decoded.servingCurrent) ||
-        (decoded.child?.lastCompletedKind === "rebuild" &&
-          decoded.child.lastCompletedOutcome === "succeeded" &&
-          decoded.child.state === "completed" &&
-          decoded.child.lastCompletedRequestId !== previousCompleted)
-      )
-        reloadSelectedAccess();
+      acceptRecoveryStatus(decoded);
     } catch (error) {
-      if (controller.signal.aborted || observation !== recoveryObservationEpoch)
+      if (
+        observation !== recoveryObservationEpoch ||
+        credentialSessionChanged(credentialVersion) ||
+        !isCurrentComposition() ||
+        (controller.signal.aborted && controller.signal.reason !== "timeout")
+      )
         return;
       recoveryStatus = null;
-      recoveryError = error instanceof Error ? error.message : String(error);
+      recoveryError =
+        controller.signal.reason === "timeout"
+          ? "Status check timed out"
+          : error instanceof Error
+            ? error.message
+            : String(error);
       renderRecovery();
     } finally {
-      if (recoveryController === controller) recoveryController = null;
-      if (recoveryTimer !== null) clearTimeout(recoveryTimer);
-      recoveryTimer =
-        isCurrentComposition() &&
-        recoveryPending === null &&
-        (recoveryStatus?.rebuildInFlight ||
-          recoveryStatus?.child?.observationPending ||
-          ["starting", "initializing", "running"].includes(
-            recoveryStatus?.child?.state ?? "",
-          ))
-          ? setTimeout(() => void refreshRecoveryStatus(), 750)
-          : null;
+      clearTimeout(deadline);
+      controller.signal.removeEventListener("abort", onAbort);
+      // Only the owning observation may clear the pending UI or reschedule.
+      // A superseded request can finish after its replacement has started.
+      if (recoveryController === controller) {
+        recoveryController = null;
+        if (isCurrentComposition()) {
+          renderRecovery();
+          if (recoveryTimer !== null) clearTimeout(recoveryTimer);
+          recoveryTimer =
+            recoveryPending === null &&
+            (recoveryStatus?.rebuildInFlight ||
+              recoveryStatus?.child?.observationPending ||
+              ["starting", "initializing", "running"].includes(
+                recoveryStatus?.child?.state ?? "",
+              ))
+              ? setTimeout(() => void refreshRecoveryStatus(), 750)
+              : null;
+        }
+      }
     }
   };
   const controlRecovery = async (action: "retry" | "cancel"): Promise<void> => {
     if (recoveryPending !== null) return;
     recoveryPending = action;
     recoveryController?.abort("control");
+    if (recoveryTimer !== null) clearTimeout(recoveryTimer);
+    recoveryTimer = null;
     recoveryObservationEpoch += 1;
+    const credentialVersion = sessionCredentialVersion();
     renderRecovery();
     try {
       const path =
@@ -554,16 +605,28 @@ export async function bootstrapChangeInspector(
         }),
       );
       if (decoded === null) throw new Error("unsupported recovery status");
-      recoveryStatus = decoded;
-      recoveryError = null;
+      if (
+        !isCurrentComposition() ||
+        credentialSessionChanged(credentialVersion)
+      )
+        return;
+      acceptRecoveryStatus(decoded);
     } catch (error) {
+      if (
+        !isCurrentComposition() ||
+        credentialSessionChanged(credentialVersion)
+      )
+        return;
       recoveryStatus = null;
       recoveryError = error instanceof Error ? error.message : String(error);
     } finally {
-      recoveryPending = null;
-      recoveryObservationEpoch += 1;
-      renderRecovery();
-      void refreshRecoveryStatus();
+      if (isCurrentComposition()) {
+        recoveryPending = null;
+        recoveryObservationEpoch += 1;
+        renderRecovery();
+        if (!credentialSessionChanged(credentialVersion))
+          void refreshRecoveryStatus();
+      }
     }
   };
   recoveryStop = () => {

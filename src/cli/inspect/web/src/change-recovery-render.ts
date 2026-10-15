@@ -10,6 +10,7 @@ export interface ChangeRecoveryPresentation {
   access: ChangeInspectorAccess;
   fallbackValidated: boolean;
   pending: "fallback" | "derived" | "retry" | "cancel" | null;
+  statusPending: boolean;
 }
 
 export type ChangeRecoveryActions = Record<
@@ -94,6 +95,10 @@ export function renderChangeRecovery(
     }
   }
   const supported = new Set<ChangeRecoveryAction>(status?.actions ?? []);
+  // Re-observing status is read-only; server-controlled recovery actions still
+  // require a fresh status response advertising them.
+  const canRecheck = status === null && view.error !== null;
+  if (canRecheck) supported.add("wait");
   const buttons = [
     ["wait", "wait", callbacks.wait],
     ["fallback", "authoritative_fallback", callbacks.fallback],
@@ -103,9 +108,17 @@ export function renderChangeRecovery(
   for (const [name, action, callback] of buttons) {
     const button = find<HTMLButtonElement>(`#derived-access-${name}`);
     if (button === null) continue;
+    if (name === "wait")
+      button.textContent = view.statusPending
+        ? "Checking status…"
+        : canRecheck
+          ? "Check status again"
+          : "wait";
     button.classList.toggle("hidden", !supported.has(action));
     button.disabled =
-      view.pending !== null || status?.fallbackInFlight === true;
+      view.pending !== null ||
+      status?.fallbackInFlight === true ||
+      (name === "wait" && view.statusPending);
     button.onclick = callback;
   }
   const derived = find<HTMLButtonElement>("#derived-access-use-derived");
