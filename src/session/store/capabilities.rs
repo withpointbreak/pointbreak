@@ -1948,11 +1948,13 @@ fn build_signed_activation_for(
 
 /// Closed enrollment-only signed pair. Ordinary capability readers still call
 /// the old-profile validators; constructing this value grants no store admission.
+#[cfg(any(target_os = "macos", windows))]
 pub(crate) struct ProgressPair {
     pub(crate) activation: StoreCapabilityActivationV1,
     pub(crate) completion: BulkAdoptionCompletionV1,
 }
 
+#[cfg(any(target_os = "macos", windows))]
 impl ProgressPair {
     pub(crate) fn actor(&self) -> &str {
         self.activation.writer.actor_id.as_str()
@@ -1965,6 +1967,7 @@ impl ProgressPair {
     }
 }
 
+#[cfg(any(target_os = "macos", windows))]
 fn empty_progress_cursor() -> Result<AuthorityCursorV2> {
     authority_cursor(
         0,
@@ -1978,6 +1981,7 @@ fn empty_progress_cursor() -> Result<AuthorityCursorV2> {
     )
 }
 
+#[cfg(any(target_os = "macos", windows))]
 pub(crate) fn validate_progress_pair(activation: &[u8], completion: &[u8]) -> Result<ProgressPair> {
     let a: StoreCapabilityActivationV1 = serde_json::from_slice(activation)?;
     let c: BulkAdoptionCompletionV1 = serde_json::from_slice(completion)?;
@@ -2005,6 +2009,7 @@ pub(crate) fn validate_progress_pair(activation: &[u8], completion: &[u8]) -> Re
     })
 }
 
+#[cfg(any(target_os = "macos", windows))]
 pub(crate) fn build_progress_pair(
     signer: &(impl EventSigner + ?Sized),
     writer: Writer,

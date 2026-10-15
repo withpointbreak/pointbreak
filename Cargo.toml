@@ -65,6 +65,9 @@ required-features = ["bench"]
 # remains the runtime escape hatch. Build with `--no-default-features` for the
 # subprocess-only single-variant backend.
 default = ["gix"]
+# Explicit opt-in for the irreversible, unqualified owned-process argv entries.
+# This gates command dispatch, not the internal SQLite dependency or native ABI.
+experimental-enrolled-progress = []
 # Exposes the developer-run `bench_support` harnesses to benchmark crates. Off
 # by default and never enabled in a release build, so the harnesses stay out of
 # the published surface. The dormant product SQLite implementation is in the

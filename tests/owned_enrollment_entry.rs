@@ -1,4 +1,7 @@
-#![cfg(any(target_os = "macos", windows))]
+#![cfg(all(
+    feature = "experimental-enrolled-progress",
+    any(target_os = "macos", windows)
+))]
 
 use std::io::Write;
 use std::path::Path;

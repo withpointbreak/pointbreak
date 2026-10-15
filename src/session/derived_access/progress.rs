@@ -1,10 +1,26 @@
 //! Private C7 binding; it supplements, never replaces, the full authority cursor.
 use serde::{Deserialize, Serialize};
 
-use crate::canonical_hash::{canonical_json_bytes, sha256_json_hex};
+use crate::canonical_hash::canonical_json_bytes;
+#[cfg(target_os = "macos")]
+use crate::canonical_hash::sha256_json_hex;
 use crate::error::{Result, ShoreError};
 use crate::session::store::backend::JournalChangeStamp;
+#[cfg(target_os = "macos")]
 use crate::session::store::capabilities::AuthorityCursorV2;
+
+/// Shared derived-access loops also run on platforms without an owned process.
+/// Preserve the native cancellation checkpoint where that owner exists.
+pub(crate) fn data_work_checkpoint() -> Result<()> {
+    #[cfg(any(target_os = "macos", windows))]
+    {
+        crate::session::append_progress::data_work_checkpoint()
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        Ok(())
+    }
+}
 
 const SCHEMA: &str = "pointbreak.append-progress-projection-binding";
 
@@ -32,7 +48,7 @@ fn refused() -> ShoreError {
 }
 
 impl ProgressProjectionBindingV1 {
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(target_os = "macos")]
     pub(crate) fn from_observation(
         observed: &crate::session::append_progress::ProgressReadFence,
         generation_id: &str,
@@ -103,7 +119,7 @@ impl ProgressProjectionBindingV1 {
         Ok(())
     }
 
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(target_os = "macos")]
     pub(crate) fn validate(
         &self,
         observed: &crate::session::append_progress::ProgressReadFence,

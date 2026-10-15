@@ -2088,6 +2088,7 @@ impl SqliteSemantic {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn validate_enrolled_checkpoint_on(
         connection: &Connection,
         head: TruthCursor,
@@ -2098,6 +2099,7 @@ impl SqliteSemantic {
 
     /// Called only inside the fresh enrolled staging owner's fixed population.
     /// No connection is opened here and neither row can be installed alone.
+    #[cfg(target_os = "macos")]
     pub(crate) fn seed_enrolled_reader_checkpoint_on(
         connection: &Connection,
         checkpoint: &ReaderProjectionCheckpointV1,
@@ -2211,6 +2213,7 @@ impl SqliteSemantic {
 
     /// Fresh full rebuild only. It never hydrates a carrier or opens a second
     /// connection while the native owner is live.
+    #[cfg(target_os = "macos")]
     pub(crate) fn populate_enrolled_on(
         connection: &Connection,
         head: TruthCursor,
@@ -2583,6 +2586,7 @@ impl SqliteSemantic {
 
     /// Rebuild verification uses bytes from the independent authority census.
     /// No file is opened here while the staging owner's Q roles are live.
+    #[cfg(target_os = "macos")]
     pub(crate) fn validate_enrolled_materialization_on(
         connection: &Connection,
         observed: TruthCursor,
@@ -2604,7 +2608,7 @@ impl SqliteSemantic {
             MaterializedFactFamilies::AllExceptObservations,
         )?;
         for fact in &mut facts {
-            crate::session::append_progress::data_work_checkpoint()
+            crate::session::derived_access::progress::data_work_checkpoint()
                 .map_err(|error| SqliteSemanticError::Metadata(error.to_string()))?;
             let entry = fact
                 .cursor
@@ -2634,7 +2638,7 @@ impl SqliteSemantic {
             .map(|entry| entry.event.clone())
             .collect::<Vec<_>>();
         let expected = SemanticSnapshot::materialized_oracle_from_events(observed, &events)?;
-        crate::session::append_progress::data_work_checkpoint()
+        crate::session::derived_access::progress::data_work_checkpoint()
             .map_err(|error| SqliteSemanticError::Metadata(error.to_string()))?;
         if actual != expected {
             return Err(SqliteSemanticError::Metadata(
@@ -3109,6 +3113,7 @@ impl SqliteSemantic {
         Ok(LocatorRead::Ready(grouped))
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn proposal_carrier_locators_readonly_on(
         connection: &Connection,
         selected: &BTreeSet<RevisionRefV1>,

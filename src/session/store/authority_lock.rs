@@ -45,6 +45,7 @@ impl StoreAuthorityLock {
     }
 
     /// Private enrolled admission. The caller retains a pre-acquisition root witness.
+    #[cfg(any(target_os = "macos", windows))]
     pub(crate) fn acquire_until(
         store_root: &Path,
         deadline: std::time::Instant,
@@ -83,6 +84,7 @@ impl StoreAuthorityLock {
     }
 
     /// Quiescent compatibility check, never a live-SQL or pre-acquisition proof.
+    #[cfg(any(target_os = "macos", windows))]
     pub(crate) fn validate_physical_root(&self, root: &Path) -> Result<()> {
         let canonical = root.canonicalize().map_err(physical_error)?;
         if self.key.1.parent() != Some(canonical.as_path()) {
@@ -136,6 +138,7 @@ impl StoreAuthorityLock {
 
     /// Enrolled callers retain the physical root and require the already
     /// provisioned authority leaf. No directory/leaf creation or symlink follow.
+    #[cfg(target_os = "macos")]
     pub(in crate::session) fn try_acquire_existing(store_root: &Path) -> Result<Option<Self>> {
         Self::try_acquire_inner(store_root, false)
     }
@@ -292,6 +295,7 @@ fn register_lock(
     StoreAuthorityLock::new(key, state, false)
 }
 
+#[cfg(any(target_os = "macos", windows))]
 fn check_admission_deadline(
     deadline: std::time::Instant,
     cancelled: Option<&std::sync::atomic::AtomicBool>,

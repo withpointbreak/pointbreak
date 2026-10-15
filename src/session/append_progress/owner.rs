@@ -110,6 +110,7 @@ pub unsafe fn enter_owned_data_command(
     Ok(OwnedDataCommand { _permit: permit })
 }
 
+#[cfg(target_os = "macos")]
 pub(in crate::session) fn data_selected() -> bool {
     DATA_COMMAND.with(Cell::get)
 }

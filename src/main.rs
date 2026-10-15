@@ -6,6 +6,16 @@ mod cli_tracing;
 fn main() -> ExitCode {
     let mut arguments = std::env::args_os().skip(1);
     if let Some(mode) = arguments.next() {
+        // Ordinary Inspector also uses this transport. The child separately
+        // rejects enrolled selections unless the experimental feature is on.
+        if mode == "__inspect-data-v1" {
+            return cli::inspect::owned::child_main(arguments.collect());
+        }
+        // A compile-time opt-in, never an environment switch. Reject private
+        // owned commands before parsing input or acquiring keys/store state.
+        if !cfg!(feature = "experimental-enrolled-progress") {
+            return cli::run_main();
+        }
         if mode == "__owned-change-v1" {
             return private_change_command(arguments.collect());
         }
@@ -20,9 +30,6 @@ fn main() -> ExitCode {
         }
         if mode == "__owned-inspect-v1" {
             return cli::inspect::owned::shell_main(arguments.collect());
-        }
-        if mode == "__inspect-data-v1" {
-            return cli::inspect::owned::child_main(arguments.collect());
         }
         if mode == "__owned-data-v1" {
             return private_data_command(arguments.collect());

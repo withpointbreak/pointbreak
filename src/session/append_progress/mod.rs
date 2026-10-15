@@ -83,6 +83,7 @@ pub use audit::AuditLimits;
 pub use ledger::c4::AppendExit;
 #[doc(hidden)]
 pub use ledger::c4::audit::AuditExit;
+#[cfg(target_os = "macos")]
 pub(in crate::session) use owner::data_selected;
 #[doc(hidden)]
 pub use owner::{OwnedAppendBootstrap, OwnedAppendOperation, run_disposable_append};

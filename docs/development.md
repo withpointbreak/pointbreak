@@ -10,6 +10,33 @@ a change and how to interpret its result. Script-level ownership and side effect
 
 ## Start with the changed surface
 
+### Experimental enrolled-progress commands
+
+The six private `__owned-*-v1` argv entries require
+`--features experimental-enrolled-progress`. The feature is off by default,
+including ordinary release builds. Default binaries reject these names as
+unrecognized subcommands before reading their private requests. `--all-features`
+does opt in; do not distribute such a binary as a default release.
+
+The internal `__inspect-data-v1` transport remains available for ordinary
+Inspector in every build. With the feature off, it rejects any enrolled
+`selection` in its bootstrap before native ownership or repository access.
+
+This is an experimental-entry gate, not native qualification or public repository
+routing. Enrollment is irreversible through the public CLI and makes ordinary
+clients refuse the enrolled store. Use only explicitly assigned disposable roots
+after the applicable native readiness checks; never use an owner store.
+The corresponding `owned_*_entry` integration suites require this feature too.
+It does not change the platform restrictions on individual entries.
+
+The internal vendored SQLite dependency and its macOS/Windows private ABI remain
+in the default dependency closure; disabling the command feature does not restore
+unmodified upstream SQLite. That native build deliberately rejects compiler
+wrappers, non-empty `RUSTC_WRAPPER`, externally supplied C/preprocessor flags,
+and `SQLITE_*` environment overrides (including unrelated names such as
+`SQLITE_HISTORY`). Use a clean build environment for this experimental branch.
+See `vendor/libsqlite3-sys/PATCH-NOTES.md` for the remaining native obligations.
+
 | Change surface | Minimum local gate | Add when applicable | Expected outcome |
 | --- | --- | --- | --- |
 | Rust library, CLI, or headless behavior | `just check` | Focused `just test-file <name>` or `just test -E '<filter>'` while iterating; `just test-full` when the change touches `src/bench_support/**`, `src/session/benchmark.rs`, `benches/store_foundation.rs`, or any `#[cfg(feature = "longitudinal-counting")]` counting site | Commit range, build, format, Clippy, and nextest suite pass |

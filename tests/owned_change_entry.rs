@@ -1,4 +1,4 @@
-#![cfg(target_os = "macos")]
+#![cfg(all(feature = "experimental-enrolled-progress", target_os = "macos"))]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

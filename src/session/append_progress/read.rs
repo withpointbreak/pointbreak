@@ -2,7 +2,9 @@
 use std::path::PathBuf;
 
 use super::enrollment::{EvidenceRole, RetainedEvidence};
-use super::{ledger, native, owner};
+use super::native;
+#[cfg(target_os = "macos")]
+use super::{ledger, owner};
 use crate::canonical_hash::sha256_json_hex;
 use crate::error::{Result, ShoreError};
 use crate::session::store::authority_lock::PhysicalFileIdentity;
@@ -70,21 +72,27 @@ impl ProgressReadFence {
             completed_state_sha256,
         })
     }
+    #[cfg(target_os = "macos")]
     pub(crate) fn selection_sha256(&self) -> &str {
         &self.selection_sha256
     }
+    #[cfg(target_os = "macos")]
     pub(crate) fn baseline_sha256(&self) -> &str {
         &self.baseline_sha256
     }
+    #[cfg(target_os = "macos")]
     pub(crate) fn capability_pair_sha256(&self) -> &str {
         &self.capability_pair_sha256
     }
+    #[cfg(target_os = "macos")]
     pub(crate) fn progress_epoch(&self) -> &str {
         &self.progress_epoch
     }
+    #[cfg(target_os = "macos")]
     pub(crate) fn head(&self) -> u64 {
         self.head
     }
+    #[cfg(target_os = "macos")]
     pub(crate) fn prefix_sha256(&self) -> &str {
         &self.prefix_sha256
     }

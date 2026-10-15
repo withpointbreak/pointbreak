@@ -698,10 +698,6 @@ pub(crate) fn child_main(arguments: Vec<std::ffi::OsString>) -> std::process::Ex
         if !arguments.is_empty() {
             return Err("private Inspector accepts no positional arguments".into());
         }
-        // SAFETY: main dispatches here before tracing, services or threads. The
-        // token remains on this sole data thread until process exit.
-        #[cfg(target_os = "macos")]
-        let owner = unsafe { pointbreak::session::enter_owned_data_command(terminal) }?;
         let mut input = BufReader::new(std::io::stdin());
         let CommandFrame::Start {
             epoch,
@@ -711,10 +707,22 @@ pub(crate) fn child_main(arguments: Vec<std::ffi::OsString>) -> std::process::Ex
         else {
             return Err("missing Inspector bootstrap".into());
         };
+        // This transport is shared by ordinary Inspector. Admit its ordinary
+        // bootstrap without the experimental feature, but refuse any enrolled
+        // selection before native ownership or repository/service acquisition.
+        if selection.is_some() && !cfg!(feature = "experimental-enrolled-progress") {
+            return Err(
+                "enrolled Inspector requires the experimental-enrolled-progress feature".into(),
+            );
+        }
         #[cfg(not(target_os = "macos"))]
         if selection.is_some() {
             return Err("enrolled Inspector unavailable on this platform".into());
         }
+        // SAFETY: main dispatches here before tracing, services or threads. The
+        // token remains on this sole data thread until process exit.
+        #[cfg(target_os = "macos")]
+        let owner = unsafe { pointbreak::session::enter_owned_data_command(terminal) }?;
         let state = if selection.is_none() {
             Some(Arc::new(InspectState::new(repo.clone())?))
         } else {

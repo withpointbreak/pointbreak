@@ -677,6 +677,7 @@ impl SqliteCursorLedger {
         Self::publication_snapshot_on(&connection, metadata)
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn enrolled_publication_snapshot_on(
         connection: &Connection,
         identity: &CursorLedgerIdentity,

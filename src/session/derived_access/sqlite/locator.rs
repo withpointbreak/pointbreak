@@ -165,6 +165,7 @@ impl SqliteLocator {
         read_locator_checkpoint(&connection)
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn validate_enrolled_rows_on(
         connection: &Connection,
         entries: &[super::cursor::BootstrapPopulationEntry],
@@ -177,7 +178,7 @@ impl SqliteLocator {
             ));
         }
         for (mut row, entry) in rows.into_iter().zip(entries) {
-            crate::session::append_progress::data_work_checkpoint()
+            crate::session::derived_access::progress::data_work_checkpoint()
                 .map_err(|error| SqliteLocatorError::Metadata(error.to_string()))?;
             if row.logical_reread_key != sha256_bytes_hex(entry.event.idempotency_key.as_bytes()) {
                 return Err(SqliteLocatorError::CarrierMismatch(row.cursor));
@@ -195,6 +196,7 @@ impl SqliteLocator {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
     pub(super) fn initialize_on(connection: &Connection) -> Result<(), SqliteLocatorError> {
         let cursor = validate_cursor_metadata(connection)?;
         initialize_locator_schema(connection, &cursor)?;
@@ -202,6 +204,7 @@ impl SqliteLocator {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn validate_enrolled_checkpoint_on(
         connection: &Connection,
     ) -> Result<(), SqliteLocatorError> {
@@ -384,6 +387,7 @@ impl SqliteLocator {
 
     /// Selection only: no stock open and no filesystem hydration. Caller owns
     /// the snapshot and must finish it before using these owned rows.
+    #[cfg(target_os = "macos")]
     pub(crate) fn selected_rows_on(
         connection: &Connection,
         event_ids: &[String],

@@ -1187,7 +1187,9 @@ fn create_dir(
 ) -> Result<()> {
     ledger::access(root, guard, objects)?.finish()?;
     if !exists(path)? {
-        let mut builder = fs::DirBuilder::new();
+        let builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        let mut builder = builder;
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt as _;

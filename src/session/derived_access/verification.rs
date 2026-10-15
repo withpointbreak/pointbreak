@@ -36,6 +36,7 @@ pub(crate) fn strict_proposal_summary_conflicts(
     proposal_summary_conflicts_in_order(events.into_iter())
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn strict_enrolled_proposal_summary_conflicts(
     events: &[ShoreEvent],
 ) -> ShoreResult<BTreeMap<RevisionRefV1, u64>> {

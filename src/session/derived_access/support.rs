@@ -242,6 +242,7 @@ fn to_sql_integer(value: impl TryInto<i64>) -> Result<i64, String> {
 
 /// Selected support closure for an admitted readonly native phase. Every probe
 /// shares the caller's snapshot; Rust sets preserve complete multi-value inputs.
+#[cfg(target_os = "macos")]
 pub(super) fn support_event_plan_readonly(
     connection: &rusqlite::Connection,
     selected: &[ShoreEvent],

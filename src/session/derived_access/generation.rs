@@ -180,6 +180,7 @@ pub(crate) enum GenerationError {
 }
 
 impl GenerationLayout {
+    #[cfg(target_os = "macos")]
     pub(crate) fn rebuild_lock_path(&self) -> PathBuf {
         self.storage_layout.rebuild_lock()
     }
@@ -234,6 +235,7 @@ impl GenerationLayout {
 
     /// Owned enrolled rebuilds provision the leaf separately against a retained
     /// parent. This acquisition neither creates parents nor follows a symlink.
+    #[cfg(target_os = "macos")]
     pub(crate) fn try_existing_rebuild_lease(&self) -> Result<RebuildLease, GenerationError> {
         self.try_rebuild_lease_inner(false)
     }
@@ -329,6 +331,7 @@ impl GenerationLayout {
         self.read_lease(generation_id, true)
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn acquire_existing_read_lease(
         &self,
         generation_id: &str,
@@ -972,12 +975,14 @@ impl Drop for GenerationReadLease {
 }
 
 impl GenerationReadLease {
+    #[cfg(target_os = "macos")]
     pub(in crate::session) fn retained_file(&self) -> &File {
         &self.file
     }
 }
 
 impl RebuildLease {
+    #[cfg(target_os = "macos")]
     pub(in crate::session) fn retained_file(&self) -> &File {
         &self.file
     }

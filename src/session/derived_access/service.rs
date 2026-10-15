@@ -934,7 +934,7 @@ impl DerivedAccessService {
         let mut semantic_facts = Vec::with_capacity(entries.len());
         let mut product_history_facts = Vec::with_capacity(entries.len());
         for (receipt, entry) in delta.receipts.iter().zip(entries) {
-            crate::session::append_progress::data_work_checkpoint()
+            super::progress::data_work_checkpoint()
                 .map_err(|error| DerivedAccessServiceError::Truth(error.to_string()))?;
             if receipt != &entry.receipt {
                 return Err(DerivedAccessServiceError::Truth(format!(
