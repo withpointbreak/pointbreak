@@ -2417,7 +2417,7 @@ fn successor_original_byte_duplicates_cannot_cross_any_raw_evidence_entrance() {
             .contains("duplicate field")
         );
         assert!(
-            assemble_qualification_derived_access_package_v1(&[raw.clone()], &output)
+            assemble_qualification_derived_access_package_v1(std::slice::from_ref(&raw), &output)
                 .unwrap_err()
                 .contains("duplicate field")
         );
@@ -2498,7 +2498,7 @@ fn raw_v3_requires_v6_at_dispatch_before_receipt_reconstruction() {
         let mut package = QualificationDerivedAccessPackageV1::test_fixture();
         package.evaluator_revision = version.into();
         assert_eq!(
-            validate_summaries_against_raw(&package, &[value.clone()]).unwrap_err(),
+            validate_summaries_against_raw(&package, std::slice::from_ref(&value)).unwrap_err(),
             "V3 Change receipt requires evaluator v6"
         );
     }
