@@ -135,6 +135,79 @@ afterEach(async () => {
 });
 
 describe("Change-first recovery integration", () => {
+  it("lets a manual status check replace the queued rebuild poll", async () => {
+    const manual = deferred<Response>();
+    let statusRequests = 0;
+    let manualSignal: AbortSignal | null | undefined;
+    const requests: string[] = [];
+    globalThis.fetch = vi.fn(async (input, init) => {
+      const path = String(input);
+      requests.push(`${init?.method ?? "GET"} ${path}`);
+      if (path === "/api/identity")
+        return new Response(JSON.stringify(identity));
+      if (path === "/api/derived-access/status") {
+        statusRequests += 1;
+        if (statusRequests === 2) {
+          manualSignal = init?.signal;
+          return manual.promise;
+        }
+        return new Response(
+          JSON.stringify(
+            status({
+              rebuildInFlight: statusRequests === 1,
+              actions: ["wait"],
+              detail: statusRequests === 1 ? "rebuilding" : "settled",
+            }),
+          ),
+        );
+      }
+      return new Response(JSON.stringify(unavailable), { status: 503 });
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    vi.useFakeTimers();
+    await bootstrapChangeInspector({ poll: false });
+    await vi.advanceTimersByTimeAsync(0);
+    const button = document.querySelector<HTMLButtonElement>(
+      "#derived-access-wait",
+    );
+    expect(statusRequests).toBe(1);
+    expect(button?.disabled).toBe(false);
+    await vi.advanceTimersByTimeAsync(500);
+    button?.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(statusRequests).toBe(2);
+    expect(button?.textContent).toBe("Checking status…");
+    // Cross the old poll's deadline while the explicit check is unresolved.
+    await vi.advanceTimersByTimeAsync(750);
+    expect(statusRequests).toBe(2);
+    expect(manualSignal?.aborted).toBe(false);
+    expect(button?.disabled).toBe(true);
+    manual.resolve(
+      new Response(
+        JSON.stringify(status({ rebuildInFlight: true, actions: ["wait"] })),
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(button?.disabled).toBe(false);
+    // A fresh rebuild observation still schedules exactly one follow-up.
+    await vi.advanceTimersByTimeAsync(749);
+    expect(statusRequests).toBe(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(statusRequests).toBe(3);
+    expect(document.querySelector("#derived-access-detail")?.textContent).toBe(
+      "settled",
+    );
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(statusRequests).toBe(3);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(requests.some((entry) => entry.startsWith("POST "))).toBe(false);
+    expect(
+      requests.some((entry) => entry.includes("access=authoritative")),
+    ).toBe(false);
+  });
+
   it.each([
     "success",
     "failure",

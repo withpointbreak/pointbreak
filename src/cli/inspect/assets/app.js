@@ -11876,6 +11876,8 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       if (becameCurrent) reloadSelectedAccess();
     }, "acceptRecoveryStatus");
     const refreshRecoveryStatus = /* @__PURE__ */ __name(async () => {
+      if (recoveryTimer !== null) clearTimeout(recoveryTimer);
+      recoveryTimer = null;
       const observation = ++recoveryObservationEpoch;
       const credentialVersion2 = sessionCredentialVersion();
       recoveryController?.abort("superseded");

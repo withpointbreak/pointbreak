@@ -502,6 +502,10 @@ export async function bootstrapChangeInspector(
     if (becameCurrent) reloadSelectedAccess();
   };
   const refreshRecoveryStatus = async (): Promise<void> => {
+    // This observation replaces any queued rebuild poll, including when the
+    // reader explicitly checks status before that poll's deadline.
+    if (recoveryTimer !== null) clearTimeout(recoveryTimer);
+    recoveryTimer = null;
     const observation = ++recoveryObservationEpoch;
     const credentialVersion = sessionCredentialVersion();
     recoveryController?.abort("superseded");
