@@ -6,6 +6,9 @@
 //! files. Errors are stringified so the server can surface them to the UI as
 //! a JSON `error` body instead of crashing a connection thread.
 
+#[cfg(target_os = "macos")]
+pub(super) mod enrolled;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::{Arc, RwLock};

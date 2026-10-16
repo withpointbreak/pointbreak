@@ -40,6 +40,24 @@ impl LocalJournal {
         }
     }
 
+    /// Only the negative enrollment fence may classify this fixed-key attempt.
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    pub(in crate::session::store) fn read_negative_enrollment_fence(
+        &self,
+    ) -> Result<(
+        Option<Vec<u8>>,
+        crate::bench_support::longitudinal::EnrollmentSafetyProbe,
+    )> {
+        let completion = crate::bench_support::longitudinal::begin_enrollment_safety_probe();
+        let bytes = self.storage.read_bytes_if_exists(
+            &self.event_path(crate::session::store::capabilities::ROOT_ACTIVATION_LOGICAL_KEY_V1),
+        )?;
+        if let Some(bytes) = &bytes {
+            crate::bench_support::longitudinal::record_carrier_bytes(bytes.len());
+        }
+        Ok((bytes, completion))
+    }
+
     fn events_dir(&self) -> PathBuf {
         self.store_dir.join("events")
     }
@@ -617,12 +635,16 @@ impl QualificationLocalJournal {
 /// `content_ref` under the store dir.
 #[derive(Debug)]
 pub(crate) struct LocalContentStore {
+    #[cfg(target_os = "macos")]
+    root: PathBuf,
     storage: LocalStorage,
 }
 
 impl LocalContentStore {
     pub(crate) fn new(store_dir: impl AsRef<Path>) -> Self {
         Self {
+            #[cfg(target_os = "macos")]
+            root: store_dir.as_ref().to_path_buf(),
             storage: LocalStorage::new(store_dir),
         }
     }
@@ -635,10 +657,23 @@ impl ContentStore for LocalContentStore {
     }
 
     fn get(&self, content_ref: &str) -> Result<Vec<u8>> {
+        #[cfg(target_os = "macos")]
+        if let Some(result) =
+            crate::session::append_progress::owned_content_read(&self.root, content_ref)
+        {
+            return result?
+                .ok_or_else(|| ShoreError::Message(format!("content absent: {content_ref}")));
+        }
         self.storage.read_bytes(Path::new(content_ref))
     }
 
     fn get_if_exists(&self, content_ref: &str) -> Result<Option<Vec<u8>>> {
+        #[cfg(target_os = "macos")]
+        if let Some(result) =
+            crate::session::append_progress::owned_content_read(&self.root, content_ref)
+        {
+            return result;
+        }
         self.storage.read_bytes_if_exists(Path::new(content_ref))
     }
 

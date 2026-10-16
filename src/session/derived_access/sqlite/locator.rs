@@ -165,8 +165,56 @@ impl SqliteLocator {
         read_locator_checkpoint(&connection)
     }
 
-    pub(crate) fn apply_delta_with(
-        &self,
+    #[cfg(target_os = "macos")]
+    pub(crate) fn validate_enrolled_rows_on(
+        connection: &Connection,
+        entries: &[super::cursor::BootstrapPopulationEntry],
+    ) -> Result<(), SqliteLocatorError> {
+        let (rows, _) =
+            query_locator_rows(connection, &locator_select("ORDER BY locator.sequence"), [])?;
+        if rows.len() != entries.len() {
+            return Err(SqliteLocatorError::Metadata(
+                "enrolled locator coverage".into(),
+            ));
+        }
+        for (mut row, entry) in rows.into_iter().zip(entries) {
+            crate::session::derived_access::progress::data_work_checkpoint()
+                .map_err(|error| SqliteLocatorError::Metadata(error.to_string()))?;
+            if row.logical_reread_key != sha256_bytes_hex(entry.event.idempotency_key.as_bytes()) {
+                return Err(SqliteLocatorError::CarrierMismatch(row.cursor));
+            }
+            row.logical_reread_key = entry.event.idempotency_key.clone();
+            let expected = LocatorRow::from_event(
+                entry.receipt.cursor,
+                &entry.event,
+                entry.receipt.validation_witness.clone(),
+            )?;
+            if row != expected {
+                return Err(SqliteLocatorError::CarrierMismatch(row.cursor));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn initialize_on(connection: &Connection) -> Result<(), SqliteLocatorError> {
+        let cursor = validate_cursor_metadata(connection)?;
+        initialize_locator_schema(connection, &cursor)?;
+        validate_locator_checkpoint(connection, &cursor)?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn validate_enrolled_checkpoint_on(
+        connection: &Connection,
+    ) -> Result<(), SqliteLocatorError> {
+        let cursor = validate_cursor_metadata(connection)?;
+        validate_locator_checkpoint(connection, &cursor)?;
+        Ok(())
+    }
+
+    pub(super) fn apply_delta_on(
+        connection: &Connection,
         delta: &CursorDelta,
         rows: &[LocatorRow],
         apply_semantic: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<(), SqliteLocatorError>,
@@ -178,8 +226,7 @@ impl SqliteLocator {
                 delta.receipts.len()
             )));
         }
-        let mut connection = self.validated_connection()?;
-        let checkpoint = read_locator_checkpoint(&connection)?;
+        let checkpoint = read_locator_checkpoint(connection)?;
         if checkpoint.applied != delta.after {
             return Err(SqliteLocatorError::Delta(format!(
                 "delta starts at {:?}, checkpoint is {:?}",
@@ -215,9 +262,9 @@ impl SqliteLocator {
             )));
         }
 
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| sqlite_error("begin locator delta", error))?;
+        let transaction =
+            rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)
+                .map_err(|error| sqlite_error("begin locator delta", error))?;
         for row in rows {
             insert_locator_row(&transaction, row)?;
         }
@@ -336,6 +383,47 @@ impl SqliteLocator {
             );
         }
         Ok(LocatorRead::Ready(hydrated))
+    }
+
+    /// Selection only: no stock open and no filesystem hydration. Caller owns
+    /// the snapshot and must finish it before using these owned rows.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn selected_rows_on(
+        connection: &Connection,
+        event_ids: &[String],
+        observed: TruthCursor,
+    ) -> Result<Vec<Option<LocatorRow>>, SqliteLocatorError> {
+        let checkpoint = read_locator_checkpoint(connection)?;
+        if checkpoint.applied != observed {
+            return Err(SqliteLocatorError::Metadata(
+                "selected locator checkpoint moved".into(),
+            ));
+        }
+        let sql = locator_select(
+            "WHERE locator.event_hash = ?1 AND locator.epoch = ?2 AND locator.sequence <= ?3",
+        );
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(|error| sqlite_error("prepare detached locator selection", error))?;
+        event_ids
+            .iter()
+            .map(|id| {
+                let Some(hash) = decode_prefixed_digest(id, "evt:sha256:") else {
+                    return Ok(None);
+                };
+                statement
+                    .query_row(
+                        params![
+                            hash.as_slice(),
+                            to_i64(observed.epoch, "selected epoch")?,
+                            to_i64(observed.sequence, "selected cursor")?
+                        ],
+                        stored_locator_row_from_sql,
+                    )
+                    .optional()
+                    .map_err(|error| sqlite_error("select detached locator", error))
+            })
+            .collect()
     }
 
     pub(crate) fn chronological_window(
@@ -958,6 +1046,7 @@ fn query_locator_rows(
 }
 
 fn stored_locator_row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocatorRow> {
+    crate::session::derived_access::owned_row_charge(row)?;
     let epoch = row.get::<_, i64>(0)?;
     let sequence = row.get::<_, i64>(1)?;
     let receipt_epoch = row.get::<_, i64>(12)?;
@@ -982,9 +1071,9 @@ fn stored_locator_row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<Loca
     })
 }
 
-fn hydrate_locator_row(
+pub(crate) fn hydrate_locator_row(
     journal: &QualificationLocalJournal,
-    mut stored: LocatorRow,
+    stored: LocatorRow,
 ) -> Result<HydratedLocatorRow, SqliteLocatorError> {
     let bytes = journal
         .read_event_bytes_by_key_digest(&stored.logical_reread_key)
@@ -995,6 +1084,14 @@ fn hydrate_locator_row(
                 stored.logical_reread_key
             ))
         })?;
+    hydrate_locator_bytes(stored, bytes)
+}
+
+/// Filesystem-free validation, shared by stock and owned phased hydration.
+pub(crate) fn hydrate_locator_bytes(
+    mut stored: LocatorRow,
+    bytes: Vec<u8>,
+) -> Result<HydratedLocatorRow, SqliteLocatorError> {
     if sha256_bytes_hex(&bytes) != stored.validation_witness {
         #[cfg(any(test, feature = "longitudinal-counting"))]
         record_timeline_carrier_mismatch_v1(

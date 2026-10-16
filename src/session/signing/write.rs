@@ -55,6 +55,17 @@ impl EventSigningOptions {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    pub(in crate::session) fn required_progress_signer(
+        &self,
+    ) -> Result<&(dyn EventSigner + Send + Sync)> {
+        self.signer.as_deref().ok_or_else(|| {
+            crate::error::ShoreError::Message(
+                "private Change enrollment requires an explicit signer".into(),
+            )
+        })
+    }
+
     fn signer(&self) -> Option<&SharedEventSigner> {
         self.signer.as_ref()
     }

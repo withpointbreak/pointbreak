@@ -10,12 +10,39 @@ a change and how to interpret its result. Script-level ownership and side effect
 
 ## Start with the changed surface
 
+### Experimental enrolled-progress commands
+
+The six private `__owned-*-v1` argv entries require
+`--features experimental-enrolled-progress`. The feature is off by default,
+including ordinary release builds. Default binaries reject these names as
+unrecognized subcommands before reading their private requests. `--all-features`
+does opt in; do not distribute such a binary as a default release.
+
+The internal `__inspect-data-v1` transport remains available for ordinary
+Inspector in every build. With the feature off, it rejects any enrolled
+`selection` in its bootstrap before native ownership or repository access.
+
+This is an experimental-entry gate, not native qualification or public repository
+routing. Enrollment is irreversible through the public CLI and makes ordinary
+clients refuse the enrolled store. Use only explicitly assigned disposable roots
+after the applicable native readiness checks; never use an owner store.
+The corresponding `owned_*_entry` integration suites require this feature too.
+It does not change the platform restrictions on individual entries.
+
+The internal vendored SQLite dependency and its macOS/Windows private ABI remain
+in the default dependency closure; disabling the command feature does not restore
+unmodified upstream SQLite. That native build deliberately rejects compiler
+wrappers, non-empty `RUSTC_WRAPPER`, externally supplied C/preprocessor flags,
+and `SQLITE_*` environment overrides (including unrelated names such as
+`SQLITE_HISTORY`). Use a clean build environment for this experimental branch.
+See `vendor/libsqlite3-sys/PATCH-NOTES.md` for the remaining native obligations.
+
 | Change surface | Minimum local gate | Add when applicable | Expected outcome |
 | --- | --- | --- | --- |
 | Rust library, CLI, or headless behavior | `just check` | Focused `just test-file <name>` or `just test -E '<filter>'` while iterating; `just test-full` when the change touches `src/bench_support/**`, `src/session/benchmark.rs`, `benches/store_foundation.rs`, or any `#[cfg(feature = "longitudinal-counting")]` counting site | Commit range, build, format, Clippy, and nextest suite pass |
 | Platform-conditional Rust code | `just check` | `just check-types` on relevant non-Linux hosts/CI | All workspace targets and feature-gated arms type-check |
 | Longitudinal evidence façade or contract | Focused longitudinal nextest filters, `just test-full`, `just longitudinal-contract`, and `just longitudinal-smoke` | Verify each completed native package with `just longitudinal-verify-package <root>`; native collection remains an explicit operator ledger | Contract hashes remain stable; receipt state/projection digests are derived from the in-memory fold of the listed events (no stored projection is read); disposable non-timing construction/pair/preflight/package mechanics pass; package verification is read-only and recursively hash-complete |
-| Derived-access product core or bundled SQLite closure | Focused service and SQLite cursor/locator/semantic tests, default and `--no-default-features` builds, `just check`, `just test-full`, and `just derived-access-tests` | `just store-foundation-qualification-smoke` when changing default routing, derived-store filesystem scope, or qualification integration; run `just derived-change-read <request>` on both native package hosts when changing Profile/Changes/Attention or `/api/v2/history` routing or its evidence contract, binding separate clean harness/product identities, a distinct explicit `POINTBREAK_QUALIFICATION_HOST_IDENTITY` per host lane, the exact control-test binary, and Change plus Timeline storage probes; `just package-archive-selftest`; native Windows focused open/close test when changing SQLite ownership or linkage | One product SQLite implementation serves qualification; strict and active Change and Timeline documents remain wire-equivalent under exact public fixture authority; V2 exact-source evidence embeds the frozen V1/v3 Change matrix and adds evaluator-v4 Timeline typed-error, request-bounded service-child counter, lifecycle/concurrent-trust, invalid-signature recovery, and bodyless-storage witnesses; bundled SQLite remains in the normal package closure; explicit host-lane authority is stable across network changes; explicit `off` records zero physical actions and creates no derived path |
+| Derived-access product core or bundled SQLite closure | Focused service and SQLite cursor/locator/semantic tests, default and `--no-default-features` builds, `just check`, `just test-full`, and `just derived-access-tests` | `just store-foundation-qualification-smoke` when changing default routing, derived-store filesystem scope, or qualification integration; run `just derived-change-read <request>` on both native package hosts when changing Profile/Changes/Attention or `/api/v2/history` routing or its evidence contract, binding separate clean harness/product identities, a distinct explicit `POINTBREAK_QUALIFICATION_HOST_IDENTITY` per host lane, the exact control-test binary, and Change plus Timeline storage probes; `just package-archive-selftest`; native Windows focused open/close test when changing SQLite ownership or linkage | One product SQLite implementation serves qualification; strict and active Change and Timeline documents remain wire-equivalent under exact public fixture authority; Legacy receipt V2 with evaluator v4/v5, and receipt V3 with evaluator v6, embed the frozen V1/v3 Change matrix and add Timeline typed-error, request-bounded service-child counter, lifecycle/concurrent-trust, invalid-signature recovery, and bodyless-storage witnesses; bundled SQLite remains in the normal package closure; explicit host-lane authority is stable across network changes; explicit `off` records zero physical actions and creates no derived path |
 | Developer-only LMDB proof surface | Focused closure/core/lifecycle tests plus `cargo bench --locked --features bench,lmdb-proof --bench store_foundation -- --lmdb-proof-open-close`, `--lmdb-smoke`, and `--lmdb-lifecycle-smoke` | Compile every `.github/binary-targets.json` target; run plain open/close and native dependency inspection on representative macOS, Linux glibc, Linux musl, and Windows hosts; run the lifecycle smoke natively on Windows for open-handle replacement, interrupted-copy cleanup, and reopen evidence | Exact reviewed sources compile and link statically; semantic and lifecycle smoke are non-timing, public-input-only, and disposable; online copy/restore/repair receipts and native allocation inventory are exact; no encryption, production routing, performance evaluation, or default-package/release inclusion |
 | Inspector `web/src` | `just check`, `just web-check`, `just web-verify` | `just web-test` while iterating; `just web-build` when intentionally refreshing the bundle | Rust gate passes, front-end lint/types/tests pass, and committed `assets/app.js` matches source |
 | VS Code extension | `just check`, `just extension-check` | `just extension-package` when packaging, binary selection, or extension delivery changes | Rust and extension checks pass; optional host VSIX contains the intended binary |
@@ -73,8 +100,11 @@ recovery, capability-reporting, and final projection boundaries. The capacity ge
 exact-subset same-root resume in bounded superblocks and repeats that exhaustive proof inside each stage's
 authority lock before its first mutation.
 
-Timeline qualification is carried only by `pointbreak.qualification-derived-change-read-receipt.v2`, which
-embeds the complete V1 Change receipt and selects evaluator v4. Its six Timeline suites use the Inspector
+Timeline evidence has explicit coexisting versions: legacy receipt V2 selects evaluator v4/v5; request/receipt
+V3 selects evaluator v6 and typed Timeline row V2 with the counted pre-hydration safety boundary. Both embed
+the complete V1 Change receipt. Legacy V1 barriers still require zero total pre-pin opens; V2 barriers require
+completed fixed-owner safety probes, zero other opens and a separately counted same-child setup receipt.
+No legacy raw receipt or summary is promoted into the new contract. The six Timeline suites use the Inspector
 service child for both semantics and request-local counters; direct library counters remain V1 Change
 characterization and are not substituted for `/api/v2/history` process evidence. A typed-failure fixture may
 mark only its unavailable continuation-token storage sentinel absent. Do not invent a replacement token or
@@ -229,3 +259,51 @@ directory.
 
 See `scripts/README.md` for script inventory, mutation boundaries, and script-specific failure
 classes.
+
+### Private append-progress native gate
+
+Changes under `src/session/append_progress/` also require
+`just test-append-progress-native <reviewed-config.json>` on macOS/APFS and Windows/NTFS.
+The gate enumerates all applicable cases in `scripts/append-progress-cases.json`, checks
+compiled names and ignore flags, and requires an exact passing JUnit result for every case.
+It runs 53 cases on macOS (including the five S20 predecessor scenarios) and 52 on Windows.
+The auxiliary child entry is invoked only by its parent, with exact assignment/name/mode evidence.
+Windows native cases require the normal nonadmin owner console and the checked external ACL helper.
+The three pure cases remain ordinary tests; macOS additionally retains 49 ordinary native cases.
+
+This gate consumes already-built binaries and fresh, explicitly assigned fixtures; it never builds,
+retries, adopts an existing root, or cleans up retained evidence. Prepare the reviewed configuration
+and native parent before invoking it; see the script contract in `scripts/README.md`.
+Missing setup is a failure. For these changes, `just check` alone is incomplete: require both native
+host receipts plus the full macOS default gate. Windows native receipts do not imply a full Windows
+default-suite pass, public enrollment qualification, or Inspector validation.
+
+The operator-owned `owned_enrollment_binary_roundtrip` test in
+`tests/owned_enrollment_entry.rs` is explicitly ignored. Running it requires review of the
+exact source and caller, native readiness, and fresh absolute root and key directories
+assigned and retained by the operator through `POINTBREAK_NATIVE_ENTRY_ROOT` and
+`POINTBREAK_NATIVE_ENTRY_KEYS`. Its ordinary refusal control,
+`private_bootstrap_refuses_before_key_or_root_access`, remains selected. Neither the default
+suite nor `just test-full` runs the ignored roundtrip; passing either suite does not establish
+native enrollment qualification.
+
+### Private Change-create consumer development
+
+The macOS-only `__owned-change-v1 <enrollment-request-hex> <mode> change create ...`
+entry selects a disposable whole-command owner before the real CLI parser and signing
+handler. Modes are `enroll-empty`, `resume`, and the diagnostic
+`resume-cut-after-presence` (exit79 after the durable presence proof and SQL-owner finish,
+before settlement). Only an explicitly assigned disposable clone-local repository is
+admitted by this development workflow. The same request and Change operation ID must
+survive retry. Public enrollment and other Change mutations remain closed.
+
+The private stderr `private-change-ack:` diagnostic reports the actual authority outcome,
+append settlement and derived availability. The public Change operation receipt is unchanged.
+No derived token is emitted by this consumer; strict readers, legacy coordinators and
+administrative routes refuse an enrolled or partially enrolled root.
+
+`tests/owned_change_entry.rs` is ignored by ordinary test runs and requires an assigned,
+empty retained parent in `POINTBREAK_CONSUMER_FIXTURE`, exact source/caller review and the
+approved macOS diagnostic readiness. Its two profile cases exercise real parsing/signing,
+original-plan retry, interruption/settlement, absent projection, off mode and strict refusal.
+These controls do not replace default/full-suite, Windows, Inspector or final qualification.

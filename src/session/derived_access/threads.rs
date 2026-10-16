@@ -736,7 +736,10 @@ mod tests {
 
         let snapshot = scope.snapshot();
         assert!(threads.event_count > 0);
-        assert_eq!(snapshot.counters.carrier_opens, 0);
+        assert_eq!(
+            snapshot.counters.carrier_opens, 2,
+            "cold threads and cached attention each perform one profile probe"
+        );
         assert_eq!(snapshot.counters.event_decodes, 0);
         assert_eq!(snapshot.counters.event_folds, 0);
         assert_eq!(snapshot.counters.projection_rebuilds, 0);

@@ -12,7 +12,7 @@ mod local;
 #[cfg(test)]
 mod memory;
 #[cfg(any(test, windows))]
-mod ntfs_journal;
+pub(in crate::session) mod ntfs_journal;
 
 use std::fmt::Debug;
 use std::path::PathBuf;
@@ -104,7 +104,7 @@ impl JournalChangeStamp {
     }
 
     #[cfg(target_os = "macos")]
-    pub(super) fn observed_with_entry_count(
+    pub(in crate::session) fn observed_with_entry_count(
         identity: &[u8],
         change: &[u8],
         entry_count: u64,
@@ -209,7 +209,7 @@ impl JournalChangeStamp {
         }
     }
 
-    pub(super) fn compared(before: &Self, after: Self) -> JournalChangeCheck {
+    pub(in crate::session) fn compared(before: &Self, after: Self) -> JournalChangeCheck {
         let verdict = if before == &after {
             JournalChangeVerdict::Stable
         } else {

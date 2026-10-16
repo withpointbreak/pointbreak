@@ -444,11 +444,43 @@ mod tests {
     /// `mod tests` line. Guards never scan test modules. (Do not cut at
     /// `#[cfg(test)]`: files such as read.rs carry a `#[cfg(test)] use` at the top.)
     fn product_region(source: &str) -> &str {
+        // An inner cfg applies to the entire external module, unlike a cfg on an import.
+        if source.trim_start().starts_with("#![cfg(test)]") {
+            return "";
+        }
         let cut = source
             .find("\nmod tests")
             .map(|index| index + 1)
             .unwrap_or(source.len());
         &source[..cut]
+    }
+
+    #[test]
+    fn product_region_preserves_product_writes_and_excludes_test_modules() {
+        let needles = [
+            concat!("join(\"state", ".json\")"),
+            concat!("Durability::", "Projection"),
+        ];
+        for needle in needles {
+            for (prefix, included) in [
+                ("", true),
+                ("#[cfg(test)] use test_helper;\n", true),
+                ("// #![cfg(test)]\n", true),
+                ("const MARKER: &str = \"#![cfg(test)]\";\n", true),
+                ("#![cfg(not(test))]\n", true),
+                ("#![cfg_attr(test, allow(dead_code))]\n", true),
+                ("#![cfg(test)]\n", false),
+                ("  \n#![cfg(test)]\n", false),
+            ] {
+                assert_eq!(
+                    product_region(&format!("{prefix}{needle}")).contains(needle),
+                    included,
+                    "prefix {prefix:?}"
+                );
+            }
+            let inline = format!("{needle}\nmod tests {{ {needle} }}");
+            assert_eq!(product_region(&inline).matches(needle).count(), 1);
+        }
     }
 
     fn sources(dir: &std::path::Path, result: &mut Vec<(std::path::PathBuf, String)>) {

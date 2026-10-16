@@ -496,10 +496,16 @@ export async function bootstrapChangeInspector(
       decoded.servingCurrent &&
       (recoveryStatus?.servingCurrent !== true ||
         recoveryStatus.rebuildInFlight);
+    const completedRebuild =
+      decoded.child?.lastCompletedKind === "rebuild" &&
+      decoded.child.lastCompletedOutcome === "succeeded" &&
+      decoded.child.state === "completed" &&
+      decoded.child.lastCompletedRequestId !==
+        recoveryStatus?.child?.lastCompletedRequestId;
     recoveryStatus = decoded;
     recoveryError = null;
     renderRecovery();
-    if (becameCurrent) reloadSelectedAccess();
+    if (becameCurrent || completedRebuild) reloadSelectedAccess();
   };
   const refreshRecoveryStatus = async (): Promise<void> => {
     // This observation replaces any queued rebuild poll, including when the
@@ -566,7 +572,12 @@ export async function bootstrapChangeInspector(
           renderRecovery();
           if (recoveryTimer !== null) clearTimeout(recoveryTimer);
           recoveryTimer =
-            recoveryPending === null && recoveryStatus?.rebuildInFlight
+            recoveryPending === null &&
+            (recoveryStatus?.rebuildInFlight ||
+              recoveryStatus?.child?.observationPending ||
+              ["starting", "initializing", "running"].includes(
+                recoveryStatus?.child?.state ?? "",
+              ))
               ? setTimeout(() => void refreshRecoveryStatus(), 750)
               : null;
         }

@@ -65,6 +65,9 @@ required-features = ["bench"]
 # remains the runtime escape hatch. Build with `--no-default-features` for the
 # subprocess-only single-variant backend.
 default = ["gix"]
+# Explicit opt-in for the irreversible, unqualified owned-process argv entries.
+# This gates command dispatch, not the internal SQLite dependency or native ABI.
+experimental-enrolled-progress = []
 # Exposes the developer-run `bench_support` harnesses to benchmark crates. Off
 # by default and never enabled in a release build, so the harnesses stay out of
 # the published surface. The dormant product SQLite implementation is in the
@@ -99,7 +102,7 @@ gix = { version = "0.85.0", default-features = false, features = [
 ], optional = true }
 gix-imara-diff = { version = "0.2.3", default-features = false, features = ["unified_diff"], optional = true }
 libc = "0.2"
-libsqlite3-sys = { version = "0.38.1", features = ["bundled"] }
+libsqlite3-sys = { version = "=0.38.1", features = ["bundled"] }
 mmdflux = { version = "2.6", default-features = false }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "bundled", "limits"] }
 serde = { version = "1", features = ["derive"] }
@@ -121,7 +124,7 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 ctor = "0.2"
 ed25519-dalek = "2"
 libc = "0.2"
-libsqlite3-sys = { version = "0.38.1", features = ["bundled"] }
+libsqlite3-sys = { version = "=0.38.1", features = ["bundled"] }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "bundled", "limits"] }
 sha2 = "0.10"
 tempfile = "3"
@@ -131,3 +134,13 @@ zstd = { version = "0.13.3", default-features = false }
 # CI sets RUST_BACKTRACE=1, so keep >= line tables for file:line in panics, but drop
 # variable/type debuginfo to cut codegen + link + PDB time (bigger on Windows).
 debug = "line-tables-only"
+
+# Keep the direct and rusqlite native dependency on one pinned provider.
+[patch.crates-io]
+libsqlite3-sys = { path = "vendor/libsqlite3-sys" }
+
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+libsqlite3-sys = { version = "=0.38.1", features = ["bundled", "pointbreak-private-abi"] }
+
+[target.'cfg(any(target_os = "macos", windows))'.dev-dependencies]
+libsqlite3-sys = { version = "=0.38.1", features = ["bundled", "pointbreak-private-abi"] }

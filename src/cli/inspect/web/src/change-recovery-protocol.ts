@@ -23,6 +23,65 @@ const ACTION_VALUES = [
 ] as const;
 export type ChangeRecoveryAction = (typeof ACTION_VALUES)[number];
 
+const CHILD_STATES = new Set([
+  "unavailable",
+  "starting",
+  "initializing",
+  "idle",
+  "running",
+  "completed",
+  "unknown",
+]);
+export interface ChangeDataChildStatus {
+  epoch: number;
+  operation: number | null;
+  requestId: string | null;
+  lastCompletedOperation: number | null;
+  lastCompletedRequestId: string | null;
+  lastCompletedKind: "read" | "rebuild" | null;
+  lastCompletedOutcome: "succeeded" | "failed" | null;
+  state: string;
+  detail: string;
+  cooperativeCancellation: true;
+  observationOnly: true;
+  observationPending: boolean;
+  observedAtUnixMilliseconds: number | null;
+  observationAgeMilliseconds: number | null;
+}
+function validChild(value: unknown): value is ChangeDataChildStatus {
+  const child = record(value);
+  const count = (v: unknown) =>
+    typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+  const optionalCount = (v: unknown) => v === null || count(v);
+  const identity = (v: unknown) =>
+    v === null || (typeof v === "string" && /^[a-f0-9]{32}$/.test(v));
+  return (
+    child !== null &&
+    count(child.epoch) &&
+    optionalCount(child.operation) &&
+    optionalCount(child.lastCompletedOperation) &&
+    identity(child.requestId) &&
+    identity(child.lastCompletedRequestId) &&
+    (child.lastCompletedKind === null ||
+      child.lastCompletedKind === "read" ||
+      child.lastCompletedKind === "rebuild") &&
+    (child.lastCompletedOutcome === null ||
+      child.lastCompletedOutcome === "succeeded" ||
+      child.lastCompletedOutcome === "failed") &&
+    typeof child.state === "string" &&
+    CHILD_STATES.has(child.state) &&
+    typeof child.detail === "string" &&
+    child.cooperativeCancellation === true &&
+    child.observationOnly === true &&
+    typeof child.observationPending === "boolean" &&
+    optionalCount(child.observedAtUnixMilliseconds) &&
+    optionalCount(child.observationAgeMilliseconds) &&
+    (child.operation === null) === (child.requestId === null) &&
+    (child.lastCompletedOperation === null) ===
+      (child.lastCompletedRequestId === null)
+  );
+}
+
 export interface ChangeRecoveryStatus {
   schema: "pointbreak.inspect-derived-access-status";
   version: 1;
@@ -42,6 +101,7 @@ export interface ChangeRecoveryStatus {
   servingCurrent: boolean;
   fallbackInFlight: boolean;
   actions: ChangeRecoveryAction[];
+  child?: ChangeDataChildStatus;
 }
 
 export interface ChangeRecoveryFailure {
@@ -82,6 +142,8 @@ export function decodeChangeRecoveryStatus(
     doc.schema !== "pointbreak.inspect-derived-access-status" ||
     doc.version !== 1 ||
     typeof doc.active !== "boolean" ||
+    (doc.child !== undefined &&
+      (!validChild(doc.child) || doc.servingCurrent !== false)) ||
     typeof doc.availability !== "string" ||
     !STATUS_VALUES.availability.has(doc.availability) ||
     typeof doc.namespace !== "string" ||

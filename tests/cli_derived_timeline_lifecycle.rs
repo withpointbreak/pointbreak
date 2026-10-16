@@ -12,7 +12,7 @@ use pointbreak::bench_support::derived_access::{
     DerivedTimelineInvalidSignatureDiagnosticFaultV1,
     QualificationDerivedTimelineFaultSeedInjectionV1, QualificationDerivedTimelineFaultSeedPlanV1,
     QualificationDerivedTimelineFaultSeedReceiptV1,
-    run_timeline_invalid_signature_lifecycle_diagnostic_v1,
+    run_timeline_invalid_signature_lifecycle_diagnostic_v2,
     seed_qualification_derived_timeline_fault_root_v1,
     seed_qualification_derived_timeline_fault_root_with_injection_v1,
 };
@@ -88,10 +88,10 @@ fn run(
     barrier_root: &Path,
     fault: DerivedTimelineInvalidSignatureDiagnosticFaultV1,
 ) -> Result<
-    pointbreak::bench_support::derived_access::QualificationDerivedTimelineReadEvidenceV1,
+    pointbreak::bench_support::derived_access::QualificationDerivedTimelineReadEvidenceV2,
     String,
 > {
-    run_timeline_invalid_signature_lifecycle_diagnostic_v1(
+    run_timeline_invalid_signature_lifecycle_diagnostic_v2(
         reference.repo(),
         reference.pointbreak_home(),
         reference.fixture_witness(),
@@ -142,7 +142,7 @@ fn timeline_invalid_signature_lifecycle_uses_fresh_pairs_and_same_counted_child(
     // Exercise the exact receipt-layer row conditions the producer applies at
     // receipt assembly, so a receipt-authority mismatch surfaces here instead
     // of consuming a producer invocation.
-    pointbreak::bench_support::derived_access::validate_qualification_derived_timeline_read_row_v1(
+    pointbreak::bench_support::derived_access::validate_qualification_derived_timeline_read_row_v2(
         &row,
         row.platform,
         row.fixture,
@@ -173,7 +173,7 @@ fn timeline_invalid_signature_lifecycle_uses_fresh_pairs_and_same_counted_child(
         execution
     };
     pointbreak::bench_support::derived_access
-        ::validate_qualification_derived_timeline_invalid_signature_row_v1(
+        ::validate_qualification_derived_timeline_invalid_signature_row_v2(
         &row,
         &reference_execution,
         &row.product_identity_sha256,
@@ -181,7 +181,7 @@ fn timeline_invalid_signature_lifecycle_uses_fresh_pairs_and_same_counted_child(
     )
     .expect("the lifecycle row satisfies the receipt-layer invalid-signature conditions");
     pointbreak::bench_support::derived_access
-        ::validate_qualification_derived_timeline_concurrent_trust_row_v1(&row)
+        ::validate_qualification_derived_timeline_concurrent_trust_row_v2(&row)
     .expect("the lifecycle row satisfies the receipt-layer concurrent-trust conditions");
 
     let failure = row
@@ -275,7 +275,26 @@ fn timeline_invalid_signature_lifecycle_uses_fresh_pairs_and_same_counted_child(
     let barrier = &failure.barrier_receipt;
     barrier.validate().expect("valid post-pin barrier receipt");
     assert_eq!(barrier.boundary.as_str(), "carrier_locators_selected");
-    assert_eq!(barrier.carrier_opens_before, 0);
+    assert_eq!(
+        barrier.carrier_opens_before,
+        barrier.enrollment_safety_probe_opens_before
+    );
+    assert_eq!(barrier.other_carrier_opens_before, 0);
+    assert_eq!(
+        barrier.enrollment_safety_probe_opens_before,
+        barrier
+            .enrollment_safety_probe_absent_before
+            .checked_add(barrier.enrollment_safety_probe_present_before)
+            .unwrap()
+    );
+    failure
+        .setup_counter_receipt
+        .validate()
+        .expect("counted existing profile setup");
+    assert_eq!(
+        barrier.setup_counter_receipt_sha256,
+        failure.setup_counter_receipt.receipt_sha256
+    );
     assert!(barrier.selected_carriers_before > 0);
     assert_eq!(
         barrier.expected_carrier_key_digest,
@@ -292,7 +311,16 @@ fn timeline_invalid_signature_lifecycle_uses_fresh_pairs_and_same_counted_child(
         failure.observed_typed_document.canonical_sha256
     );
     let counters = &failure.counter_receipt.counters;
-    assert!(counters.carrier_opens > 0);
+    assert!(counters.carrier_opens >= barrier.carrier_opens_before);
+    assert_eq!(
+        counters.carrier_opens,
+        barrier
+            .enrollment_safety_probe_opens_before
+            .checked_add(counters.event_validations)
+            .unwrap()
+            .checked_add(1)
+            .unwrap()
+    );
     assert!(counters.timeline_selected_carriers > 0);
     assert_eq!(counters.authoritative_fallbacks, 0);
     assert_eq!(counters.full_history_fallbacks, 0);
@@ -321,7 +349,10 @@ fn timeline_invalid_signature_post_mutation_failure_restores_source() {
         DerivedTimelineInvalidSignatureDiagnosticFaultV1::AfterCarrierWrite,
     )
     .expect_err("post-mutation fault must stop the diagnostic");
-    assert!(error.contains("injected post-carrier-write failure"));
+    assert!(
+        error.contains("injected post-carrier-write failure"),
+        "expected post-carrier-write failure, got: {error}"
+    );
     assert_eq!(snapshot(&reference), before);
     assert_eq!(snapshot_root(&fault_authority.repo), fault_before);
     assert_barrier_empty(barrier.path());

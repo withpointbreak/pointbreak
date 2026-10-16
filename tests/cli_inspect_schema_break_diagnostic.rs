@@ -63,6 +63,7 @@ fn inspector_legacy_endpoints_diagnose_a_retired_l0_event() {
         repo.path(),
         &[("POINTBREAK_DERIVED_ACCESS", "off")],
     );
+    inspector.wait_for_owned_child();
 
     let profile = inspector.get_json("/api/v2/profile");
     assert_eq!(profile["availability"], "migration_required");

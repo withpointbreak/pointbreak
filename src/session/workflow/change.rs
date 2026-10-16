@@ -436,15 +436,76 @@ impl_change_signing_options!(
 
 pub fn create_change(options: ChangeCreateOptions) -> Result<ChangeOperationReceiptV1> {
     validate_operation_id(&options.operation_id)?;
+    #[cfg(target_os = "macos")]
+    if crate::session::append_progress::consumer::selected() {
+        if !matches!(
+            options.identity_descriptor,
+            ChangeIdentityDescriptorV1::OpaqueNonce { .. }
+        ) {
+            return Err(invalid_input(
+                "private progress consumer requires an opaque nonce",
+            ));
+        }
+        let consumer = crate::session::append_progress::consumer::Consumer::begin(
+            &options.repo,
+            options.signing.required_progress_signer()?,
+            writer_from_options(&options.repo, options.actor_id.as_ref()),
+        )?;
+        let plan = prepare_create_plan(&options, consumer.store_dir())?;
+        // File and parent-directory barriers retain the original plan on retry.
+        for path in [
+            consumer.store_dir().join("operations"),
+            consumer.store_dir().to_path_buf(),
+        ] {
+            fs::File::open(&path)
+                .and_then(|file| file.sync_all())
+                .map_err(|error| io_error("sync Change operation plan directory", &path, error))?;
+        }
+        if plan.events.len() != 1
+            || plan.capture_revision.is_some()
+            || !plan.graph_preconditions.is_empty()
+        {
+            return Err(invalid_input("invalid retained Change-create plan"));
+        }
+        let event = &plan.events[0];
+        let (outcome, complete) = consumer.append(&plan.operation_id, event)?;
+        return Ok(ChangeOperationReceiptV1 {
+            schema: CHANGE_OPERATION_SCHEMA_V1.to_owned(),
+            operation_id: plan.operation_id,
+            change_id: plan.change_id,
+            events: vec![event_receipt(event, outcome)],
+            complete,
+        });
+    }
     let write_store = resolve_change_write_store(&options.repo)?;
     preflight_change_writer(write_store.backend().journal().as_ref())?;
+    let plan = prepare_create_plan(&options, write_store.store_dir())?;
+    preflight_change_writer(write_store.backend().journal().as_ref())?;
+    let event_store = write_store.event_store()?;
+    let mut receipts = Vec::with_capacity(plan.events.len());
+    for event in &plan.events {
+        let outcome = event_store.record_change_event_once(event)?;
+        receipts.push(event_receipt(event, outcome));
+    }
+    Ok(ChangeOperationReceiptV1 {
+        schema: CHANGE_OPERATION_SCHEMA_V1.to_owned(),
+        operation_id: plan.operation_id,
+        change_id: plan.change_id,
+        events: receipts,
+        complete: true,
+    })
+}
 
+fn prepare_create_plan(
+    options: &ChangeCreateOptions,
+    store_dir: &Path,
+) -> Result<ChangeOperationPlanV1> {
     let request_hash = sha256_json_prefixed(&serde_json::json!({
         "operation": "create_change_v1",
         "operationId": options.operation_id,
         "identityDescriptor": options.identity_descriptor,
     }))?;
-    let plan_path = operation_plan_path(write_store.store_dir(), &options.operation_id);
+    let plan_path = operation_plan_path(store_dir, &options.operation_id);
     let plan = if plan_path.exists() {
         let bytes = fs::read(&plan_path)
             .map_err(|error| io_error("read Change operation plan", &plan_path, error))?;
@@ -460,7 +521,7 @@ pub fn create_change(options: ChangeCreateOptions) -> Result<ChangeOperationRece
         plan
     } else {
         let claim_nonce = operation_nonce(&options.operation_id, "change-declaration")?;
-        let payload = build_change_declared(options.identity_descriptor, claim_nonce)?;
+        let payload = build_change_declared(options.identity_descriptor.clone(), claim_nonce)?;
         let change_id = payload.change_id.clone();
         let writer = writer_from_options(&options.repo, options.actor_id.as_ref());
         let event = operation_event(
@@ -484,23 +545,7 @@ pub fn create_change(options: ChangeCreateOptions) -> Result<ChangeOperationRece
         plan
     };
 
-    // The plan is durable before the first append. Recheck the capability at
-    // the append boundary so an L0/M1 transition cannot be crossed by a stale
-    // workflow object.
-    preflight_change_writer(write_store.backend().journal().as_ref())?;
-    let event_store = write_store.event_store()?;
-    let mut receipts = Vec::with_capacity(plan.events.len());
-    for event in &plan.events {
-        let outcome = event_store.record_change_event_once(event)?;
-        receipts.push(event_receipt(event, outcome));
-    }
-    Ok(ChangeOperationReceiptV1 {
-        schema: CHANGE_OPERATION_SCHEMA_V1.to_owned(),
-        operation_id: plan.operation_id,
-        change_id: plan.change_id,
-        events: receipts,
-        complete: true,
-    })
+    Ok(plan)
 }
 
 pub fn join_revision_to_change(

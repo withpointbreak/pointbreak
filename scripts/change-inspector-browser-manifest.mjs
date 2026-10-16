@@ -359,13 +359,21 @@ export async function publishPassingManifest({
 				"pointbreak.inspect-derived-access-status" ||
 			primaryStatus?.version !== 1 ||
 			primaryStatus?.active !== true ||
-			primaryStatus?.servingCurrent !== true ||
+			primaryStatus?.servingCurrent !== false ||
+			primaryStatus?.child?.observationOnly !== true ||
+			!Number.isSafeInteger(primaryStatus?.child?.epoch) ||
+			primaryStatus.child.epoch <= 0 ||
+			candidate.primaryDerivedAccessEpoch !== primaryStatus.child.epoch ||
+			!["idle", "completed"].includes(primaryStatus?.child?.state) ||
+			primaryStatus?.child?.operation !== null ||
+			primaryStatus?.child?.requestId !== null ||
+			primaryStatus?.child?.observationPending !== false ||
 			primaryStatus?.availability !== "current" ||
 			primaryStatus?.rebuildInFlight !== false ||
 			primaryStatus?.rebuildPaused !== false
 		) {
 			throw new Error(
-				"primary derived-access status is not active/current",
+				"primary derived-access status is not a healthy detached active/current observation",
 			);
 		}
 		if (!isDeepStrictEqual(candidate.primaryDerivedAccessStatus, primaryStatus)) {
