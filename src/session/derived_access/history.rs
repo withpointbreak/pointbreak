@@ -3460,7 +3460,20 @@ mod tests {
 
     #[test]
     fn active_history_pages_hydrate_only_selected_authoritative_carriers() {
-        let (_temp, access) = active_history(7);
+        assert_history_hydrates_only_selected_carriers(false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn active_history_pages_keep_selected_reads_bounded_after_unrelated_ntfs_churn() {
+        assert_history_hydrates_only_selected_carriers(true);
+    }
+
+    fn assert_history_hydrates_only_selected_carriers(unrelated_volume_churn: bool) {
+        let (temp, access) = active_history(7);
+        if unrelated_volume_churn {
+            std::fs::write(temp.path().join("unrelated-to-events.bin"), b"volume churn").unwrap();
+        }
         let scope =
             crate::bench_support::longitudinal::LongitudinalCountingScopeV1::new("a".repeat(64))
                 .unwrap();
@@ -3488,9 +3501,22 @@ mod tests {
         assert!(page.entries[0].occurred_at > page.entries[1].occurred_at);
         assert_eq!(page.facets.get("review_initialized"), Some(&7));
         let counters = scope.snapshot();
+        let (selected_opens, safety_opens, absent_probes, present_probes) =
+            scope.carrier_open_classification();
+        assert_eq!(selected_opens, 2, "only the two selected events are opened");
+        // Lifecycle refresh and cold open each probe the enrollment fence.
+        // A stable NTFS continuation may additionally admit maintenance, whose
+        // worker lifecycle probes the same fence on this counted caller.
+        assert!(
+            (2..=3).contains(&safety_opens),
+            "safety opens: {safety_opens}"
+        );
+        assert_eq!(absent_probes, safety_opens, "every safety probe completed");
+        assert_eq!(present_probes, 0, "this fixture is not enrolled");
         assert_eq!(
-            counters.counters.carrier_opens, 4,
-            "two selected events plus lifecycle-refresh and cold-open profile probes"
+            counters.counters.carrier_opens,
+            selected_opens + safety_opens,
+            "all physical opens must be classified"
         );
         assert_eq!(counters.counters.event_decodes, 2);
         assert_eq!(counters.counters.directory_entries_walked, 0);

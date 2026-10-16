@@ -1054,6 +1054,19 @@ impl LongitudinalCountingScopeV1 {
         state.lock_facts.push(fact);
     }
 
+    /// Test-only view of the existing physical-open classification. This does
+    /// not add counters or change the public receipt/snapshot contract.
+    #[cfg(test)]
+    pub(crate) fn carrier_open_classification(&self) -> (u64, u64, u64, u64) {
+        let state = lock_state(&self.state);
+        (
+            state.other_carrier_opens,
+            state.enrollment_safety_probe_opens,
+            state.enrollment_safety_probe_absent,
+            state.enrollment_safety_probe_present,
+        )
+    }
+
     pub fn snapshot(&self) -> LongitudinalCountingSnapshotV1 {
         let state = lock_state(&self.state);
         let mut derived_access_phases = state.derived_access_phases.clone();

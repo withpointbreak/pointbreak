@@ -937,10 +937,7 @@ fn handle_connection(
     stream.set_read_timeout(Some(Duration::from_secs(15)))?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
 
-    let read_half = stream.try_clone()?;
-    let mut reader = BufReader::new(read_half);
-
-    let request = match parse_request_head(&mut reader) {
+    let request = match read_connection_request(&stream) {
         Ok(Some(request)) => request,
         Ok(None) => return Ok(()),
         Err(RequestParseError::Io(error)) => return Err(error),
@@ -990,6 +987,16 @@ fn handle_connection(
         })
     };
     write_response(stream, &response)
+}
+
+fn read_connection_request(stream: &TcpStream) -> Result<Option<RequestHead>, RequestParseError> {
+    // Parsing only borrows the accepted socket. A duplicate can be inherited
+    // by a concurrently starting Windows child and keep this response alive
+    // after the parent has written it and dropped its handles.
+    let mut reader = BufReader::new(stream);
+    #[cfg(all(test, windows))]
+    tests::request_reader_checkpoint();
+    parse_request_head(&mut reader)
 }
 
 pub(super) fn data_response(
@@ -2340,6 +2347,146 @@ mod tests {
     /// Upper bound for a test's wait on progress it expects to happen. Only a real
     /// hang should reach it, so a loaded host passes and a deadlock still fails.
     const HANG_GUARD: Duration = Duration::from_secs(60);
+
+    #[cfg(windows)]
+    thread_local! {
+        // Scoped to the connection thread in the Windows ownership regression.
+        // This synchronization does not exist in production binaries.
+        static REQUEST_READER_CHECKPOINT: std::cell::RefCell<Option<(
+            std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>,
+        )>> = const { std::cell::RefCell::new(None) };
+    }
+
+    #[cfg(windows)]
+    pub(super) fn request_reader_checkpoint() {
+        REQUEST_READER_CHECKPOINT.with(|checkpoint| {
+            if let Some((ready, resume)) = checkpoint.borrow_mut().take() {
+                ready.send(()).expect("reader ready");
+                resume.recv_timeout(HANG_GUARD).expect("resume reader");
+            }
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "subprocess entry point for the socket ownership regression"]
+    fn response_socket_child_entrypoint() {
+        assert_eq!(
+            std::env::var("POINTBREAK_TEST_RESPONSE_SOCKET_CHILD").as_deref(),
+            Ok("1")
+        );
+        // A failed parent must not leave this test subprocess alive forever.
+        thread::spawn(|| {
+            thread::sleep(HANG_GUARD);
+            std::process::exit(77);
+        });
+        let mut input = Vec::new();
+        std::io::stdin().read_to_end(&mut input).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn response_reaches_eof_while_a_concurrently_started_child_is_alive() {
+        use std::os::windows::io::AsRawSocket;
+        use std::process::{Child, Command, Stdio};
+        use std::sync::mpsc;
+
+        struct ChildGuard(Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        // First prove that the test detects the old ownership failure. Force
+        // the test-only duplicate inheritable so the control remains useful
+        // even if a future Rust release changes try_clone's handle flags.
+        for inherited_clone in [true, false] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            client.set_write_timeout(Some(HANG_GUARD)).unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
+            stream.set_write_timeout(Some(HANG_GUARD)).unwrap();
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let (resume_tx, resume_rx) = mpsc::channel();
+            let server = thread::spawn(move || {
+                let legacy_duplicate = inherited_clone.then(|| {
+                    let duplicate = stream.try_clone().unwrap();
+                    #[link(name = "kernel32")]
+                    unsafe extern "system" {
+                        fn SetHandleInformation(
+                            handle: *mut std::ffi::c_void,
+                            mask: u32,
+                            flags: u32,
+                        ) -> i32;
+                    }
+                    // SAFETY: the duplicate owns this live Winsock handle.
+                    // HANDLE_FLAG_INHERIT is 1; only this test-owned duplicate
+                    // is changed, before the synchronized child creation.
+                    let changed =
+                        unsafe { SetHandleInformation(duplicate.as_raw_socket() as *mut _, 1, 1) };
+                    assert_ne!(changed, 0, "{}", std::io::Error::last_os_error());
+                    duplicate
+                });
+                REQUEST_READER_CHECKPOINT.with(|checkpoint| {
+                    *checkpoint.borrow_mut() = Some((ready_tx, resume_rx));
+                });
+                let request = read_connection_request(&stream).unwrap().unwrap();
+                assert_eq!(request.method, "GET");
+                assert_eq!(request.target, "/socket-test");
+                write_response(stream, &Response::text("200 OK", "complete")).unwrap();
+                drop(legacy_duplicate);
+            });
+            ready_rx
+                .recv_timeout(HANG_GUARD)
+                .expect("reader exists before spawn");
+            let child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "cli::inspect::server::tests::response_socket_child_entrypoint",
+                    "--ignored",
+                ])
+                .env("POINTBREAK_TEST_RESPONSE_SOCKET_CHILD", "1")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let mut child = ChildGuard(child);
+            assert!(child.0.try_wait().unwrap().is_none());
+            resume_tx.send(()).unwrap();
+            client
+                .write_all(b"GET /socket-test HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
+            let mut response = Vec::new();
+            let completion = client.read_to_end(&mut response);
+            server.join().unwrap();
+            let child_alive = child.0.try_wait().unwrap().is_none();
+            eprintln!(
+                "inherited_clone={inherited_clone} child_alive={child_alive} completion={completion:?} response_bytes={response:?}"
+            );
+            assert!(child_alive, "EOF must not depend on the child exiting");
+            let text = std::str::from_utf8(&response).unwrap();
+            let (headers, body) = text.split_once("\r\n\r\n").unwrap();
+            assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
+            assert!(headers.contains("Content-Length: 8\r\n"));
+            assert!(headers.ends_with("Connection: close"));
+            assert_eq!(body, "complete");
+            if inherited_clone {
+                assert!(matches!(
+                    completion.unwrap_err().kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ));
+            } else {
+                completion.expect("borrowed request reader must not delay EOF");
+            }
+        }
+    }
 
     #[cfg(feature = "longitudinal-counting")]
     #[test]
