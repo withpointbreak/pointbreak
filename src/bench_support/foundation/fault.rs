@@ -21,8 +21,8 @@ use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
 pub const QUALIFICATION_PLAN_SCHEMA_V1: &str = "pointbreak.qualification-plan.v1";
 pub const QUALIFICATION_EVIDENCE_SCHEMA_V1: &str = "pointbreak.qualification-evidence.v1";
 const BARRIER_SCHEMA_V1: &str = "pointbreak.qualification-process-barrier.v1";
-const RUSQLITE_BUILD_VERSION: &str = "0.40.1";
-const LIBSQLITE3_SYS_BUILD_VERSION: &str = "0.38.1";
+const RUSQLITE_BUILD_VERSION: &str = "0.41.1";
+const LIBSQLITE3_SYS_BUILD_VERSION: &str = "0.39.1";
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
