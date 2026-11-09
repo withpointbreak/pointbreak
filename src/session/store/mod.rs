@@ -5,6 +5,7 @@ pub(in crate::session) mod bundle;
 pub(in crate::session) mod capabilities;
 pub(in crate::session) mod content;
 mod event_store;
+pub(in crate::session) mod family_topology;
 pub(in crate::session) mod fingerprint;
 pub(in crate::session) mod inventory;
 pub(in crate::session) mod object_artifact;
@@ -20,6 +21,8 @@ pub(in crate::session) mod user_level;
 pub use capabilities::{AuthorityCursorV2, StoreCapabilityInspection, StoreCapabilityStatus};
 pub(crate) use capabilities::{BulkAdoptionManifestV1, ReservedCohortRecordV1};
 pub use event_store::EventWriteOutcome;
+#[cfg(any(target_os = "macos", windows))]
+pub(crate) use event_store::PreparedProgressEvent;
 pub(crate) use event_store::{EventStore, EventWriteBatch, SkippedEvent};
 #[cfg(test)]
 pub use fingerprint::compute_revision_fingerprint;

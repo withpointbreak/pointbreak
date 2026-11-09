@@ -538,6 +538,18 @@ pub(super) fn run(
     }
 }
 
+#[cfg(target_os = "macos")]
+pub(super) fn run_owned_create(
+    args: ChangeArgs,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match args.command {
+        ChangeCommand::Create(args) => run_create(args, stdout, stderr),
+        _ => Err("private owner admits only change create".into()),
+    }
+}
+
 fn run_create(
     args: CreateArgs,
     stdout: &mut dyn Write,
@@ -557,6 +569,10 @@ fn run_create(
         ChangeCreateOptions::new(&args.repo, args.operation_id, descriptor),
     );
     let receipt = create_change(options)?;
+    #[cfg(target_os = "macos")]
+    if let Some(diagnostic) = pointbreak::session::take_owned_change_diagnostic() {
+        writeln!(stderr, "private-change-ack: {diagnostic}")?;
+    }
     common::surface_best_effort_skip(&skip, stderr);
     write(&args.format_args, stdout, &receipt)
 }
@@ -2519,6 +2535,8 @@ mod tests {
             "user.name=Delegation Fixture",
             "-c",
             "user.email=delegation@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
             "commit",
             "--quiet",
             "-m",

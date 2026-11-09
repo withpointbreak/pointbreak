@@ -23,6 +23,76 @@ const PRODUCT_SELECTORS: [&str; 16] = [
     "SHORE_PERF",
 ];
 
+#[cfg(not(feature = "experimental-enrolled-progress"))]
+#[test]
+fn default_binary_rejects_all_experimental_owned_entries() {
+    for entry in [
+        "__owned-change-v1",
+        "__owned-enrollment-v1",
+        "__owned-audit-v1",
+        "__owned-append-v1",
+        "__owned-inspect-v1",
+        "__owned-data-v1",
+    ] {
+        let result = support::pointbreak_command()
+            .arg(entry)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("run default binary");
+        assert_eq!(result.status.code(), Some(1), "{entry}");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            stderr.contains("unrecognized subcommand"),
+            "{entry} reached a private entry instead of CLI rejection: {stderr}"
+        );
+        assert!(result.stdout.is_empty(), "{entry}");
+    }
+}
+
+#[cfg(not(feature = "experimental-enrolled-progress"))]
+#[test]
+fn default_inspector_child_refuses_enrollment_before_repository_access() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let scratch = tempfile::tempdir().unwrap();
+    let repository = scratch.path().join("uncreated-store");
+    #[cfg(target_os = "macos")]
+    let selection = serde_json::json!({
+        "requestId": "1".repeat(64),
+        "enrollmentActor": "actor:consumer-test",
+    });
+    #[cfg(not(target_os = "macos"))]
+    let selection = serde_json::json!({});
+    let request = serde_json::json!({
+        "kind": "start",
+        "epoch": 1,
+        "repo": repository,
+        "selection": selection,
+    });
+    let mut child = support::pointbreak_command()
+        .arg("__inspect-data-v1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn ordinary Inspector data transport");
+    let mut input = child.stdin.take().unwrap();
+    writeln!(input, "{request}").unwrap();
+    drop(input);
+    let result = child.wait_with_output().unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&result.stderr)
+            .contains("enrolled Inspector requires the experimental-enrolled-progress feature")
+    );
+    assert!(result.stdout.is_empty());
+    assert!(
+        !repository.exists(),
+        "refusal must precede repository access"
+    );
+}
+
 fn command(args: &[&str]) -> Command {
     if args.first() == Some(&"capture")
         && let Some(index) = args.iter().position(|arg| *arg == "--repo")

@@ -493,9 +493,17 @@ mod interaction_attribution_tests {
                 snapshot.counters.directory_entries_walked,
                 cursor.journal_record_count
             );
-            assert_eq!(
-                snapshot.counters.carrier_opens,
-                cursor.journal_record_count + 2
+            // Six request-thread profile probes and the capability pair are
+            // fixed. The shared scope also counts one maintenance-open probe
+            // if the absent-generation worker runs before drop cancels it.
+            assert!(
+                [
+                    cursor.journal_record_count + 8,
+                    cursor.journal_record_count + 9
+                ]
+                .contains(&snapshot.counters.carrier_opens),
+                "unexpected active-fallback carrier work: {:?}",
+                snapshot.counters
             );
             assert_eq!(snapshot.counters.change_capability_carriers_opened, 2);
             assert_eq!(snapshot.counters.event_decodes, cursor.event_count);

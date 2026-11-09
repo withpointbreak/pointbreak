@@ -25,7 +25,43 @@ const status = {
   actions: ["wait", "authoritative_fallback", "cancel"],
 };
 
+const child = {
+  epoch: 2,
+  operation: 7,
+  requestId: "a".repeat(32),
+  lastCompletedOperation: 6,
+  lastCompletedRequestId: "b".repeat(32),
+  lastCompletedKind: "read",
+  lastCompletedOutcome: "succeeded",
+  state: "unknown",
+  detail: "response lost",
+  cooperativeCancellation: true,
+  observationOnly: true,
+  observationPending: false,
+  observedAtUnixMilliseconds: 100,
+  observationAgeMilliseconds: 40,
+};
+
 describe("Change recovery protocol", () => {
+  it("keeps detached child status distinct from fresh currentness", () => {
+    expect(decodeChangeRecoveryStatus({ ...status, child })?.child).toEqual(
+      child,
+    );
+    expect(
+      decodeChangeRecoveryStatus({ ...status, child, servingCurrent: true }),
+    ).toBeNull();
+  });
+  it.each([
+    { ...child, state: "restarting" },
+    { ...child, epoch: -1 },
+    { ...child, requestId: null },
+    { ...child, observationOnly: false },
+    { ...child, lastCompletedRequestId: "forged" },
+    { ...child, cooperativeCancellation: false },
+    { ...child, observationAgeMilliseconds: -1 },
+  ])("rejects malformed child identities and unsupported promises %#", (child) => {
+    expect(decodeChangeRecoveryStatus({ ...status, child })).toBeNull();
+  });
   it("decodes the complete status and filters unknown actions", () => {
     expect(
       decodeChangeRecoveryStatus({

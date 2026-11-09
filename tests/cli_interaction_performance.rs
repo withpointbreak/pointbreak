@@ -281,8 +281,8 @@ fn cli_interaction_performance_cases_preserve_semantics() {
         );
         assert_eq!(
             receipt.counters.carrier_opens,
-            fixture.journal_record_count + 2,
-            "{} must add only the bounded capability pair",
+            fixture.journal_record_count + 3,
+            "{} adds the capability pair and one store-resolution profile probe",
             case.id
         );
         assert_eq!(receipt.counters.change_capability_carriers_opened, 2);
@@ -372,6 +372,25 @@ fn cli_interaction_performance_cases_preserve_semantics() {
         assert_eq!(receipt.children.len(), 1);
         assert_eq!(receipt.children[0].actor, Actor::BackgroundMaintenance);
         assert_eq!(receipt.children[0].coverage, Coverage::Complete);
+        // Six request profile probes plus the capability pair; the shared
+        // observer counts one more probe if maintenance beats cancellation.
+        assert!(
+            [
+                fixture.journal_record_count + 8,
+                fixture.journal_record_count + 9
+            ]
+            .contains(&receipt.counters.carrier_opens),
+            "{} active-fallback carrier work drifted: {:?}",
+            case.id,
+            receipt.counters
+        );
+        assert_eq!(
+            receipt.counters.directory_entries_walked,
+            fixture.journal_record_count
+        );
+        assert_eq!(receipt.counters.change_capability_carriers_opened, 2);
+        assert_eq!(receipt.counters.event_decodes, fixture.event_count);
+        assert_eq!(receipt.counters.event_validations, fixture.event_count);
         assert_eq!(
             derived_publication_count(fixture.repo.path()),
             0,
@@ -500,11 +519,25 @@ fn cli_interaction_performance_cases_preserve_semantics() {
             receipt.counters.directory_entries_walked, fixture.journal_record_count,
             "{name} must perform one strict Journal inspection"
         );
-        assert_eq!(
-            receipt.counters.carrier_opens,
-            fixture.journal_record_count + 2,
-            "{name} must add only the bounded capability pair"
-        );
+        if name == "cold-inactive" {
+            assert_eq!(
+                receipt.counters.carrier_opens,
+                fixture.journal_record_count + 3,
+                "off attention adds the capability pair and one resolution profile probe"
+            );
+        } else {
+            // Six request profile probes plus the capability pair. The sole
+            // maintenance child adds zero or one probe before cancellation.
+            assert!(
+                [
+                    fixture.journal_record_count + 8,
+                    fixture.journal_record_count + 9
+                ]
+                .contains(&receipt.counters.carrier_opens),
+                "{name} carrier work drifted: {:?}",
+                receipt.counters
+            );
+        }
         assert_eq!(receipt.counters.change_capability_carriers_opened, 2);
         assert_eq!(receipt.counters.event_decodes, fixture.event_count);
         assert_eq!(receipt.counters.event_validations, fixture.event_count);

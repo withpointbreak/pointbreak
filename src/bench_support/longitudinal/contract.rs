@@ -4005,6 +4005,124 @@ impl LongitudinalTimelinePostPinBarrierReceiptV1 {
     }
 }
 
+pub const LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_RECEIPT_SCHEMA_V2: &str =
+    "pointbreak.longitudinal-timeline-post-pin-barrier-receipt.v2";
+pub const TIMELINE_PRE_HYDRATION_COUNTING_CONTRACT_SHA256_V2: &str =
+    "3bf1a17047386370c18969d7831ae7441ac35000eaece365e7df162cfee8e52c";
+// Digest of the one negative-fence key; the physical owner test binds it to
+// capabilities' single logical-key definition. It is never a read-purpose API.
+pub const TIMELINE_ENROLLMENT_FENCE_KEY_DIGEST_V2: &str =
+    "5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf";
+
+pub(crate) fn validate_timeline_read_classification_v2(
+    total: u64,
+    safety: u64,
+    other: u64,
+    absent: u64,
+    present: u64,
+    selected: u64,
+) -> Result<(), LongitudinalContractError> {
+    if safety.checked_add(other) != Some(total)
+        || absent.checked_add(present) != Some(safety)
+        || other != 0
+        || selected == 0
+    {
+        return Err(LongitudinalContractError::PairMismatch);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalTimelinePostPinBarrierReceiptV2 {
+    pub schema: String,
+    pub run_identity: String,
+    pub barrier_identity_sha256: String,
+    pub boundary: LongitudinalTimelinePostPinBoundaryV1,
+    pub carrier_opens_before: u64,
+    pub counting_contract_sha256: String,
+    pub setup_counter_receipt_sha256: String,
+    pub enrollment_safety_probe_opens_before: u64,
+    pub other_carrier_opens_before: u64,
+    pub enrollment_safety_probe_absent_before: u64,
+    pub enrollment_safety_probe_present_before: u64,
+    pub selected_carriers_before: u64,
+    pub expected_carrier_key_digest: String,
+    pub observed_mismatch_key_digest: String,
+    pub mismatch_kind: LongitudinalTimelineCarrierMismatchKindV1,
+    pub clean_carrier_sha256: String,
+    pub mutated_carrier_sha256: String,
+    pub mutation_recipe_sha256: String,
+    pub derivative_inventory_sha256: String,
+    pub ready_receipt_sha256: String,
+    pub release_receipt_sha256: String,
+    pub receipt_sha256: String,
+}
+
+impl LongitudinalTimelinePostPinBarrierReceiptV2 {
+    pub fn canonical_sha256(&self) -> Result<String, LongitudinalContractError> {
+        canonical_sha256_without(&self.receipt_sha256, |receipt_sha256| {
+            let mut preimage = self.clone();
+            preimage.receipt_sha256 = receipt_sha256;
+            preimage
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), LongitudinalContractError> {
+        if self.schema != LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_RECEIPT_SCHEMA_V2 {
+            return Err(LongitudinalContractError::UnsupportedContract);
+        }
+        for (hash, field) in [
+            (&self.run_identity, "run identity"),
+            (&self.barrier_identity_sha256, "barrier identity"),
+            (
+                &self.expected_carrier_key_digest,
+                "expected carrier key digest",
+            ),
+            (
+                &self.observed_mismatch_key_digest,
+                "observed mismatch key digest",
+            ),
+            (&self.clean_carrier_sha256, "clean carrier SHA-256"),
+            (&self.mutated_carrier_sha256, "mutated carrier SHA-256"),
+            (&self.mutation_recipe_sha256, "mutation recipe SHA-256"),
+            (
+                &self.derivative_inventory_sha256,
+                "derivative inventory SHA-256",
+            ),
+            (&self.ready_receipt_sha256, "ready receipt SHA-256"),
+            (&self.release_receipt_sha256, "release receipt SHA-256"),
+            (&self.receipt_sha256, "barrier receipt SHA-256"),
+        ] {
+            validate_hex(hash, 64, field)?;
+        }
+        validate_timeline_read_classification_v2(
+            self.carrier_opens_before,
+            self.enrollment_safety_probe_opens_before,
+            self.other_carrier_opens_before,
+            self.enrollment_safety_probe_absent_before,
+            self.enrollment_safety_probe_present_before,
+            self.selected_carriers_before,
+        )?;
+        validate_hex(&self.setup_counter_receipt_sha256, 64, "setup receipt")?;
+        if self.counting_contract_sha256 != TIMELINE_PRE_HYDRATION_COUNTING_CONTRACT_SHA256_V2
+            || self.expected_carrier_key_digest == TIMELINE_ENROLLMENT_FENCE_KEY_DIGEST_V2
+        {
+            return Err(LongitudinalContractError::UnsupportedContract);
+        }
+        if self.selected_carriers_before == 0
+            || self.expected_carrier_key_digest != self.observed_mismatch_key_digest
+        {
+            return Err(LongitudinalContractError::PairMismatch);
+        }
+        validate_bound_hash(
+            &self.receipt_sha256,
+            &self.canonical_sha256()?,
+            "Timeline post-pin barrier receipt",
+        )
+    }
+}
+
 impl LongitudinalCounterReceiptV1 {
     pub fn canonical_sha256(&self) -> Result<String, LongitudinalContractError> {
         canonical_sha256_without(&self.receipt_sha256, |receipt_sha256| {

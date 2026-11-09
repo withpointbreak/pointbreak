@@ -266,6 +266,7 @@ mod native {
         retained_start_usn: i64,
         volume: File,
         volume_mount: String,
+        directory_identity: (u64, u128),
     }
 
     unsafe extern "system" {
@@ -434,7 +435,9 @@ mod native {
         change.extend_from_slice(&cursor.next_usn.to_le_bytes());
         let stamp =
             JournalChangeStamp::observed_with_native_cursor(&identity, &change, cursor.clone());
+        let directory_identity = (id.volume_serial_number, u128::from_le_bytes(id.file_id));
         Ok(CurrentObservation {
+            directory_identity,
             stamp,
             cursor,
             retained_start_usn: journal.first_usn.max(journal.lowest_valid_usn),
@@ -520,6 +523,87 @@ mod native {
 
     fn read_interval(
         current: CurrentObservation,
+        start_usn: i64,
+        max_bytes: u64,
+        max_records: u64,
+    ) -> Result<JournalChangeCheck> {
+        read_retained_interval(&current, start_usn, max_bytes, max_records)
+    }
+
+    /// Created before SQL and retained through its confirmed final native close.
+    pub(crate) struct RetainedJournal(CurrentObservation);
+    impl RetainedJournal {
+        pub(crate) fn capture(path: &Path, directory: &File) -> Result<Self> {
+            let current = observe_current(path)?;
+            if crate::session::store::authority_lock::file_identity(directory)?.parts()
+                != current.directory_identity
+            {
+                return Err(ShoreError::Message(
+                    "retained journal directory mismatch".into(),
+                ));
+            }
+            Ok(Self(current))
+        }
+        pub(crate) fn volume_identity(
+            &self,
+        ) -> Result<crate::session::store::authority_lock::PhysicalFileIdentity> {
+            crate::session::store::authority_lock::file_identity(&self.0.volume)
+        }
+        pub(crate) fn stamp(&self) -> JournalChangeStamp {
+            self.0.stamp.clone()
+        }
+        pub(crate) fn changes_since(
+            &mut self,
+            directory: &File,
+            before: &JournalChangeStamp,
+        ) -> Result<JournalChangeCheck> {
+            if crate::session::store::authority_lock::file_identity(directory)?.parts()
+                != self.0.directory_identity
+            {
+                return Err(ShoreError::Message(
+                    "retained journal directory changed".into(),
+                ));
+            }
+            let journal = query_journal(&self.0.volume, &self.0.volume_mount)?;
+            self.0.cursor.journal_id = journal.journal_id;
+            self.0.cursor.next_usn = journal.next_usn;
+            self.0.retained_start_usn = journal.first_usn.max(journal.lowest_valid_usn);
+            let cursor = &self.0.cursor;
+            let mut identity = b"windows-usn-authority-identity-v1\0".to_vec();
+            identity.extend_from_slice(&cursor.volume_serial_number.to_le_bytes());
+            identity.extend_from_slice(&cursor.directory_file_reference.to_le_bytes());
+            let mut change = b"windows-usn-authority-cursor-v1\0".to_vec();
+            change.extend_from_slice(&cursor.journal_id.to_le_bytes());
+            change.extend_from_slice(&cursor.next_usn.to_le_bytes());
+            self.0.stamp =
+                JournalChangeStamp::observed_with_native_cursor(&identity, &change, cursor.clone());
+            let Some(previous) = before.native_cursor() else {
+                return Ok(indeterminate(
+                    self.0.stamp.clone(),
+                    0,
+                    0,
+                    "missing native cursor".into(),
+                ));
+            };
+            if validate_continuity(previous, cursor, self.0.retained_start_usn).is_err() {
+                return Ok(indeterminate(
+                    self.0.stamp.clone(),
+                    0,
+                    0,
+                    "retained journal continuity failed".into(),
+                ));
+            }
+            read_retained_interval(
+                &self.0,
+                previous.next_usn,
+                DEFAULT_MAX_BYTES,
+                DEFAULT_MAX_RECORDS,
+            )
+        }
+    }
+
+    fn read_retained_interval(
+        current: &CurrentObservation,
         mut start_usn: i64,
         max_bytes: u64,
         max_records: u64,
@@ -532,7 +616,7 @@ mod native {
         while start_usn < target_usn {
             if bytes_examined + JOURNAL_READ_BUFFER_BYTES as u64 > max_bytes {
                 return Ok(indeterminate(
-                    current.stamp,
+                    current.stamp.clone(),
                     bytes_examined,
                     records_examined,
                     "NTFS journal byte work cap was exhausted".to_owned(),
@@ -573,7 +657,7 @@ mod native {
                     return Err(failure);
                 }
                 return Ok(indeterminate(
-                    current.stamp,
+                    current.stamp.clone(),
                     bytes_examined,
                     records_examined,
                     format!("unprivileged NTFS journal read failed: {error}"),
@@ -582,7 +666,7 @@ mod native {
             let returned = returned as usize;
             if returned < 8 || returned > storage.len() * 8 {
                 return Ok(indeterminate(
-                    current.stamp,
+                    current.stamp.clone(),
                     bytes_examined,
                     records_examined,
                     "unprivileged NTFS journal read returned an invalid byte count".to_owned(),
@@ -598,7 +682,7 @@ mod native {
                 Ok(page) => page,
                 Err(reason) => {
                     return Ok(indeterminate(
-                        current.stamp,
+                        current.stamp.clone(),
                         bytes_examined,
                         records_examined,
                         reason,
@@ -613,7 +697,7 @@ mod native {
             }
             if page.next_usn <= start_usn {
                 return Ok(indeterminate(
-                    current.stamp,
+                    current.stamp.clone(),
                     bytes_examined,
                     records_examined,
                     "unprivileged NTFS journal cursor did not advance".to_owned(),
@@ -623,7 +707,7 @@ mod native {
         }
         let relevant_change = !relevant_file_references.is_empty();
         Ok(JournalChangeCheck {
-            after: current.stamp,
+            after: current.stamp.clone(),
             verdict: if relevant_change {
                 JournalChangeVerdict::Changed
             } else {
@@ -720,6 +804,8 @@ mod native {
     }
 }
 
+#[cfg(windows)]
+pub(crate) use native::RetainedJournal;
 #[cfg(windows)]
 pub(super) use native::{capture, changes_since, created_transition};
 

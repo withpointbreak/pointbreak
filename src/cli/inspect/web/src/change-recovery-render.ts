@@ -29,6 +29,14 @@ export function renderChangeRecovery(
   const status = view.status;
   const visible =
     view.error !== null ||
+    (status?.child !== undefined &&
+      [
+        "starting",
+        "initializing",
+        "running",
+        "unknown",
+        "unavailable",
+      ].includes(status.child.state)) ||
     view.access === "authoritative" ||
     (status?.active === true &&
       (!status.servingCurrent ||
@@ -45,17 +53,34 @@ export function renderChangeRecovery(
   if (summary !== null) {
     summary.textContent = view.error
       ? "Recovery status unavailable"
-      : view.pending === "fallback"
-        ? "Reading authoritative journal"
-        : view.access === "authoritative"
-          ? view.fallbackValidated
-            ? "Authoritative fallback"
-            : "Reading authoritative journal"
-          : status?.rebuildPaused
-            ? "Derived view rebuild paused"
-            : `Derived view: ${(status?.phase ?? status?.availability ?? "unavailable").replaceAll("_", " ")}.${count}`;
+      : status?.child?.state === "unknown"
+        ? "Data operation outcome unknown"
+        : status?.child?.state === "unavailable"
+          ? "Data process unavailable"
+          : status?.child?.state === "running"
+            ? "Data operation in progress"
+            : view.pending === "fallback"
+              ? "Reading authoritative journal"
+              : view.access === "authoritative"
+                ? view.fallbackValidated
+                  ? "Authoritative fallback"
+                  : "Reading authoritative journal"
+                : status?.rebuildPaused
+                  ? "Derived view rebuild paused"
+                  : `Derived view: ${(status?.phase ?? status?.availability ?? "unavailable").replaceAll("_", " ")}.${count}`;
   }
-  if (detail !== null) detail.textContent = view.error ?? status?.detail ?? "";
+  if (detail !== null) {
+    const child = status?.child;
+    detail.textContent =
+      view.error ??
+      (child?.detail ||
+        status?.detail ||
+        (child?.observationAgeMilliseconds != null
+          ? `Last data observation ${Math.floor(child.observationAgeMilliseconds / 1000)} seconds ago. Currentness is checked by each data request.`
+          : child
+            ? "Waiting for a data observation. Cancellation is cooperative."
+            : ""));
+  }
   const progress = find<HTMLProgressElement>("#derived-access-progress");
   if (progress !== null) {
     const determinate =

@@ -296,3 +296,64 @@ fact origins, and the capable reader document registry only after verified L2 co
 publication during bulk adoption occurs after the completion record and never makes an incomplete M1 store
 servable. Loose Journal and ContentStore bytes remain sole authority; explicit derived-off remains an
 artifact-free operational rollback, not a capability/store rollback.
+
+## Amendment: Counted Pre-Hydration Safety Boundary (2026-10-11)
+
+This amendment distinguishes enrollment-safety observation from selected event hydration in the explicitly versioned Timeline post-pin diagnostic. D3's safety fences and D4's bodyless selection and authoritative selected reread remain unchanged. It does not qualify a new platform, revise prior native results or authorize a production-store operation.
+
+### Context
+
+Current generation selection refreshes the lifecycle and repeats its negative enrollment-profile fence (`src/session/derived_access/runtime.rs`, `lifecycle.rs`). That fence checks append-progress metadata and may point-read the fixed root activation record even when that record is absent (`src/session/store/capabilities.rs::refuse_progress_store`). The LocalJournal's carrier-open metric includes the attempted optional read before I/O, so missing records still count. These probes protect against partial enrollment and missing selectors; caching or moving them out of a counted request would weaken the proof.
+
+The Timeline diagnostic selects bodyless locators, pauses before authoritative carrier hydration, mutates one exact carrier, then requires the same child to reread and reject its changed validation witness. Its original V1 barrier requires **all** pre-pin carrier opens to be zero. That stronger V1 condition remains the meaning of V1 evidence. A new V2 condition distinguishes only the identified negative enrollment fence from all other carrier reads; it does not permit arbitrary unselected event reads.
+
+### Decision
+
+**Attribution stays with the narrow owner.** The negative enrollment fence uses a crate-private LocalJournal entry point with the fixed root activation key and no caller-supplied key/class. All generic logical-key, digest, path, enumeration, selected-event, support and other control reads remain in the default other-carrier class, even when they address that same reserved key. Reserved-key matching alone never grants the exception. No scoped general-purpose read-purpose API is introduced.
+
+Every instrumented read continues to increment the existing total once at its existing boundary. The special leaf increments total and safety-attempt attribution together. The fence records completion only for successful absence or recognized legacy activation after its unchanged refusal logic. Malformed, wrong-family, progress-profile, failed or incomplete observations cannot produce ready evidence. Completion must credit the same counting state as the attempt. This is instrumentation provenance, not a new authority source or adversarial security boundary.
+
+**The new barrier is exhaustive and fail-closed.** V2 ready/receipt documents carry required `carrierOpensBefore`, `enrollmentSafetyProbeOpensBefore`, `otherCarrierOpensBefore`, `enrollmentSafetyProbeAbsentBefore`, `enrollmentSafetyProbePresentBefore` and `selectedCarriersBefore`. Checked u64 arithmetic must establish:
+
+- total opens equal safety-probe opens plus other-carrier opens;
+- safety-probe opens equal completed absent plus completed present observations;
+- other-carrier opens are zero and selected locator count is positive.
+
+An unknown read purpose defaults to other; unknown or missing serialized fields/schemas refuse. No reset, subtraction, fixed overhead, defaulted count or shifted measurement interval is permitted. A diagnostic fault carrier cannot be the fixed activation key. The snapshot and final total counter receipt bind the same request identity; final total cannot be smaller than the snapshot. Existing selected/support counters, byte/decode/validation metrics and total-open semantics remain unchanged. They describe existing instrumentation, not an exhaustive OS syscall census.
+
+For the final invalid-signature fault receipt, let C be total opens, E the validated **frozen pre-pin**
+safety count, T pre-pin total, V event validations, and H the checked sum of selected, revision-candidate
+and correlation-support carriers. V6 requires C>=T, C<=checked(E+H), and
+C=checked(checked(E+V)+1); every intermediate overflow refuses. E is measured, never a fixed offset or
+final safety total. The +1 is meaningful only alongside the exact same-child validation-witness abort
+proof. No later nonvalidating read earns additional safety credit. V1 retains its original saturating
+hydration bound and validations=opens-1 rule; normal Timeline rows retain their unchanged counter bounds.
+
+**Mutation and authority proofs remain independent.** The hook stays immediately before hydration in both ordinary and enrolled Timeline implementations. The controller may mutate only after valid ready, retaining exact carrier key, clean/mutated hashes, one-bit recipe and ready/release hashes. The same armed child must reread the mutated carrier and produce the expected validation-witness mismatch. Explicit-off comparison remains a fresh, exhaustive authoritative lane after mutation. Reference and fault source/trust restoration and all no-body/metadata-only invariants remain mandatory.
+
+The existing profile preflight is measured separately with the unchanged counter protocol and bound to the same child in V2 failure evidence. It is setup work, not zero work. Cold capability-pair validation, backfill and writer admission receive no blanket exception. If such a read occurs inside the armed request, readiness fails; the controller must not add a warm-up or retry to conceal it. Semantic-only comparison phases retain that label and do not become counted merely through association.
+
+**Migration is explicit and local to the changed evidence semantics.** V1 barrier request/ready/release/receipt bytes, hashes and zero-total validators remain unchanged. V2 introduces explicit schemas for those four documents and the classification-contract binding; mixed versions reject rather than convert. The global counter document and its canonical serialization remain V1. Private attribution is emitted only in V2 barrier evidence.
+
+A new Change-read request/receiptV3 and explicitly typed Timeline rowV2 carry the successor proof. EvaluatorV6 names a new hashed procedure that replaces the earlier post-pin boundary step while retaining other procedure requirements and platform criteria. Existing evaluatorV4/V5 and raw V1/V2 evidence retain their historical meaning. The existing package/fragment envelope dispatches by evaluator revision and explicit nested schema; it never defaults old evidence into the new boundary. Original bytes retain nested duplicate-field visibility before any Value conversion, including both orders of duplicated legacy/new schema selectors. Unknown or mixed versions refuse without making legacy-only parsing stricter. Raw receipt reconstruction, exact source/product/child bindings, stable inventories and completion-last publication remain required. Missing platform evidence remains insufficient evidence.
+
+### Consequences and rejected alternatives
+
+Legitimate negative enrollment probes can be measured before selected hydration without disabling them or hiding their cost. Selected and unrelated event pre-reads still fail. More explicit version/caller controls are required, but a global counter schema change or new counting framework is unnecessary.
+
+Rejected alternatives are subtracting a predicted probe count; resetting measurement after admission; exempting all reserved keys or capability records; allowing arbitrary unselected reads; broad purpose scopes that can wrap event hydration; weakening the product fence; and silently interpreting nonzero V1 evidence as a V2 pass. Each would either lose total accounting, broaden the exception, weaken safety or misstate historical evidence.
+
+### Review and validation obligations
+
+Owner-boundary controls must exercise actual absent/present negative probes and generic reads of the same key, selected and unrelated pre-pin reads, malformed/wrong-family/progress records, scope mismatch and incomplete attribution. Version/canonical tests must preserve historical bytes and reject mixed contracts. The same-child fault diagnostic must demonstrate a genuine post-write injected failure and restoration in addition to successful post-pin validation-witness rejection. Package tests must preserve raw receipt authority, diagnostic inadmissibility and unchanged native evidence requirements.
+
+Reopen this decision before admitting another read purpose, another key family, a global counter-document change, altered mutation timing, broader selected/unselected exceptions, changed native thresholds, or a new authority/assurance boundary. A newly observed non-exempt pre-pin read is a falsifier requiring diagnosis, not permission to widen the exception.
+
+Implementation anchors for this amendment (source locations at this revision):
+
+- `src/session/store/capabilities.rs:23` — `refuse_progress_store`.
+- `src/session/store/backend/local.rs:45` — `read_negative_enrollment_fence`.
+- `src/bench_support/longitudinal/counters.rs:1629` — `reach_timeline_carrier_locators_selected_v2`.
+- `src/bench_support/derived_access/change_read.rs:5586` — `count_timeline_profile_setup`.
+- `src/bench_support/derived_access/contract.rs:159` — `timeline_final_fault_counts_v2`.
+- `src/bench_support/derived_access/evidence.rs:5700` — `read_timeline_contract_json`.

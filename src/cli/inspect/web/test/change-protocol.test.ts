@@ -642,6 +642,27 @@ describe("bounded Change protocol", () => {
     ).toThrow("invalid changes Change page DTO");
   });
 
+  it("accepts the exact enrolled profile and rejects unknown successors", () => {
+    const enrolled = decodeReaderProfile({
+      ...profile(),
+      minimumReaderProfile: "review_change_revision_progress_v1",
+    });
+    expect(enrolled.minimumReaderProfile).toBe(
+      "review_change_revision_progress_v1",
+    );
+    expect(
+      sameProfileGeneration(decodeReaderProfile(profile()), enrolled),
+    ).toBe(false);
+    for (const minimumReaderProfile of [
+      "review_change_revision_progress_v2",
+      "review_change_revision_future_v1",
+    ]) {
+      expect(() =>
+        decodeReaderProfile({ ...profile(), minimumReaderProfile }),
+      ).toThrow();
+    }
+  });
+
   it("requires the postflight capability and freshness profile to be unchanged", () => {
     const initial = decodeReaderProfile(profile());
     expect(sameProfileGeneration(initial, decodeReaderProfile(profile()))).toBe(

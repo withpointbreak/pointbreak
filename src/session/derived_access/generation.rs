@@ -180,6 +180,10 @@ pub(crate) enum GenerationError {
 }
 
 impl GenerationLayout {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn rebuild_lock_path(&self) -> PathBuf {
+        self.storage_layout.rebuild_lock()
+    }
     pub(crate) fn new(store_root: &Path) -> Result<Self, GenerationError> {
         let storage_layout = DerivedStorageLayout::resolve(store_root).map_err(|error| {
             GenerationError::Metadata {
@@ -226,15 +230,34 @@ impl GenerationLayout {
     }
 
     pub(crate) fn try_rebuild_lease(&self) -> Result<RebuildLease, GenerationError> {
-        std::fs::create_dir_all(self.storage_layout.store_root())
-            .map_err(|error| io_error(self.storage_layout.store_root(), error))?;
+        self.try_rebuild_lease_inner(true)
+    }
+
+    /// Owned enrolled rebuilds provision the leaf separately against a retained
+    /// parent. This acquisition neither creates parents nor follows a symlink.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn try_existing_rebuild_lease(&self) -> Result<RebuildLease, GenerationError> {
+        self.try_rebuild_lease_inner(false)
+    }
+
+    fn try_rebuild_lease_inner(&self, create: bool) -> Result<RebuildLease, GenerationError> {
+        if create {
+            std::fs::create_dir_all(self.storage_layout.store_root())
+                .map_err(|error| io_error(self.storage_layout.store_root(), error))?;
+        }
         let path = self.storage_layout.rebuild_lock();
         #[cfg(any(test, feature = "longitudinal-counting"))]
         let attempt = begin_interaction_lock_attempt_v1(
             InteractionLockKindV1::Derived,
             InteractionLockModeV1::Try,
         );
-        let file = match open_lock_file(&path) {
+        let opened = if create {
+            open_lock_file(&path)
+        } else {
+            crate::session::store::authority_lock::open_identity_path(&path, false, false)
+                .map_err(|error| metadata_error(&path, error.to_string()))
+        };
+        let file = match opened {
             Ok(file) => file,
             Err(error) => {
                 #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -305,14 +328,44 @@ impl GenerationLayout {
         &self,
         generation_id: &str,
     ) -> Result<GenerationReadLease, GenerationError> {
+        self.read_lease(generation_id, true)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn acquire_existing_read_lease(
+        &self,
+        generation_id: &str,
+    ) -> Result<GenerationReadLease, GenerationError> {
+        self.read_lease(generation_id, false)
+    }
+
+    fn read_lease(
+        &self,
+        generation_id: &str,
+        create: bool,
+    ) -> Result<GenerationReadLease, GenerationError> {
         validate_generation_id(generation_id)?;
         let path = self.generation_lease_path(generation_id);
         #[cfg(any(test, feature = "longitudinal-counting"))]
         let attempt = begin_interaction_lock_attempt_v1(
             InteractionLockKindV1::Derived,
-            InteractionLockModeV1::Blocking,
+            if create {
+                InteractionLockModeV1::Blocking
+            } else {
+                InteractionLockModeV1::Try
+            },
         );
-        let file = match open_lock_file(&path) {
+        let opened = if create {
+            open_lock_file(&path)
+        } else {
+            crate::session::store::authority_lock::open_identity_path(&path, false, false).map_err(
+                |error| GenerationError::Io {
+                    path: path.clone(),
+                    message: error.to_string(),
+                },
+            )
+        };
+        let file = match opened {
             Ok(file) => file,
             Err(error) => {
                 #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -320,13 +373,23 @@ impl GenerationLayout {
                 return Err(error);
             }
         };
-        match file.lock_shared() {
+        let acquired = if create {
+            file.lock_shared().map_err(std::fs::TryLockError::Error)
+        } else {
+            file.try_lock_shared()
+        };
+        match acquired {
             Ok(()) => Ok(GenerationReadLease {
                 file,
                 #[cfg(any(test, feature = "longitudinal-counting"))]
                 _hold_recorder: attempt.record_physical_acquired(),
             }),
-            Err(error) => {
+            Err(std::fs::TryLockError::WouldBlock) => {
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                attempt.record_not_acquired(InteractionLockOutcomeV1::Busy);
+                Err(GenerationError::GenerationInUse)
+            }
+            Err(std::fs::TryLockError::Error(error)) => {
                 #[cfg(any(test, feature = "longitudinal-counting"))]
                 attempt.record_not_acquired(InteractionLockOutcomeV1::Failed);
                 Err(io_error(&path, error))
@@ -908,6 +971,20 @@ impl GenerationLayout {
 impl Drop for GenerationReadLease {
     fn drop(&mut self) {
         let _ = self.file.unlock();
+    }
+}
+
+impl GenerationReadLease {
+    #[cfg(target_os = "macos")]
+    pub(in crate::session) fn retained_file(&self) -> &File {
+        &self.file
+    }
+}
+
+impl RebuildLease {
+    #[cfg(target_os = "macos")]
+    pub(in crate::session) fn retained_file(&self) -> &File {
+        &self.file
     }
 }
 

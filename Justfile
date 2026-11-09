@@ -32,6 +32,17 @@ default:
 test *args:
     cargo +stable nextest run --no-tests pass {{ args }}
 
+# Required append-progress gate; config binds built binaries and fresh native fixtures.
+[macos]
+[group('core')]
+test-append-progress-native config:
+    python3 scripts/append-progress-native.py {{ quote(config) }}
+
+[windows]
+[group('core')]
+test-append-progress-native config:
+    'C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe' -NoLogo -NoProfile -NonInteractive -File scripts/append-progress-native.ps1 -Config {{ quote(config) }}
+
 # Run the default test suite (CI mode: no fail-fast, verbose).
 [group('core')]
 test-ci *args:

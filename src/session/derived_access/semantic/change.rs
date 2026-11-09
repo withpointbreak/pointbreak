@@ -47,7 +47,7 @@ const CURSOR_SCHEMA_VERSION_V1: u32 = 4;
 const LOCATOR_PROFILE_ID_V1: &str = "pointbreak.sqlite-derived-access-locator.v1";
 const LOCATOR_SCHEMA_VERSION_V1: u32 = 3;
 const SEMANTIC_PROFILE_ID_V1: &str = "pointbreak.sqlite-derived-access-semantic.v1";
-const SEMANTIC_SCHEMA_VERSION_V1: u32 = 9;
+const SEMANTIC_SCHEMA_VERSION_V1: u32 = 10;
 const PRODUCT_HISTORY_PROFILE_ID_V1: &str = "pointbreak.sqlite-derived-access-history.v1";
 const PRODUCT_HISTORY_SCHEMA_VERSION_V1: u32 = 5;
 const READER_PROJECTOR_VERSIONS_V1: &[(&str, u32)] =
@@ -253,7 +253,11 @@ impl ChangeReaderProfileReceiptV3 {
                 "incompatible Change reader-profile receipt schema",
             ));
         }
-        if self.minimum_reader_profile != REVIEW_CHANGE_REVISION_COHORT_V1 {
+        if crate::session::store::capabilities::supported_reader_profile_v1(
+            &self.minimum_reader_profile,
+        )
+        .is_none()
+        {
             return Err(ChangeReaderContractError::invalid(
                 "Change reader-profile receipt has the wrong minimum reader profile",
             ));
@@ -606,7 +610,11 @@ pub(crate) fn build_change_reader_profile_receipt_v3(
             "Change reader publication requires completed capability authority".to_owned(),
         ));
     };
-    if inspection.minimum_reader_profile.as_deref() != Some(REVIEW_CHANGE_REVISION_COHORT_V1) {
+    let profile = inspection
+        .minimum_reader_profile
+        .as_deref()
+        .and_then(crate::session::store::capabilities::supported_reader_profile_v1);
+    if profile.is_none() {
         return Err(ShoreError::Message(
             "completed Change authority has the wrong minimum reader profile".to_owned(),
         ));
@@ -651,7 +659,10 @@ pub(crate) fn build_change_reader_profile_receipt_v3(
     let mut receipt = ChangeReaderProfileReceiptV3 {
         schema: CHANGE_READER_PROFILE_RECEIPT_SCHEMA_V3.to_owned(),
         version: 3,
-        minimum_reader_profile: REVIEW_CHANGE_REVISION_COHORT_V1.to_owned(),
+        minimum_reader_profile: profile
+            .expect("closed profile checked above")
+            .minimum_reader_profile()
+            .to_owned(),
         publication_generation_id: generation_id.to_owned(),
         publication_store_id: store_id.to_owned(),
         publication_profile: DerivedAccessProfile::SqliteWalBodylessV1,

@@ -55,7 +55,7 @@ use pointbreak::bench_support::derived_access::{
     run_qualification_derived_access_phase_v1, run_qualification_derived_access_resource_child_v1,
     run_qualification_derived_access_resource_v1,
     run_qualification_derived_access_restart_child_v1, run_qualification_derived_access_scale_v1,
-    run_qualification_derived_change_read_v1, verify_authority_stamp_native_receipts_v1,
+    run_qualification_derived_change_read, verify_authority_stamp_native_receipts_v1,
     verify_qualification_derived_access_package_v1, verify_qualification_derived_access_phase_v1,
 };
 use pointbreak::bench_support::foundation::{
@@ -965,7 +965,7 @@ fn main() -> ExitCode {
             eprintln!("derived Change read evidence requires exactly one typed request");
             return ExitCode::from(2);
         }
-        return report_derived_access_smoke(run_qualification_derived_change_read_v1(
+        return report_derived_access_smoke(run_qualification_derived_change_read(
             std::path::Path::new(derived_requests[0]),
         ));
     }

@@ -135,6 +135,113 @@ afterEach(async () => {
 });
 
 describe("Change-first recovery integration", () => {
+  it("polls a pending child and refreshes once on completion without granting currentness", async () => {
+    let statusRequests = 0;
+    let profileRequests = 0;
+    globalThis.fetch = vi.fn(async (input, init) => {
+      expect(init?.method ?? "GET").toBe("GET");
+      const path = String(input);
+      if (path === "/api/identity")
+        return new Response(JSON.stringify(identity));
+      if (path === "/api/derived-access/status") {
+        statusRequests++;
+        const completed = statusRequests > 1;
+        return new Response(
+          JSON.stringify(
+            status({
+              servingCurrent: false,
+              availability: "rebuild_required",
+              actions: [],
+              child: {
+                epoch: 1,
+                operation: completed ? null : 1,
+                requestId: completed ? null : "a".repeat(32),
+                lastCompletedOperation: completed ? 1 : null,
+                lastCompletedRequestId: completed ? "a".repeat(32) : null,
+                lastCompletedKind: completed ? "rebuild" : null,
+                lastCompletedOutcome: completed ? "succeeded" : null,
+                state: completed ? "completed" : "unknown",
+                detail: "child observation",
+                cooperativeCancellation: true,
+                observationOnly: true,
+                observationPending: !completed,
+                observedAtUnixMilliseconds: 100,
+                observationAgeMilliseconds: 0,
+              },
+            }),
+          ),
+        );
+      }
+      if (path.startsWith("/api/v2/profile")) {
+        profileRequests++;
+        if (profileRequests === 1)
+          return new Response(JSON.stringify(unavailable), { status: 503 });
+        return new Response(JSON.stringify(profile));
+      }
+      if (path.startsWith("/api/v2/changes"))
+        return new Response(JSON.stringify(page("changes")));
+      if (path.startsWith("/api/v2/attention"))
+        return new Response(JSON.stringify(page("attention")));
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    vi.useFakeTimers();
+    await bootstrapChangeInspector({ poll: false });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(statusRequests).toBe(1);
+    const beforeCompletion = profileRequests;
+    await vi.advanceTimersByTimeAsync(750);
+    expect(statusRequests).toBe(3);
+    // One read uses profile preflight and postflight, then rechecks status.
+    expect(profileRequests).toBe(beforeCompletion + 2);
+    const settled = profileRequests;
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(statusRequests).toBe(3);
+    expect(profileRequests).toBe(settled);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("renders enrolled Change documents only after matching profile postflight", async () => {
+    let profiles = 0;
+    globalThis.fetch = vi.fn(async (input, init) => {
+      expect(init?.method ?? "GET").toBe("GET");
+      const path = String(input);
+      if (path === "/api/identity")
+        return new Response(JSON.stringify(identity));
+      if (path === "/api/derived-access/status")
+        return new Response(JSON.stringify(status({ actions: [] })));
+      if (path.startsWith("/api/v2/profile")) {
+        profiles++;
+        return new Response(
+          JSON.stringify({
+            ...profile,
+            minimumReaderProfile: "review_change_revision_progress_v1",
+          }),
+        );
+      }
+      if (path.startsWith("/api/v2/changes"))
+        return new Response(JSON.stringify(page("changes")));
+      if (path.startsWith("/api/v2/attention"))
+        return new Response(JSON.stringify(page("attention")));
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector(".unit-card[data-change-id]"),
+      ).not.toBeNull(),
+    );
+    expect(profiles).toBeGreaterThanOrEqual(2);
+    expect(document.querySelector("#master")?.textContent).not.toContain(
+      "Reader refused:",
+    );
+  });
+
   it("lets a manual status check replace the queued rebuild poll", async () => {
     const manual = deferred<Response>();
     let statusRequests = 0;

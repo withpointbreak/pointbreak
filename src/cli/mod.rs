@@ -30,7 +30,7 @@ mod history;
 mod id_resolver;
 mod identity;
 mod input_request;
-mod inspect;
+pub(crate) mod inspect;
 mod json;
 mod key;
 pub(crate) mod legacy_admission;
@@ -162,6 +162,59 @@ enum Command {
 
 pub(crate) fn run_main() -> ExitCode {
     with_process_io(|stdout, stderr| run_with_io(std::env::args_os(), stdout, stderr))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn run_owned_change(arguments: Vec<OsString>) -> ExitCode {
+    with_process_io(|stdout, stderr| {
+        let raw_args: Vec<_> = std::iter::once(OsString::from("pointbreak"))
+            .chain(arguments)
+            .collect();
+        let cli = match Cli::try_parse_from(raw_args.clone()) {
+            Ok(cli) => cli,
+            Err(error) => {
+                let _ = writeln!(stderr, "{error}");
+                return ExitCode::from(2);
+            }
+        };
+        #[cfg(feature = "longitudinal-counting")]
+        let cli = {
+            let mut cli = cli;
+            if let Some(encoded) = cli.longitudinal_counting.take() {
+                return run_counted_cli_with_dispatch(
+                    cli,
+                    stdout,
+                    stderr,
+                    &encoded,
+                    &raw_args,
+                    |cli, stdout, stderr, _| dispatch_owned_change(cli, stdout, stderr),
+                );
+            }
+            cli
+        };
+        match dispatch_owned_change(cli, stdout, stderr) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                let _ = writeln!(stderr, "{error}");
+                ExitCode::from(2)
+            }
+        }
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn dispatch_owned_change(
+    cli: Cli,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // The real parser and signing handler, without tracing workers, legacy
+    // preflight or a derived coordinator. Counting uses the existing observer.
+    pointbreak::git::validate_backend_selector()?;
+    match cli.command {
+        Command::Change(args) => change::run_owned_create(args, stdout, stderr),
+        _ => Err("private owner admits only change create".into()),
+    }
 }
 
 fn with_process_io<T>(run: impl FnOnce(&mut dyn Write, &mut dyn Write) -> T) -> T {

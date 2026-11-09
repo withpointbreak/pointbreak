@@ -9,6 +9,7 @@ mod cache;
 mod change_page;
 mod event_history_page;
 mod event_history_query;
+pub(crate) mod owned;
 mod page_token;
 mod server;
 
