@@ -16868,7 +16868,7 @@ typedef struct sqlite3PbContext sqlite3PbContext;
 # define PB_READER_GUARD(p) do { if( PB_READER(p) ) \
     return sqlite3PbLatch(PB_CONTEXT(p),SQLITE_READONLY); } while(0)
 #else
-# define PB_CONTEXT(p) 0
+# define PB_CONTEXT(p) ((sqlite3PbContext*)0)
 # define PB_SET_CONTEXT(p,c) ((void)0)
 # define PB_READER(p) 0
 # define PB_READER_GUARD(p) ((void)0)
