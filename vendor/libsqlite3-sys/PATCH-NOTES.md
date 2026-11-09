@@ -17,6 +17,12 @@ this directory for both direct and rusqlite dependency edges. Its path lock entr
 omits the registry source/checksum. A directory manifest must bind patched bytes;
 the original crate checksum alone cannot identify them.
 
+The bundled SQLite 3.53.2 amalgamation includes the upstream WAL page-size
+fix for CVE-2026-119375 from commit
+[e5bf119821f2](https://github.com/sqlite/sqlite/commit/e5bf119821f25be1d7f10ef0a2edbe175289166e).
+The backport zero-fills the tail when the WAL frame is smaller than the output
+page. The crate version and private ABI declarations retain their baseline values.
+
 ## Build and context
 
 Compiler admission tracks absent CC/flag inputs and rejects compiler arguments,
