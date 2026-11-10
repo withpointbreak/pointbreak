@@ -247,12 +247,14 @@ impl DerivedChangeAccess {
         let Some((_, backend)) = self.runtime.active_context() else {
             return Err("derived Change authority has no resolved store backend".to_owned());
         };
-        let inspection = inspect_change_reader_journal_records(backend.journal().as_ref())
-            .map_err(|error| error.to_string())?;
-        Ok(StoreCapabilityInspection {
-            status: inspection.status,
-            cursor: inspection.cursor,
-            minimum_reader_profile: inspection.minimum_reader_profile,
+        self.runtime.control_capability_remembering(|| {
+            let inspection = inspect_change_reader_journal_records(backend.journal().as_ref())
+                .map_err(|error| error.to_string())?;
+            Ok(StoreCapabilityInspection {
+                status: inspection.status,
+                cursor: inspection.cursor,
+                minimum_reader_profile: inspection.minimum_reader_profile,
+            })
         })
     }
 

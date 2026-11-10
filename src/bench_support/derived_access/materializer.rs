@@ -2438,6 +2438,205 @@ mod change_fixture_tests {
         );
     }
 
+    /// #780: the missing-carrier `rebuild_required` verdict is detected once
+    /// per key. The first request validates the capability pair once and takes
+    /// the control-path inventory; repeated requests and status polls on the
+    /// unchanged key walk nothing and open nothing; a journal change discards
+    /// the remembered verdict and detection runs once more.
+    #[test]
+    fn missing_carrier_rebuild_required_is_detected_once_per_key() {
+        use crate::session::derived_access::QualificationLocalJournal;
+
+        let parent = tempfile::tempdir().expect("fixture parent");
+        let root = parent.path().join("missing");
+        materialize_qualification_derived_change_fixture_v1(
+            QualificationDerivedChangeFixtureRequestV1::new(
+                &root,
+                QualificationDerivedChangeFixtureKindV1::MissingSelectedCarrier,
+            ),
+        )
+        .expect("materialize missing-carrier fixture");
+        let access = DerivedChangeAccess::resolve_for_inspector(&root)
+            .expect("resolve fixture derived access");
+        let history = access.recovery_access();
+        let mut sample = 0_u8;
+        let mut counted = |read: &dyn Fn()| {
+            sample += 1;
+            let scope = LongitudinalCountingScopeV1::new(sha256_bytes_hex(&[sample]))
+                .expect("counting scope");
+            {
+                let _guard = scope.enter();
+                read();
+            }
+            scope.snapshot().counters
+        };
+        let changes = || {
+            assert_declared_outcome(
+                QualificationDerivedChangeFixtureKindV1::MissingSelectedCarrier,
+                QualificationDerivedChangeFixtureExpectedOutcomeV1::ProjectionRebuildRequired,
+                access
+                    .changes(&DerivedChangePageRequestV1::Bare)
+                    .expect("read fixture Changes"),
+            );
+        };
+
+        let cold = counted(&changes);
+        assert_eq!(cold.change_capability_carriers_opened, 2);
+        assert!(cold.directory_entries_walked > 0);
+        for read in [
+            &changes as &dyn Fn(),
+            &|| {
+                assert_declared_outcome(
+                    QualificationDerivedChangeFixtureKindV1::MissingSelectedCarrier,
+                    QualificationDerivedChangeFixtureExpectedOutcomeV1::ProjectionRebuildRequired,
+                    access
+                        .attention(&DerivedChangePageRequestV1::Bare)
+                        .expect("read fixture Attention"),
+                );
+            },
+            &|| {
+                assert_declared_outcome(
+                    QualificationDerivedChangeFixtureKindV1::MissingSelectedCarrier,
+                    QualificationDerivedChangeFixtureExpectedOutcomeV1::ProjectionRebuildRequired,
+                    access.profile().expect("read fixture Profile"),
+                );
+            },
+            &|| {
+                assert_eq!(
+                    history.lifecycle_status().availability,
+                    crate::session::DerivedHistoryAvailability::RebuildRequired
+                );
+            },
+        ] {
+            let warm = counted(read);
+            assert_eq!(warm.directory_entries_walked, 0);
+            assert_eq!(warm.carrier_opens, 0);
+            assert_eq!(warm.change_capability_carriers_opened, 0);
+        }
+
+        // Any journal change is a new key: detection runs once more.
+        let events = root.join(".git/pointbreak/events");
+        let before = QualificationLocalJournal::new(root.join(".git/pointbreak"))
+            .change_stamp()
+            .expect("journal stamp");
+        std::fs::write(events.join("stamp-change.tmp"), b"x").expect("write stamp change");
+        std::fs::remove_file(events.join("stamp-change.tmp")).expect("remove stamp change");
+        assert_ne!(
+            QualificationLocalJournal::new(root.join(".git/pointbreak"))
+                .change_stamp()
+                .expect("journal stamp"),
+            before
+        );
+        let changed = counted(&changes);
+        assert_eq!(changed.change_capability_carriers_opened, 2);
+        assert_eq!(
+            changed.directory_entries_walked,
+            cold.directory_entries_walked
+        );
+        let settled = counted(&changes);
+        assert_eq!(settled.directory_entries_walked, 0);
+        assert_eq!(settled.carrier_opens, 0);
+    }
+
+    /// #780 (F855-1): a process that already cached a Ready generation and
+    /// then detects a carrier fault remembers the verdict on that request.
+    /// Consecutive Change, Attention and Profile failures, with no status poll
+    /// in between, run the history-sized control inventory at most once.
+    #[test]
+    fn a_cached_generation_detects_a_carrier_fault_once_across_consecutive_requests() {
+        let parent = tempfile::tempdir().expect("fixture parent");
+        let root = parent.path().join("warm");
+        materialize_qualification_derived_change_fixture_v1(
+            QualificationDerivedChangeFixtureRequestV1::new(
+                &root,
+                QualificationDerivedChangeFixtureKindV1::DuplicateEqual,
+            ),
+        )
+        .expect("materialize Ready fixture");
+        let access = DerivedChangeAccess::resolve_for_inspector(&root)
+            .expect("resolve fixture derived access");
+        assert!(matches!(
+            access
+                .changes(&DerivedChangePageRequestV1::Bare)
+                .expect("warm Changes read"),
+            DerivedChangeOutcomeV1::Ready(_)
+        ));
+
+        // Inject a carrier fault under the cached generation.
+        let events = root.join(".git/pointbreak/events");
+        let mut carriers = std::fs::read_dir(&events)
+            .expect("fixture events directory")
+            .map(|entry| entry.expect("event entry").path())
+            .collect::<Vec<_>>();
+        carriers.sort();
+        std::fs::remove_file(carriers.first().expect("one carrier")).expect("remove carrier");
+        let inventory = (carriers.len() - 1) as u64;
+
+        let rebuild_required = |outcome: DerivedChangeOutcomeV1<()>| match outcome {
+            DerivedChangeOutcomeV1::ProjectionUnavailable(document) => assert_eq!(
+                document.code(),
+                DerivedProjectionFailureCodeV1::ProjectionRebuildRequired
+            ),
+            other => panic!("expected rebuild_required, got {other:?}"),
+        };
+        let reads: [&dyn Fn(); 4] = [
+            &|| {
+                rebuild_required(
+                    access
+                        .changes(&DerivedChangePageRequestV1::Bare)
+                        .expect("Changes")
+                        .map_ready(|_| ()),
+                )
+            },
+            &|| {
+                rebuild_required(
+                    access
+                        .attention(&DerivedChangePageRequestV1::Bare)
+                        .expect("Attention")
+                        .map_ready(|_| ()),
+                )
+            },
+            &|| rebuild_required(access.profile().expect("Profile").map_ready(|_| ())),
+            &|| {
+                rebuild_required(
+                    access
+                        .changes(&DerivedChangePageRequestV1::Bare)
+                        .expect("Changes")
+                        .map_ready(|_| ()),
+                )
+            },
+        ];
+        let counted = reads
+            .iter()
+            .enumerate()
+            .map(|(index, read)| {
+                let scope =
+                    LongitudinalCountingScopeV1::new(sha256_bytes_hex(&[b'w', index as u8]))
+                        .expect("counting scope");
+                {
+                    let _guard = scope.enter();
+                    read();
+                }
+                scope.snapshot().counters
+            })
+            .collect::<Vec<_>>();
+        // The first failure takes one inventory and remembers the verdict.
+        assert!(counted[0].directory_entries_walked > 0);
+        assert!(counted[0].directory_entries_walked <= inventory);
+        for later in &counted[1..] {
+            assert_eq!(later.directory_entries_walked, 0);
+            assert_eq!(later.carrier_opens, 0);
+            assert_eq!(later.change_capability_carriers_opened, 0);
+        }
+        assert_eq!(
+            counted
+                .iter()
+                .map(|counters| counters.directory_entries_walked)
+                .sum::<u64>(),
+            counted[0].directory_entries_walked
+        );
+    }
+
     #[test]
     fn change_fixtures_exercise_their_declared_derived_outcomes() {
         let parent = tempfile::tempdir().expect("fixture parent");

@@ -512,7 +512,11 @@ impl DerivedHistoryAccess {
 
     fn observed_lifecycle_status(&self) -> DerivedHistoryLifecycleStatus {
         if let Some(maintenance) = self.runtime.maintenance() {
-            return maintenance.status_read_only(self.rebuild_in_flight(), self.rebuild_paused());
+            return maintenance.status_read_only(
+                &self.runtime,
+                self.rebuild_in_flight(),
+                self.rebuild_paused(),
+            );
         }
         let Some(lifecycle) = self.runtime.lifecycle() else {
             return DerivedHistoryLifecycleStatus {
@@ -533,7 +537,7 @@ impl DerivedHistoryAccess {
                 conflict_paths: None,
             };
         };
-        match lifecycle.status_read_only() {
+        match self.runtime.lifecycle_status_read_only(lifecycle) {
             Ok(observed) => DerivedHistoryLifecycleStatus {
                 active: true,
                 availability: map_availability(observed.availability),
@@ -614,7 +618,7 @@ impl DerivedHistoryAccess {
             transition.disposition,
             DerivedStorageTransition::Deferred | DerivedStorageTransition::Conflict
         ) {
-            let status = maintenance.status_read_only(false, false);
+            let status = maintenance.status_read_only(&self.runtime, false, false);
             return Ok(DerivedHistoryLifecycleReceipt {
                 availability: status.availability,
                 generation_id: status.generation_id,
@@ -914,6 +918,7 @@ impl DerivedHistoryAccess {
 impl DerivedHistoryMaintenance {
     fn status_read_only(
         &self,
+        runtime: &DerivedAccessRuntime,
         rebuild_in_flight: bool,
         rebuild_paused: bool,
     ) -> DerivedHistoryLifecycleStatus {
@@ -945,8 +950,8 @@ impl DerivedHistoryMaintenance {
         };
         let namespace = map_namespace(layout.namespace());
         match self.lifecycle().and_then(|lifecycle| {
-            lifecycle
-                .status_read_only()
+            runtime
+                .lifecycle_status_read_only(&lifecycle)
                 .map_err(|error| error.to_string())
         }) {
             Ok(observed) => DerivedHistoryLifecycleStatus {
