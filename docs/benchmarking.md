@@ -945,6 +945,28 @@ kind's change-read receipt carries its own request-bound identity. Together thes
 receipt from one exact binary enter a single package. Mixed identities still refuse, historical v4 packages
 keep their recorded refusals, and a V2 successor receipt fragments under v4 or v5 as requested.
 
+`pointbreak.qualification-derived-access-evaluator.v6` keeps every v5 requirement and its frozen step prefix,
+and adds a tenth step (`pointbreak.qualification-derived-access-evaluator-v6-procedure.v1`, digest in
+`QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V6_PROCEDURE_SHA256_V1`): fail-closed bounds for typed-failure rows,
+distinct from the Ready page-proportional bounds, which do not change. The `rejectedCarrierOpens` counter
+names a carrier that was opened and then failed validation, so it was never classified. Every Change open is
+classified, rejected or recovery inventory:
+
+- Ready rows reject nothing and walk nothing.
+- A typed carrier fault (a mutated or wrong-family selected carrier answering `projection_invalid`) rejects
+  exactly the carrier it detects.
+- A typed `projection_rebuild_required` answer may walk the fixture's declared event inventory once, on the
+  first request of its process, with at most one capability-pair validation. Every later request under the
+  same key walks and opens nothing.
+- A typed Timeline fault stays inside its request-bounded window: every open is validated or is the one
+  rejected carrier, and it emits nothing.
+
+Successful-read invariants (the summary-query proposal count and the capability-cache count) apply only to
+Ready rows, and an unmatched summary query hydrates no support carriers. The inventory table is the
+materializer's own fixture shape, re-derived by a test; no observed receipt count becomes a limit. The
+prohibitions on rebuilds, fallbacks, folds and body reads hold for every row. v5 packages keep their v5
+evaluation, and a V2 successor receipt fragments under v4, v5 or v6 as requested.
+
 ## Prospective feasibility contract
 
 The approved prospective contract is compiled into the benchmark target as

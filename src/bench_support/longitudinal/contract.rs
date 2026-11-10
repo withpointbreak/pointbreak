@@ -3098,6 +3098,10 @@ pub struct LongitudinalCountersV1 {
     pub change_candidates: u64,
     #[serde(default, skip_serializing_if = "u64_is_zero")]
     pub change_candidate_current_revisions: u64,
+    /// Carriers opened and read whose bytes then failed validation, so they
+    /// were never classified: the fault detection behind a typed failure.
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub rejected_carrier_opens: u64,
     #[serde(default, skip_serializing_if = "u64_is_zero")]
     pub change_capability_carriers_opened: u64,
     #[serde(default, skip_serializing_if = "u64_is_zero")]
