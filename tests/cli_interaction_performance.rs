@@ -2287,6 +2287,14 @@ fn change_seek_cells_run_counted_with_plain_run_parity() {
         .as_str()
         .expect("head hash")
         .to_owned();
+    // #755: `change show` hydrates exactly the current Revisions' proposal
+    // carriers, counted from the store rather than assumed per Revision.
+    let show_proposal_carriers =
+        support::proposal_carrier_count(fixture.repo.path(), &summary["currentRevisionRefs"]);
+    assert!(
+        show_proposal_carriers > 0,
+        "the fixture Change has proposal carriers"
+    );
 
     let show_arguments = strings(&[
         "change", "show", &change_id, "--repo", &repo, "--format", "json",
@@ -2394,10 +2402,44 @@ fn change_seek_cells_run_counted_with_plain_run_parity() {
                 receipt.counters.object_artifact_reads, 0,
                 "{case_name}: pure Change seeks do not open object artifacts"
             );
-            assert_eq!(receipt.counters.event_decodes, 0);
             assert_eq!(receipt.counters.fact_sqlite_rows_selected, 0);
         }
-        assert_eq!(receipt.counters.change_proposal_carriers_opened, 0);
+        // Only the show detail hydrates, and only its selected proposal
+        // carriers (#755); the other seeks open none.
+        let proposal_carriers = if route == Route::ChangeShowRead {
+            show_proposal_carriers
+        } else {
+            0
+        };
+        assert_eq!(
+            receipt.counters.change_proposal_carriers_opened, proposal_carriers,
+            "{case_name}: proposal carriers opened"
+        );
+        assert_eq!(
+            receipt.counters.change_proposal_carriers_validated, proposal_carriers,
+            "{case_name}: proposal carriers validated"
+        );
+        if route != Route::ChangeSelectCapturedRead {
+            assert_eq!(
+                receipt.counters.event_decodes, proposal_carriers,
+                "{case_name}: event decodes are limited to the selected proposal carriers"
+            );
+        }
+        if route == Route::ChangeShowRead {
+            // The hydrating detail does no other authoritative work.
+            for (name, value) in [
+                (
+                    "directory entries walked",
+                    receipt.counters.directory_entries_walked,
+                ),
+                ("projection rebuilds", receipt.counters.projection_rebuilds),
+                ("state rebuilds", receipt.counters.state_rebuilds),
+                ("event folds", receipt.counters.event_folds),
+                ("body bytes read", receipt.counters.body_bytes_read),
+            ] {
+                assert_eq!(value, 0, "{case_name}: {name} stay zero");
+            }
+        }
         assert_eq!(receipt.counters.change_support_carriers_opened, 0);
         assert_eq!(receipt.counters.authoritative_fallbacks, 0);
         assert_eq!(receipt.counters.full_history_fallbacks, 0);

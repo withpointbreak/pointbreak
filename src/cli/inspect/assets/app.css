@@ -1561,6 +1561,15 @@ html.compact .unit-card {
 .change-card-unavailable {
   margin: 8px 0 0;
 }
+/* Change detail chooser (#755): the proposal summary leads, then the short
+   exact id in monospace. */
+.detail-current-revision {
+  text-align: left;
+}
+.detail-current-revision-summary {
+  margin-right: 2px;
+  overflow-wrap: anywhere;
+}
 /* Server-owned absent-summary cue (#752): a muted state line under a headline
    that is the exact Revision id, and a muted suffix on a peer button. */
 .change-card-summary-absent {
