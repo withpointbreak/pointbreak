@@ -983,8 +983,5 @@ pub(super) fn event_is_review_history(event: &ShoreEvent) -> bool {
     let Ok(subject) = event.reconstruct_subject() else {
         return false;
     };
-    if matches!(subject, TargetRef::Task(_)) {
-        return false;
-    }
-    true
+    !matches!(subject, TargetRef::Task(_))
 }
