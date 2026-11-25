@@ -1,0 +1,562 @@
+[
+  {
+    "id": "S01",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s01_request",
+    "macos": 0,
+    "windows": 0,
+    "macos_gate": false,
+    "windows_gate": false,
+    "pure": true,
+    "child_entry": false
+  },
+  {
+    "id": "S02",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s02_empty",
+    "macos": 6,
+    "windows": 6,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S03",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s03_signed_plan",
+    "macos": 1,
+    "windows": 1,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S04",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s04_resume_signer",
+    "macos": 1,
+    "windows": 1,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S05",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s05_e1_interleaving",
+    "macos": 1,
+    "windows": 1,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S06",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s06_activation",
+    "macos": 4,
+    "windows": 4,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S07",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s07_init",
+    "macos": 1,
+    "windows": 1,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S08",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s08_completion",
+    "macos": 3,
+    "windows": 3,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S09",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s09_certify",
+    "macos": 1,
+    "windows": 1,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S26",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s26_reader_bootstrap_transaction",
+    "macos": 1,
+    "windows": 1,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S27",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s27_reader_after_commit_refused",
+    "macos": 1,
+    "windows": 1,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S10",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s10_selector",
+    "macos": 4,
+    "windows": 4,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S11",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s11_selected_read",
+    "macos": 6,
+    "windows": 6,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S12",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s12_missing_plan",
+    "macos": 4,
+    "windows": 4,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S13",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s13_signature",
+    "macos": 10,
+    "windows": 10,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S14",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s14_extra_authority",
+    "macos": 6,
+    "windows": 6,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S15",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s15_boundary_cuts",
+    "macos": 6,
+    "windows": 6,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S16",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s16_sql_uncertainty",
+    "macos": 3,
+    "windows": 3,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S17",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s17_barriers",
+    "macos": 5,
+    "windows": 5,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S18",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s18_rebinding",
+    "macos": 10,
+    "windows": 10,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S18-DIAGNOSTIC",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s18_root_rename_diagnostic",
+    "macos": 0,
+    "windows": 2,
+    "macos_gate": false,
+    "windows_gate": false,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S19",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s19_native_boundaries",
+    "macos": 2,
+    "windows": 2,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S20",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s20_predecessor_fence",
+    "macos": 5,
+    "windows": 0,
+    "macos_gate": true,
+    "windows_gate": false,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S21",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s21_no_public_route",
+    "macos": 0,
+    "windows": 0,
+    "macos_gate": false,
+    "windows_gate": false,
+    "pure": true,
+    "child_entry": false
+  },
+  {
+    "id": "S22",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s22_fresh_process",
+    "macos": 1,
+    "windows": 1,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S24",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s24_acl_native",
+    "macos": 0,
+    "windows": 4,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S25",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s25_actual_native_alias_and_retirement",
+    "macos": 3,
+    "windows": 4,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "S23",
+    "name": "session::append_progress::tests::enrollment_controls::enrollment_s23_acl_shapes",
+    "macos": 0,
+    "windows": 0,
+    "macos_gate": false,
+    "windows_gate": false,
+    "pure": true,
+    "child_entry": false
+  },
+  {
+    "id": "R01",
+    "name": "session::append_progress::tests::checkpoint_progress_native_admission_creates_no_enrollment",
+    "macos": 1,
+    "windows": 1,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R02",
+    "name": "session::append_progress::tests::checkpoint_progress_native_sync_checks_files_and_parent_binding",
+    "macos": 3,
+    "windows": 0,
+    "macos_gate": false,
+    "windows_gate": false,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R05",
+    "name": "session::append_progress::tests::controls::checkpoint_progress_exact_interface",
+    "macos": 1,
+    "windows": 1,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R07",
+    "name": "session::append_progress::tests::controls::checkpoint_progress_exact_reparse",
+    "macos": 3,
+    "windows": 3,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R06",
+    "name": "session::append_progress::tests::controls::checkpoint_progress_exact_rebinding",
+    "macos": 3,
+    "windows": 3,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R03",
+    "name": "session::append_progress::tests::controls::checkpoint_progress_carrier_controls",
+    "macos": 3,
+    "windows": 3,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R09",
+    "name": "session::append_progress::tests::controls::checkpoint_progress_reparse_controls",
+    "macos": 2,
+    "windows": 2,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R10",
+    "name": "session::append_progress::tests::controls::checkpoint_progress_sqlite_controls",
+    "macos": 1,
+    "windows": 1,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R04",
+    "name": "session::append_progress::tests::controls::checkpoint_progress_child",
+    "macos": 0,
+    "windows": 0,
+    "macos_gate": false,
+    "windows_gate": false,
+    "pure": false,
+    "child_entry": true
+  },
+  {
+    "id": "R08",
+    "name": "session::append_progress::tests::controls::checkpoint_progress_fresh_process_recovery",
+    "macos": 6,
+    "windows": 6,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R11",
+    "name": "session::append_progress::tests::ledger_controls::ledger_l01_init_and_gate_order",
+    "macos": 1,
+    "windows": 1,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R12",
+    "name": "session::append_progress::tests::ledger_controls::ledger_l02_reopen_and_vector",
+    "macos": 1,
+    "windows": 1,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R13",
+    "name": "session::append_progress::tests::ledger_controls::ledger_l03_missing_database",
+    "macos": 1,
+    "windows": 1,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R14",
+    "name": "session::append_progress::tests::ledger_controls::ledger_l04_missing_singletons",
+    "macos": 2,
+    "windows": 2,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R15",
+    "name": "session::append_progress::tests::ledger_controls::ledger_l05_schema_rejections",
+    "macos": 11,
+    "windows": 11,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R16",
+    "name": "session::append_progress::tests::ledger_controls::ledger_l06_version_phase_and_json",
+    "macos": 10,
+    "windows": 10,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R17",
+    "name": "session::append_progress::tests::ledger_controls::ledger_l07_baseline_rejections",
+    "macos": 4,
+    "windows": 4,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R18",
+    "name": "session::append_progress::tests::ledger_controls::ledger_l08_binding_rejections",
+    "macos": 4,
+    "windows": 4,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R19",
+    "name": "session::append_progress::tests::ledger_controls::ledger_l09_prefix_rejections",
+    "macos": 3,
+    "windows": 3,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R20",
+    "name": "session::append_progress::tests::ledger_controls::ledger_l10_numeric_rejections",
+    "macos": 6,
+    "windows": 6,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R21",
+    "name": "session::append_progress::tests::ledger_controls::ledger_l11_attempt_receipt_rejections",
+    "macos": 3,
+    "windows": 3,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R22",
+    "name": "session::append_progress::tests::ledger_controls::ledger_l12_foreign_root_guard",
+    "macos": 2,
+    "windows": 2,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R23",
+    "name": "session::append_progress::tests::ledger_controls::ledger_l13_physical_paths",
+    "macos": 5,
+    "windows": 7,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R24",
+    "name": "session::append_progress::tests::ledger_controls::ledger_l14_native_anchor_verdicts",
+    "macos": 1,
+    "windows": 1,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R25",
+    "name": "session::append_progress::tests::ledger_controls::ledger_l15_pragmas_and_gate_bounds",
+    "macos": 1,
+    "windows": 1,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R26",
+    "name": "session::append_progress::tests::ledger_controls::ledger_l16_checkpoint_barrier_failures",
+    "macos": 7,
+    "windows": 7,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R27",
+    "name": "session::append_progress::tests::ledger_controls::ledger_l17_precommit_process_cuts",
+    "macos": 2,
+    "windows": 2,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  },
+  {
+    "id": "R28",
+    "name": "session::append_progress::tests::ledger_controls::ledger_l18_postcommit_process_cuts",
+    "macos": 3,
+    "windows": 3,
+    "macos_gate": false,
+    "windows_gate": true,
+    "pure": false,
+    "child_entry": false
+  }
+]

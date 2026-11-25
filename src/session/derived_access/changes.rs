@@ -1819,7 +1819,7 @@ pub enum DerivedChangePageRequestV1 {
 impl DerivedChangePageRequestV1 {
     /// The order this request reads under: the bound selection's explicit
     /// order, else the lens default. Lens admission is the caller's check.
-    fn order_for(&self, lens: ChangePageLens) -> ChangeListOrderV1 {
+    pub(crate) fn order_for(&self, lens: ChangePageLens) -> ChangeListOrderV1 {
         let explicit = match self {
             Self::Bare => None,
             Self::Bounded(selection) => selection.order(),
@@ -2335,7 +2335,7 @@ pub(crate) fn select_bodyless_change_candidates(
 /// order keys the identities alone cannot carry: the strictness guard, the
 /// boundary partition, and the issued boundaries all read the full key under
 /// `order`, so a page slices exactly where the sort placed its neighbours.
-fn paginate_bodyless_change_candidates(
+pub(crate) fn paginate_bodyless_change_candidates(
     candidates: &[ChangeId],
     summaries: &[ChangeSummaryV1],
     projection_stamp: &str,
@@ -5472,7 +5472,7 @@ mod tests {
     }
 
     #[test]
-    fn review_generation_decodes_no_events_and_opens_no_carriers() {
+    fn review_generation_decodes_no_events_and_reads_two_profile_guards() {
         let fixture = ActiveChangeFixture::new(&[
             &[Some("first counted state"), Some("first counted state")],
             &[Some("second counted state"), Some("second counted state")],
@@ -5492,7 +5492,8 @@ mod tests {
 
         let counters = scope.snapshot().counters;
         assert_eq!(counters.event_decodes, 0);
-        assert_eq!(counters.carrier_opens, 0);
+        // Initial and final current validation each read the activation control.
+        assert_eq!(counters.carrier_opens, 2);
         assert_eq!(counters.change_proposal_carriers_opened, 0);
         assert_eq!(counters.change_support_carriers_opened, 0);
         assert_eq!(counters.body_artifact_reads, 0);
@@ -6135,8 +6136,8 @@ mod tests {
         let bounded_snapshot = bounded_scope.snapshot();
         let bounded_counters = &bounded_snapshot.counters;
         assert_eq!(
-            bounded_counters.carrier_opens, 4,
-            "two equal selected proposals plus removal and detached signature"
+            bounded_counters.carrier_opens, 6,
+            "two proposals, removal and signature support, plus two profile-guard reads"
         );
         assert_eq!(bounded_counters.event_decodes, 4);
         assert_eq!(bounded_counters.directory_entries_walked, 0);
@@ -6183,8 +6184,8 @@ mod tests {
         assert!(matches!(bare, DerivedChangeOutcomeV1::Ready(_)));
         let bare_counters = bare_scope.snapshot().counters;
         assert_eq!(
-            bare_counters.carrier_opens, 8,
-            "bare output reopens six proposal carriers and two selected support carriers"
+            bare_counters.carrier_opens, 10,
+            "six proposals and two support carriers, plus two profile-guard reads"
         );
         assert_eq!(bare_counters.directory_entries_walked, 0);
         assert_eq!(bare_counters.event_folds, 0);
@@ -6212,10 +6213,13 @@ mod tests {
         drop(cold_guard);
         assert!(matches!(cold, DerivedChangeOutcomeV1::Ready(_)));
         let cold_counters = cold_scope.snapshot().counters;
-        assert!(
-            (4..=6).contains(&cold_counters.carrier_opens),
-            "cold carrier work is two capability carriers plus four selected carriers: {cold_counters:?}"
+        // The cloned lifecycle opens once, validates the two-record capability
+        // pair, and rechecks the profile guard after selected carrier work.
+        assert_eq!(
+            cold_counters.carrier_opens, 8,
+            "four selected/support carriers, two capability records and two profile-guard reads"
         );
+        assert_eq!(cold_counters.change_capability_carriers_opened, 2);
         assert_eq!(cold_counters.directory_entries_walked, 0);
         assert_eq!(cold_counters.event_folds, 0);
         assert_eq!(cold_counters.projection_rebuilds, 0);
@@ -6617,7 +6621,8 @@ mod tests {
         assert_eq!(counters.change_support_carriers_opened, 2);
         assert_eq!(counters.change_matches, 1);
         assert_eq!(counters.change_rows_emitted, 1);
-        assert_eq!(counters.carrier_opens, 8);
+        // Six proposals and two support carriers, plus two activation guard reads.
+        assert_eq!(counters.carrier_opens, 10);
         assert_eq!(counters.full_history_fallbacks, 0);
         let phases = &snapshot.derived_access_phases;
         assert_eq!(
@@ -6735,7 +6740,8 @@ mod tests {
         assert_eq!(counters.change_proposal_carriers_validated, 0);
         assert_eq!(counters.change_matches, 0);
         assert_eq!(counters.change_rows_emitted, 0);
-        assert_eq!(counters.carrier_opens, 0);
+        // Empty selection still checks the activation guard before and after reading.
+        assert_eq!(counters.carrier_opens, 2);
 
         let conflicting = ActiveChangeFixture::new(&[
             &[Some("nonmatching state"), None],
@@ -7795,7 +7801,8 @@ mod tests {
         assert_eq!(structured_counters.timeline_trust_support_carriers, 1);
         assert_eq!(structured_counters.timeline_exhaustive_candidates, 0);
         assert_eq!(structured_counters.timeline_entries_emitted, 1);
-        assert_eq!(structured_counters.carrier_opens, 2);
+        // Two selected/support reads plus the initial and final activation guards.
+        assert_eq!(structured_counters.carrier_opens, 4);
         assert_eq!(structured_counters.directory_entries_walked, 0);
         assert_eq!(structured_counters.event_folds, 0);
         assert_eq!(structured_counters.authoritative_fallbacks, 0);
@@ -7836,7 +7843,8 @@ mod tests {
         assert_eq!(exhaustive_counters.timeline_exhaustive_candidates, 3);
         assert_eq!(exhaustive_counters.timeline_trust_support_carriers, 3);
         assert_eq!(exhaustive_counters.timeline_entries_emitted, 1);
-        assert_eq!(exhaustive_counters.carrier_opens, 3);
+        // Three exhaustive carrier reads plus the same two activation guards.
+        assert_eq!(exhaustive_counters.carrier_opens, 5);
         assert_eq!(exhaustive_counters.directory_entries_walked, 0);
         assert_eq!(exhaustive_counters.event_folds, 0);
         assert_eq!(exhaustive_counters.authoritative_fallbacks, 0);

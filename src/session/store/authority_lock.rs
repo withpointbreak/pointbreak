@@ -38,6 +38,65 @@ type HeldAuthorityLocks = HashMap<(ThreadId, PathBuf), Weak<StoreAuthorityLockSt
 static HELD_AUTHORITY_LOCKS: OnceLock<Mutex<HeldAuthorityLocks>> = OnceLock::new();
 
 impl StoreAuthorityLock {
+    /// Borrow the actual locked file without reacquiring or extending ownership.
+    #[allow(dead_code, reason = "enrolled routing is not yet admitted")]
+    pub(in crate::session) fn retained_file(&self) -> &File {
+        &self._state._file
+    }
+
+    /// Private enrolled admission. The caller retains a pre-acquisition root witness.
+    #[cfg(any(target_os = "macos", windows))]
+    pub(crate) fn acquire_until(
+        store_root: &Path,
+        deadline: std::time::Instant,
+        cancelled: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Self> {
+        let canonical = store_root.canonicalize().map_err(physical_error)?;
+        let path = canonical.join(STORE_AUTHORITY_LOCK_FILE);
+        let key = (std::thread::current().id(), path.clone());
+        if held_state(&key).is_some() {
+            return Err(physical_mismatch());
+        }
+        check_admission_deadline(deadline, cancelled)?;
+        let file = open_identity_path(&path, false, true)?;
+        loop {
+            check_admission_deadline(deadline, cancelled)?;
+            match file.try_lock() {
+                Ok(()) => {
+                    check_admission_deadline(deadline, cancelled)?;
+                    return Ok(register_lock(
+                        key,
+                        file,
+                        #[cfg(any(test, feature = "longitudinal-counting"))]
+                        None,
+                    ));
+                }
+                Err(std::fs::TryLockError::WouldBlock) => std::thread::sleep(
+                    deadline
+                        .saturating_duration_since(std::time::Instant::now())
+                        .min(std::time::Duration::from_millis(2)),
+                ),
+                Err(std::fs::TryLockError::Error(error)) => {
+                    return Err(lock_error(&path, "acquire", error));
+                }
+            }
+        }
+    }
+
+    /// Quiescent compatibility check, never a live-SQL or pre-acquisition proof.
+    #[cfg(any(target_os = "macos", windows))]
+    pub(crate) fn validate_physical_root(&self, root: &Path) -> Result<()> {
+        let canonical = root.canonicalize().map_err(physical_error)?;
+        if self.key.1.parent() != Some(canonical.as_path()) {
+            return Err(physical_mismatch());
+        }
+        let named = open_identity_path(&canonical.join(STORE_AUTHORITY_LOCK_FILE), false, false)?;
+        if file_identity(&named)? != self.physical_lock_identity()? {
+            return Err(physical_mismatch());
+        }
+        Ok(())
+    }
+
     pub(crate) fn acquire(store_root: &Path) -> Result<Self> {
         let (key, path) = lock_key(store_root)?;
         #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -74,7 +133,24 @@ impl StoreAuthorityLock {
     }
 
     pub(crate) fn try_acquire(store_root: &Path) -> Result<Option<Self>> {
-        let (key, path) = lock_key(store_root)?;
+        Self::try_acquire_inner(store_root, true)
+    }
+
+    /// Enrolled callers retain the physical root and require the already
+    /// provisioned authority leaf. No directory/leaf creation or symlink follow.
+    #[cfg(target_os = "macos")]
+    pub(in crate::session) fn try_acquire_existing(store_root: &Path) -> Result<Option<Self>> {
+        Self::try_acquire_inner(store_root, false)
+    }
+
+    fn try_acquire_inner(store_root: &Path, create: bool) -> Result<Option<Self>> {
+        let (key, path) = if create {
+            lock_key(store_root)?
+        } else {
+            let root = store_root.canonicalize().map_err(physical_error)?;
+            let path = root.join(STORE_AUTHORITY_LOCK_FILE);
+            ((std::thread::current().id(), path.clone()), path)
+        };
         #[cfg(any(test, feature = "longitudinal-counting"))]
         let attempt = begin_interaction_lock_attempt_v1(
             InteractionLockKindV1::Authority,
@@ -85,7 +161,12 @@ impl StoreAuthorityLock {
             attempt.record_reentrant_acquired();
             return Ok(Some(Self::new(key, state, true)));
         }
-        let file = match open_lock_file(&path) {
+        let opened = if create {
+            open_lock_file(&path)
+        } else {
+            open_identity_path(&path, false, false)
+        };
+        let file = match opened {
             Ok(file) => file,
             Err(error) => {
                 #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -212,6 +293,24 @@ fn register_lock(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(key.clone(), Arc::downgrade(&state));
     StoreAuthorityLock::new(key, state, false)
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn check_admission_deadline(
+    deadline: std::time::Instant,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<()> {
+    if cancelled.is_some_and(|value| value.load(std::sync::atomic::Ordering::Acquire)) {
+        return Err(ShoreError::Message(
+            "store authority admission cancelled".to_owned(),
+        ));
+    }
+    if std::time::Instant::now() >= deadline {
+        return Err(ShoreError::Message(
+            "store authority admission deadline exhausted".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn lock_error(path: &Path, action: &str, error: std::io::Error) -> ShoreError {

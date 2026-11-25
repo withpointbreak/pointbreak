@@ -1147,6 +1147,12 @@ impl DerivedAccessRuntime {
         }
     }
 
+    /// Detached cancellation delivery; joining remains on the data executor.
+    pub(super) fn request_background_cancel(&self) {
+        self.background_rebuild_cancel
+            .store(true, Ordering::Release);
+    }
+
     pub(super) fn cancel_background_rebuild(&self) -> Result<(), String> {
         let mut handle_slot = lock(&self.background_rebuild_handle);
         self.cancel_background_rebuild_locked(&mut handle_slot)

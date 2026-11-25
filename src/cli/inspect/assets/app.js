@@ -281,6 +281,23 @@
     "cancel",
     "retry"
   ];
+  var CHILD_STATES = /* @__PURE__ */ new Set([
+    "unavailable",
+    "starting",
+    "initializing",
+    "idle",
+    "running",
+    "completed",
+    "unknown"
+  ]);
+  function validChild(value) {
+    const child = record(value);
+    const count = /* @__PURE__ */ __name((v) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0, "count");
+    const optionalCount = /* @__PURE__ */ __name((v) => v === null || count(v), "optionalCount");
+    const identity = /* @__PURE__ */ __name((v) => v === null || typeof v === "string" && /^[a-f0-9]{32}$/.test(v), "identity");
+    return child !== null && count(child.epoch) && optionalCount(child.operation) && optionalCount(child.lastCompletedOperation) && identity(child.requestId) && identity(child.lastCompletedRequestId) && (child.lastCompletedKind === null || child.lastCompletedKind === "read" || child.lastCompletedKind === "rebuild") && (child.lastCompletedOutcome === null || child.lastCompletedOutcome === "succeeded" || child.lastCompletedOutcome === "failed") && typeof child.state === "string" && CHILD_STATES.has(child.state) && typeof child.detail === "string" && child.cooperativeCancellation === true && child.observationOnly === true && typeof child.observationPending === "boolean" && optionalCount(child.observedAtUnixMilliseconds) && optionalCount(child.observationAgeMilliseconds) && child.operation === null === (child.requestId === null) && child.lastCompletedOperation === null === (child.lastCompletedRequestId === null);
+  }
+  __name(validChild, "validChild");
   var STATUS_VALUES = {
     availability: new Set(AVAILABILITIES),
     namespace: new Set(NAMESPACES),
@@ -300,7 +317,7 @@
   __name(record, "record");
   function decodeChangeRecoveryStatus(value) {
     const doc = record(value);
-    if (doc === null || doc.schema !== "pointbreak.inspect-derived-access-status" || doc.version !== 1 || typeof doc.active !== "boolean" || typeof doc.availability !== "string" || !STATUS_VALUES.availability.has(doc.availability) || typeof doc.namespace !== "string" || !STATUS_VALUES.namespace.has(doc.namespace) || doc.phase !== void 0 && (typeof doc.phase !== "string" || !STATUS_VALUES.phase.has(doc.phase)) || doc.generationId !== void 0 && typeof doc.generationId !== "string" || doc.detail !== void 0 && typeof doc.detail !== "string" || [
+    if (doc === null || doc.schema !== "pointbreak.inspect-derived-access-status" || doc.version !== 1 || typeof doc.active !== "boolean" || doc.child !== void 0 && (!validChild(doc.child) || doc.servingCurrent !== false) || typeof doc.availability !== "string" || !STATUS_VALUES.availability.has(doc.availability) || typeof doc.namespace !== "string" || !STATUS_VALUES.namespace.has(doc.namespace) || doc.phase !== void 0 && (typeof doc.phase !== "string" || !STATUS_VALUES.phase.has(doc.phase)) || doc.generationId !== void 0 && typeof doc.generationId !== "string" || doc.detail !== void 0 && typeof doc.detail !== "string" || [
       "rebuildInFlight",
       "rebuildPaused",
       "servingCurrent",
@@ -771,6 +788,27 @@
   // ../../../documents/change_reader_profile_v1.json
   var change_reader_profile_v1_default = {
     minimumReaderProfile: "review_change_revision_v1",
+    documents: {
+      "pointbreak.attention-list": 2,
+      "pointbreak.inspect-attention": 2,
+      "pointbreak.inspect-changes-page": 1,
+      "pointbreak.inspect-reader-profile": 1,
+      "pointbreak.reader-upgrade-required": 1,
+      "pointbreak.review-association-comparison": 1,
+      "pointbreak.review-change": 1,
+      "pointbreak.review-change-list": 1,
+      "pointbreak.review-change-revision": 1,
+      "pointbreak.review-revision": 3,
+      "pointbreak.review-revision-interdiff": 1,
+      "pointbreak.review-revision-resource": 1,
+      "pointbreak.store-migration-in-progress": 1,
+      "pointbreak.store-migration-required": 1
+    }
+  };
+
+  // ../../../documents/change_reader_progress_profile_v1.json
+  var change_reader_progress_profile_v1_default = {
+    minimumReaderProfile: "review_change_revision_progress_v1",
     documents: {
       "pointbreak.attention-list": 2,
       "pointbreak.inspect-attention": 2,
@@ -1364,7 +1402,7 @@
     if (profile.schema !== "pointbreak.inspect-reader-profile" || profile.version !== 1 || !isReaderProfileAvailability(availability) || !isDocumentMap(documents) || !sameDocumentMap(documents, CHANGE_READER_DOCUMENTS)) {
       throw new Error("incompatible Inspector reader profile");
     }
-    if (availability === "ready" && (minimumReaderProfile !== CHANGE_READER_PROFILE || typeof commitGraphStamp !== "string" || commitGraphStamp.length === 0)) {
+    if (availability === "ready" && (minimumReaderProfile !== CHANGE_READER_PROFILE && minimumReaderProfile !== change_reader_progress_profile_v1_default.minimumReaderProfile || typeof commitGraphStamp !== "string" || commitGraphStamp.length === 0)) {
       throw new Error(
         "ready Inspector reader profile is missing capability or commit graph stamp"
       );
@@ -11433,16 +11471,25 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     if (root === null) return;
     const find = /* @__PURE__ */ __name((selector) => root.querySelector(selector), "find");
     const status = view.status;
-    const visible = view.error !== null || view.access === "authoritative" || status?.active === true && (!status.servingCurrent || status.rebuildInFlight || status.rebuildPaused);
+    const visible = view.error !== null || status?.child !== void 0 && [
+      "starting",
+      "initializing",
+      "running",
+      "unknown",
+      "unavailable"
+    ].includes(status.child.state) || view.access === "authoritative" || status?.active === true && (!status.servingCurrent || status.rebuildInFlight || status.rebuildPaused);
     root.classList.toggle("hidden", !visible);
     if (!visible) return;
     const summary = find("#derived-access-summary");
     const detail = find("#derived-access-detail");
     const count = status?.completedEvents !== void 0 && status.totalEvents !== void 0 ? ` ${status.completedEvents}/${status.totalEvents} events.` : "";
     if (summary !== null) {
-      summary.textContent = view.error ? "Recovery status unavailable" : view.pending === "fallback" ? "Reading authoritative journal" : view.access === "authoritative" ? view.fallbackValidated ? "Authoritative fallback" : "Reading authoritative journal" : status?.rebuildPaused ? "Derived view rebuild paused" : `Derived view: ${(status?.phase ?? status?.availability ?? "unavailable").replaceAll("_", " ")}.${count}`;
+      summary.textContent = view.error ? "Recovery status unavailable" : status?.child?.state === "unknown" ? "Data operation outcome unknown" : status?.child?.state === "unavailable" ? "Data process unavailable" : status?.child?.state === "running" ? "Data operation in progress" : view.pending === "fallback" ? "Reading authoritative journal" : view.access === "authoritative" ? view.fallbackValidated ? "Authoritative fallback" : "Reading authoritative journal" : status?.rebuildPaused ? "Derived view rebuild paused" : `Derived view: ${(status?.phase ?? status?.availability ?? "unavailable").replaceAll("_", " ")}.${count}`;
     }
-    if (detail !== null) detail.textContent = view.error ?? status?.detail ?? "";
+    if (detail !== null) {
+      const child = status?.child;
+      detail.textContent = view.error ?? (child?.detail || status?.detail || (child?.observationAgeMilliseconds != null ? `Last data observation ${Math.floor(child.observationAgeMilliseconds / 1e3)} seconds ago. Currentness is checked by each data request.` : child ? "Waiting for a data observation. Cancellation is cooperative." : ""));
+    }
     const progress = find("#derived-access-progress");
     if (progress !== null) {
       const determinate = status?.completedEvents !== void 0 && (status.totalEvents ?? 0) > 0;
@@ -11870,10 +11917,11 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     ), "renderRecovery");
     const acceptRecoveryStatus = /* @__PURE__ */ __name((decoded2) => {
       const becameCurrent = decoded2.servingCurrent && (recoveryStatus?.servingCurrent !== true || recoveryStatus.rebuildInFlight);
+      const completedRebuild = decoded2.child?.lastCompletedKind === "rebuild" && decoded2.child.lastCompletedOutcome === "succeeded" && decoded2.child.state === "completed" && decoded2.child.lastCompletedRequestId !== recoveryStatus?.child?.lastCompletedRequestId;
       recoveryStatus = decoded2;
       recoveryError = null;
       renderRecovery();
-      if (becameCurrent) reloadSelectedAccess();
+      if (becameCurrent || completedRebuild) reloadSelectedAccess();
     }, "acceptRecoveryStatus");
     const refreshRecoveryStatus = /* @__PURE__ */ __name(async () => {
       if (recoveryTimer !== null) clearTimeout(recoveryTimer);
@@ -11921,7 +11969,9 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           if (isCurrentComposition()) {
             renderRecovery();
             if (recoveryTimer !== null) clearTimeout(recoveryTimer);
-            recoveryTimer = recoveryPending === null && recoveryStatus?.rebuildInFlight ? setTimeout(() => void refreshRecoveryStatus(), 750) : null;
+            recoveryTimer = recoveryPending === null && (recoveryStatus?.rebuildInFlight || recoveryStatus?.child?.observationPending || ["starting", "initializing", "running"].includes(
+              recoveryStatus?.child?.state ?? ""
+            )) ? setTimeout(() => void refreshRecoveryStatus(), 750) : null;
           }
         }
       }

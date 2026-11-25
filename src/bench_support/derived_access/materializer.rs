@@ -595,15 +595,22 @@ impl QualificationDerivedAccessBootstrapSmokeReceiptV1 {
         {
             return Err("bounded bootstrap progress receipt drifted".to_owned());
         }
-        let minimum_carrier_work = expected_events.saturating_mul(2);
-        let maximum_carrier_work = expected_events.saturating_mul(3);
-        if self.counters.carrier_opens < minimum_carrier_work
-            || self.counters.carrier_opens > maximum_carrier_work
-            || self.counters.event_decodes != self.counters.carrier_opens
-            || self.counters.event_validations != self.counters.carrier_opens
+        let minimum_event_work = expected_events.saturating_mul(2);
+        let maximum_event_work = expected_events.saturating_mul(3);
+        // One rebuild adds profile probes at admission, population and strict
+        // verification. Those physical reads do not decode or validate events.
+        let expected_opens = self
+            .counters
+            .event_decodes
+            .checked_add(3)
+            .ok_or_else(|| "bounded bootstrap carrier-open count overflow".to_owned())?;
+        if self.counters.event_decodes < minimum_event_work
+            || self.counters.event_decodes > maximum_event_work
+            || self.counters.event_validations != self.counters.event_decodes
+            || self.counters.carrier_opens != expected_opens
         {
             return Err(format!(
-                "bounded bootstrap carrier work drifted: opens={}, decodes={}, validations={}, expected={minimum_carrier_work}..={maximum_carrier_work}",
+                "bounded bootstrap carrier work drifted: opens={}, decodes={}, validations={}, expected events={minimum_event_work}..={maximum_event_work}, opens=decodes+3",
                 self.counters.carrier_opens,
                 self.counters.event_decodes,
                 self.counters.event_validations
@@ -916,24 +923,32 @@ pub fn run_qualification_derived_access_longitudinal_smoke_v1(
 pub fn run_qualification_derived_access_bootstrap_smoke_v1(
     tier: super::QualificationDerivedAccessTierV1,
 ) -> Result<QualificationDerivedAccessBootstrapSmokeReceiptV1, String> {
-    let parent = std::env::temp_dir().join(format!(
-        "pointbreak-derived-bootstrap-{tier:?}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| error.to_string())?
-            .as_nanos()
-    ));
+    let parent = std::path::absolute(std::env::temp_dir())
+        .map_err(|error| error.to_string())?
+        .join(format!(
+            "pointbreak-derived-bootstrap-{tier:?}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|error| error.to_string())?
+                .as_nanos()
+        ));
     std::fs::create_dir(&parent).map_err(|error| error.to_string())?;
     let result = run_bootstrap_smoke_in_root(tier, &parent);
-    let cleanup = std::fs::remove_dir_all(&parent);
-    match (result, cleanup) {
-        (Ok(receipt), Ok(())) => Ok(receipt),
-        (Ok(_), Err(error)) => Err(format!(
-            "bounded bootstrap smoke succeeded but cleanup failed: {error}"
-        )),
-        (Err(error), _) => Err(error),
-    }
+    finish_bootstrap_smoke(&parent, result)
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn finish_bootstrap_smoke(
+    parent: &Path,
+    result: Result<QualificationDerivedAccessBootstrapSmokeReceiptV1, String>,
+) -> Result<QualificationDerivedAccessBootstrapSmokeReceiptV1, String> {
+    let receipt = result
+        .map_err(|error| format!("{error}; retained bootstrap root: {}", parent.display()))?;
+    std::fs::remove_dir_all(parent).map_err(|error| {
+        format!("bounded bootstrap smoke succeeded but cleanup failed: {error}")
+    })?;
+    Ok(receipt)
 }
 
 #[cfg(not(feature = "longitudinal-counting"))]
@@ -944,7 +959,7 @@ pub fn run_qualification_derived_access_bootstrap_smoke_v1(
 }
 
 #[cfg(feature = "longitudinal-counting")]
-fn run_bootstrap_smoke_in_root(
+pub(super) fn run_bootstrap_smoke_in_root(
     tier: super::QualificationDerivedAccessTierV1,
     parent: &Path,
 ) -> Result<QualificationDerivedAccessBootstrapSmokeReceiptV1, String> {
@@ -2205,6 +2220,191 @@ fn canonical_sha256<T: Serialize>(value: &T) -> Result<String, String> {
     canonical_json_bytes(&value)
         .map(|bytes| sha256_bytes_hex(&bytes))
         .map_err(|error| error.to_string())
+}
+
+#[cfg(all(test, feature = "longitudinal-counting"))]
+mod bootstrap_smoke_tests {
+    use super::*;
+
+    fn receipt(event_work: u64) -> QualificationDerivedAccessBootstrapSmokeReceiptV1 {
+        let mut receipt = QualificationDerivedAccessBootstrapSmokeReceiptV1 {
+            schema: QUALIFICATION_DERIVED_ACCESS_BOOTSTRAP_SMOKE_SCHEMA_V1.to_owned(),
+            tier: super::super::QualificationDerivedAccessTierV1::D0_128,
+            event_count: 128,
+            head_sequence: 128,
+            progress_updates: 4,
+            phases: [
+                "cursor_population",
+                "projection_population",
+                "strict_verification",
+                "finalizing",
+            ]
+            .into_iter()
+            .map(|phase| QualificationDerivedAccessBootstrapProgressV1 {
+                phase: phase.to_owned(),
+                completed: 128,
+                total: 128,
+                bytes_processed: 0,
+                elapsed_ms: 0,
+                estimated_remaining_ms: None,
+            })
+            .collect(),
+            counters: QualificationDerivedAccessCountersV1 {
+                directory_entries_walked: 0,
+                carrier_opens: event_work + 3,
+                carrier_bytes_read: 0,
+                event_decodes: event_work,
+                event_validations: event_work,
+                event_folds: 0,
+                chronological_sort_items: 0,
+                body_artifact_reads: 0,
+                body_bytes_read: 0,
+                object_artifact_reads: 0,
+                object_bytes_read: 0,
+                unselected_body_artifact_reads: 0,
+                unselected_object_artifact_reads: 0,
+                projection_rebuilds: 0,
+                state_rebuilds: 0,
+                response_bytes: 0,
+            },
+            capacity_ownership: LongitudinalCapacityOwnershipV1::default(),
+            rss_observed: false,
+            baseline_rss_bytes: None,
+            peak_observed_rss_bytes: None,
+            steady_rss_bytes: None,
+            semantic_receipt_sha256: "a".repeat(64),
+            receipt_sha256: String::new(),
+        };
+        rehash(&mut receipt);
+        receipt
+    }
+
+    fn rehash(receipt: &mut QualificationDerivedAccessBootstrapSmokeReceiptV1) {
+        receipt.receipt_sha256 = receipt.canonical_sha256().unwrap();
+    }
+
+    #[test]
+    fn bootstrap_receipt_accepts_exact_overhead_at_event_work_edges() {
+        for event_work in [256, 343, 384] {
+            receipt(event_work).validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn bootstrap_receipt_rejects_other_profile_probe_overheads() {
+        for overhead in [0, 1, 2, 4] {
+            let mut candidate = receipt(343);
+            candidate.counters.carrier_opens = 343 + overhead;
+            rehash(&mut candidate);
+            assert!(
+                candidate
+                    .validate()
+                    .unwrap_err()
+                    .contains("carrier work drifted")
+            );
+        }
+    }
+
+    #[test]
+    fn bootstrap_receipt_preserves_event_work_and_validation_bounds() {
+        for event_work in [255, 385] {
+            assert!(
+                receipt(event_work)
+                    .validate()
+                    .unwrap_err()
+                    .contains("carrier work drifted")
+            );
+        }
+        let mut candidate = receipt(343);
+        candidate.counters.event_validations = 342;
+        rehash(&mut candidate);
+        assert!(
+            candidate
+                .validate()
+                .unwrap_err()
+                .contains("carrier work drifted")
+        );
+    }
+
+    #[test]
+    fn bootstrap_receipt_rejects_open_count_overflow() {
+        let mut candidate = receipt(343);
+        candidate.counters.event_decodes = u64::MAX;
+        candidate.counters.event_validations = u64::MAX;
+        candidate.counters.carrier_opens = u64::MAX;
+        rehash(&mut candidate);
+        assert!(candidate.validate().unwrap_err().contains("count overflow"));
+    }
+
+    #[test]
+    fn bootstrap_receipt_preserves_other_acceptance_checks() {
+        type Mutation = fn(&mut QualificationDerivedAccessBootstrapSmokeReceiptV1);
+        let cases: [(&str, Mutation); 7] = [
+            ("schema drifted", |r| r.schema.push('x')),
+            ("event/head count drifted", |r| r.head_sequence = 127),
+            ("progress receipt drifted", |r| r.phases[0].completed = 127),
+            ("progress receipt drifted", |r| r.phases.swap(0, 1)),
+            ("retained 1 decoded events", |r| {
+                r.capacity_ownership.retained_decoded_events = 1
+            }),
+            ("semantic receipt is not a SHA-256", |r| {
+                r.semantic_receipt_sha256.clear()
+            }),
+            ("RSS observation status is inconsistent", |r| {
+                r.rss_observed = true
+            }),
+        ];
+        for (error, mutate) in cases {
+            let mut candidate = receipt(343);
+            mutate(&mut candidate);
+            rehash(&mut candidate);
+            assert!(candidate.validate().unwrap_err().contains(error), "{error}");
+        }
+        let mut candidate = receipt(343);
+        candidate.receipt_sha256 = "0".repeat(64);
+        assert!(
+            candidate
+                .validate()
+                .unwrap_err()
+                .contains("receipt hash drifted")
+        );
+    }
+
+    #[test]
+    fn bootstrap_completion_preserves_returned_failure_and_reports_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("failed-bootstrap");
+        std::fs::create_dir(&parent).unwrap();
+        let sentinel = parent.join("evidence");
+        std::fs::write(&sentinel, b"failed producer bytes").unwrap();
+
+        let error =
+            finish_bootstrap_smoke(&parent, Err("producer failure".to_owned())).unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "producer failure; retained bootstrap root: {}",
+                parent.display()
+            )
+        );
+        assert!(parent.is_absolute());
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"failed producer bytes");
+    }
+
+    #[test]
+    fn bootstrap_completion_cleans_successful_disposable_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("successful-bootstrap");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::write(parent.join("disposable"), b"successful producer bytes").unwrap();
+        let receipt = receipt(343);
+
+        assert_eq!(
+            finish_bootstrap_smoke(&parent, Ok(receipt.clone())).unwrap(),
+            receipt
+        );
+        assert!(!parent.exists());
+    }
 }
 
 #[cfg(all(test, feature = "longitudinal-counting"))]

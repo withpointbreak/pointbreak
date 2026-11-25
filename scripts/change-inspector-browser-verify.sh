@@ -887,22 +887,96 @@ cleanup() {
   local failed_shakedown=false
   if [ -n "$shakedown_root" ] && { [ "$exit_status" -ne 0 ] || [ "$browser_close_status" -ne 0 ]; }; then
     failed_shakedown=true
-    node - "$log_dir" "${browser_result:-}" 2>/dev/null <<'NODE' || printf '%s\n' '{"gate":"change-inspector-browser-failure","retention":"failed"}' >&2
+    node - "$log_dir" "${browser_result:-}" "${diagnostic_stage:-before-status-poll}" \
+      "${diagnostic_http:-not-attempted}" "${diagnostic_status_path:-}" 2>/dev/null <<'NODE' || printf '%s\n' '{"gate":"change-inspector-browser-failure","retention":"failed"}' >&2
 const fs = require('node:fs');
-const [logs, reportPath] = process.argv.slice(2);
-const secrets = fs.readdirSync(logs).filter(name => name.endsWith('-startup.json'))
-  .map(name => JSON.parse(fs.readFileSync(`${logs}/${name}`, 'utf8')).token).filter(Boolean);
+const crypto = require('node:crypto');
+const path = require('node:path');
+const [logs, reportPath, stage, http, statusPath] = process.argv.slice(2);
+const secrets = [];
+const startupIssues = [];
+for (const name of ['inspect-startup.json', 'reader-empty-ready-l2-startup.json', 'reader-l0-startup.json', 'reader-m1-startup.json']) {
+  const file = path.join(logs, name);
+  if (!fs.existsSync(file) && name !== 'inspect-startup.json') continue;
+  try {
+    if (fs.statSync(file).size > 16384) throw new Error('oversized');
+    const token = JSON.parse(fs.readFileSync(file, 'utf8')).token;
+    if (typeof token !== 'string' || !/^[A-Za-z0-9:_-]{1,512}$/.test(token)) throw new Error('invalid-token');
+    secrets.push(token);
+  } catch { startupIssues.push({file:name, reason:'missing, malformed, oversized or invalid token'}); }
+}
+const rawSafe = startupIssues.length === 0 && secrets.length > 0;
 const redact = value => {
   if (typeof value === 'string') {
-    for (const secret of secrets) value = value.replaceAll(secret, 'REDACTED').replaceAll(encodeURIComponent(secret), 'REDACTED');
+    for (const secret of [...secrets].sort((a, b) => b.length - a.length)) {
+      const encoded = encodeURIComponent(secret);
+      value = value.replaceAll(secret, 'REDACTED').replaceAll(encoded, 'REDACTED')
+        .replaceAll(encoded.replace(/%[0-9A-F]{2}/g, escape => escape.toLowerCase()), 'REDACTED');
+    }
     return value;
   }
   if (Array.isArray(value)) return value.map(redact);
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, key.toLowerCase() === 'token' ? 'REDACTED' : redact(item)]));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [redact(key), key.toLowerCase().includes('token') ? 'REDACTED' : redact(item)]));
   return value;
 };
-const report = reportPath && fs.existsSync(reportPath) ? JSON.parse(fs.readFileSync(reportPath, 'utf8')) : null;
-console.log(JSON.stringify({gate:'change-inspector-browser-failure', report:redact(report)}));
+const metadata = file => {
+  if (!file || !fs.existsSync(file)) return {reason:'missing', bytes:0, sha256:null};
+  const fd = fs.openSync(file, 'r');
+  try {
+    const size = fs.fstatSync(fd).size;
+    const hash = crypto.createHash('sha256');
+    const chunk = Buffer.alloc(65536);
+    let n; while ((n = fs.readSync(fd, chunk, 0, chunk.length, null)) > 0) hash.update(chunk.subarray(0, n));
+    return {bytes:size, sha256:hash.digest('hex')};
+  } finally { fs.closeSync(fd); }
+};
+const jsonEvidence = (file, cap, typed) => {
+  const meta = metadata(file);
+  if (meta.reason) return meta;
+  if (!rawSafe) return {...meta, reason:'omitted: startup tokens unavailable', truncated:true};
+  if (meta.bytes > cap) return {...meta, reason:'omitted: JSON exceeds byte cap', truncated:true};
+  try {
+    const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (typed && (value?.schema !== 'pointbreak.inspect-derived-access-status' || value?.version !== 1)) return {...meta, reason:'untyped status', truncated:false};
+    return {...meta, value:redact(value), truncated:false};
+  } catch { return {...meta, reason:'invalid JSON', truncated:false}; }
+};
+const tails = ['derived-build.log', 'inspect-server.log', 'reader-empty-ready-l2-server.log'].map(name => {
+  const file = path.join(logs, name);
+  const meta = metadata(file);
+  if (meta.reason) return {file:name, ...meta};
+  if (!rawSafe) return {file:name, ...meta, reason:'omitted: startup tokens unavailable', truncated:true};
+  const cap = 4096;
+  const fd = fs.openSync(file, 'r');
+  let text;
+  try {
+    const buffer = Buffer.alloc(Math.min(meta.bytes, cap));
+    fs.readSync(fd, buffer, 0, buffer.length, Math.max(0, meta.bytes - cap));
+    text = buffer.toString('utf8');
+  } finally { fs.closeSync(fd); }
+  // Drop a possibly partial first line, including partial bearer tokens.
+  if (meta.bytes > cap) text = text.includes('\n') ? text.slice(text.indexOf('\n') + 1) : '';
+  return {file:name, ...meta, text:redact(text), truncated:meta.bytes > cap};
+});
+const report = jsonEvidence(reportPath, 24576, false);
+const allowedStatusNames = ['browser-primary-derived-access-status.json', 'browser-primary-derived-access-status.json.tmp', 'browser-empty-ready-l2-ready.json', 'browser-empty-ready-l2-ready.json.tmp', 'browser-empty-ready-l2-retry.json'];
+const statusAllowed = statusPath && allowedStatusNames.some(name => path.resolve(statusPath) === path.resolve(logs, name));
+const status = statusAllowed ? jsonEvidence(statusPath, 16384, true) : {reason:'missing: no status poll attempted'};
+const receipt = {gate:'change-inspector-browser-failure', report:report.value ?? null, reportEvidence:{...report, value:undefined},
+  diagnostics:{stage, http, status, tails, startupIssues}, truncated:false};
+let output = JSON.stringify(receipt);
+if (Buffer.byteLength(output) + 1 > 65536) {
+  // Redaction or JSON escaping can expand bytes. Keep only fixed-shape metadata.
+  receipt.report = null;
+  receipt.reportEvidence.reason = 'omitted: total payload cap';
+  delete receipt.diagnostics.status.value;
+  receipt.diagnostics.status.reason = 'omitted: total payload cap';
+  for (const tail of receipt.diagnostics.tails) { delete tail.text; tail.reason = 'omitted: total payload cap'; }
+  receipt.truncated = true;
+  output = JSON.stringify(receipt);
+}
+if (Buffer.byteLength(output) + 1 > 65536) throw new Error('failure receipt exceeds cap');
+console.log(output);
 NODE
   fi
   cleanup_shakedown_root || root_cleanup_status=$?
@@ -1454,6 +1528,50 @@ else
     >"$log_dir/fixture.json"
 fi
 
+# These are detached observations. Elected data reads remain the browser's job.
+validate_detached_status() {
+  local document="$1"
+  local observed_epoch
+  jq -e '
+    .schema == "pointbreak.inspect-derived-access-status" and .version == 1 and
+    .servingCurrent == false and .child.observationOnly == true and
+    (.active | type == "boolean") and (.availability | type == "string") and
+    (.rebuildInFlight | type == "boolean") and (.rebuildPaused | type == "boolean") and
+    (.actions | type == "array") and (.child.observationPending | type == "boolean") and
+    (.child | has("operation") and has("requestId")) and
+    (.child.epoch | type == "number" and . > 0 and . <= 9007199254740991 and . == floor) and
+    (.child.state == "starting" or .child.state == "initializing" or
+     .child.state == "running" or .child.state == "idle" or .child.state == "completed")
+  ' "$document" >/dev/null || die "invalid or unhealthy detached Inspector status"
+  observed_epoch="$(jq -r '.child.epoch' "$document")"
+  if [ -z "$detached_epoch" ]; then
+    detached_epoch="$observed_epoch"
+  else
+    [ "$detached_epoch" = "$observed_epoch" ] || die "Inspector child epoch changed during preflight"
+  fi
+}
+
+healthy_detached_status() {
+  jq -e --arg mode "$2" '
+    .active == true and .servingCurrent == false and .child.observationOnly == true and
+    (.child.state == "idle" or .child.state == "completed") and
+    .child.operation == null and .child.requestId == null and .child.observationPending == false and
+    .rebuildInFlight == false and .rebuildPaused == false and
+    (.availability == "current" or ($mode == "initialized" and
+      (.availability == "absent" or .availability == "rebuild_required")))
+  ' "$1" >/dev/null
+}
+
+completed_detached_retry() {
+  jq -e --argjson baseline "$2" --arg operation "$3" --arg request "$4" '
+    .child.lastCompletedKind == "rebuild" and .child.lastCompletedOutcome == "succeeded" and
+    (.child.lastCompletedOperation | type == "number" and . == floor and . > $baseline) and
+    (.child.lastCompletedRequestId | type == "string" and test("^[0-9a-f]{32}$")) and
+    ($operation == "" or (.child.lastCompletedOperation | tostring) == $operation) and
+    ($request == "" or .child.lastCompletedRequestId == $request)
+  ' "$1" >/dev/null
+}
+
 session="pointbreak-change-browser-$$"
 if [ -n "${PLAYWRIGHT_CLI:-}" ]; then
   pwcli=("$PLAYWRIGHT_CLI")
@@ -1520,43 +1638,64 @@ start_reader_state_server() {
 
 retry_empty_ready_l2() {
   local startup="$log_dir/reader-empty-ready-l2-startup.json"
-  local base_url
-  local token
+  local base_url token response_status baseline operation request
+  local detached_epoch=""
   local retry_log="$log_dir/browser-empty-ready-l2-retry.json"
   local ready_log="$log_dir/browser-empty-ready-l2-ready.json"
   local ready_tmp="$ready_log.tmp"
-  local response_status
-
+  local initialized=false
   base_url="http://$(jq -r '.host' "$startup"):$(jq -r '.port' "$startup")"
   token="$(jq -r '.token' "$startup")"
+  diagnostic_stage="empty-ready-l2-initialization"
+  diagnostic_status_path="$ready_tmp"
+  for _ in $(seq 1 200); do
+    diagnostic_http="pending"
+    response_status="$(curl -sS -o "$ready_tmp" -w '%{http_code}' \
+      -H "Authorization: Bearer $token" "$base_url/api/derived-access/status")"
+    diagnostic_http="$response_status"
+    [ "$response_status" = "200" ] || die "empty-ready-l2 initialization returned HTTP $response_status"
+    validate_detached_status "$ready_tmp"
+    if healthy_detached_status "$ready_tmp" initialized; then initialized=true; break; fi
+    sleep 0.05
+  done
+  [ "$initialized" = true ] || die "empty-ready-l2 child did not initialize"
+  baseline="$(jq -r '.child.lastCompletedOperation // 0' "$ready_tmp")"
+  cp "$ready_tmp" "$log_dir/browser-empty-ready-l2-before-retry.json"
+  diagnostic_stage="empty-ready-l2-retry-acknowledgement"
+  diagnostic_status_path="$retry_log"
+  diagnostic_http="pending"
   response_status="$(curl -sS -o "$retry_log" -w '%{http_code}' -X POST \
     -H "Authorization: Bearer $token" \
     "$base_url/api/derived-access/retry")"
+  diagnostic_http="$response_status"
   [ "$response_status" = "200" ] \
     || die "empty-ready-l2 derived-access retry returned HTTP $response_status"
-  jq -e '
-    .schema == "pointbreak.inspect-derived-access-status" and .version == 1 and
-    .active == true and (.availability | type == "string") and
-    (.rebuildInFlight | type == "boolean") and (.actions | type == "array")
-  ' "$retry_log" >/dev/null \
-    || die "empty-ready-l2 derived-access retry did not return typed status"
-
+  validate_detached_status "$retry_log"
+  # The queued acknowledgement may not expose an identity yet. If it does,
+  # bind completion to it; otherwise require a new successful rebuild since
+  # the retained pre-POST baseline. This disposable child has one retry caller.
+  operation="$(jq -r '.child.operation // empty' "$retry_log")"
+  request="$(jq -r '.child.requestId // empty' "$retry_log")"
+  diagnostic_stage="empty-ready-l2-retry-completion"
+  diagnostic_status_path="$ready_tmp"
   for _ in $(seq 1 200); do
+    diagnostic_http="pending"
     response_status="$(curl -sS -o "$ready_tmp" -w '%{http_code}' \
-      -H "Authorization: Bearer $token" \
-      "$base_url/api/derived-access/status")"
-    if [ "$response_status" = "200" ] && jq -e '
-      .schema == "pointbreak.inspect-derived-access-status" and .version == 1 and
-      .active == true and .servingCurrent == true and .availability == "current" and
-      .rebuildInFlight == false and .rebuildPaused == false
-    ' "$ready_tmp" >/dev/null; then
+      -H "Authorization: Bearer $token" "$base_url/api/derived-access/status")"
+    diagnostic_http="$response_status"
+    [ "$response_status" = "200" ] || die "empty-ready-l2 completion returned HTTP $response_status"
+    validate_detached_status "$ready_tmp"
+    if healthy_detached_status "$ready_tmp" current && \
+      completed_detached_retry "$ready_tmp" "$baseline" "$operation" "$request"; then
       mv "$ready_tmp" "$ready_log"
+      diagnostic_status_path="$ready_log"
       return 0
     fi
     sleep 0.05
   done
   [ -f "$ready_tmp" ] && mv "$ready_tmp" "$ready_log"
-  die "empty-ready-l2 did not publish a current derived generation after explicit retry"
+  diagnostic_status_path="$ready_log"
+  die "empty-ready-l2 did not complete explicit rebuild in the same child epoch"
 }
 
 start_reader_state_server "empty-ready-l2" "$reader_empty_l2_repo"
@@ -1581,28 +1720,30 @@ retain_primary_derived_access_status() {
   local startup="$log_dir/inspect-startup.json"
   local status_log="$log_dir/browser-primary-derived-access-status.json"
   local status_tmp="$status_log.tmp"
-  local base_url
-  local token
-  local response_status
-
+  local base_url token response_status
+  local detached_epoch=""
   base_url="http://$(jq -r '.host' "$startup"):$(jq -r '.port' "$startup")"
   token="$(jq -r '.token' "$startup")"
+  diagnostic_stage="primary-detached-status"
+  diagnostic_status_path="$status_tmp"
   for _ in $(seq 1 200); do
+    diagnostic_http="pending"
     response_status="$(curl -sS -o "$status_tmp" -w '%{http_code}' \
-      -H "Authorization: Bearer $token" \
-      "$base_url/api/derived-access/status")"
-    if [ "$response_status" = "200" ] && jq -e '
-      .schema == "pointbreak.inspect-derived-access-status" and .version == 1 and
-      .active == true and .servingCurrent == true and .availability == "current" and
-      .rebuildInFlight == false and .rebuildPaused == false
-    ' "$status_tmp" >/dev/null; then
+      -H "Authorization: Bearer $token" "$base_url/api/derived-access/status")"
+    diagnostic_http="$response_status"
+    [ "$response_status" = "200" ] || die "primary Inspector status returned HTTP $response_status"
+    validate_detached_status "$status_tmp"
+    if healthy_detached_status "$status_tmp" current; then
       mv "$status_tmp" "$status_log"
+      diagnostic_status_path="$status_log"
+      primary_derived_access_epoch="$detached_epoch"
       return 0
     fi
     sleep 0.05
   done
   [ -f "$status_tmp" ] && mv "$status_tmp" "$status_log"
-  die "primary Inspector did not publish an active current derived-access status"
+  diagnostic_status_path="$status_log"
+  die "primary Inspector did not publish a healthy detached active/current observation"
 }
 
 POINTBREAK_DERIVED_ACCESS=sqlite-wal-bodyless-v1 \
@@ -1947,6 +2088,7 @@ manifest_tmp="$root/.manifest.json.tmp"
 [ "$(shasum -a 256 "$log_dir/harness-digests.json" | awk '{print $1}')" = "$harness_record_sha256" ] \
   || die "browser harness digest record changed during qualification"
 for required_evidence_path in \
+  logs/browser-empty-ready-l2-before-retry.json \
   logs/browser-empty-ready-l2-retry.json \
   logs/browser-empty-ready-l2-ready.json \
   logs/browser-primary-derived-access-status.json \
@@ -1986,6 +2128,7 @@ jq -n \
   --argjson timelineAppend "$(cat "$log_dir/timeline-append.json")" \
   --argjson toolVersions "$tool_versions" \
   --slurpfile harness "$log_dir/harness-digests.json" \
+  --argjson primaryDerivedAccessEpoch "$primary_derived_access_epoch" \
   --slurpfile primaryDerivedAccess "$log_dir/browser-primary-derived-access-status.json" \
   --arg harnessSha256 "$harness_record_sha256" \
   --argjson assertionCount "$assertion_count" \
@@ -1995,7 +2138,7 @@ jq -n \
     binary: $binary, executedBinary: $executedBinary, binarySha256: $binarySha256,
     harness: $harness[0], harnessSha256: $harnessSha256, root: $root, fixture: $fixture,
     fixtureData: $fixtureData, timelineAppend: $timelineAppend,
-    primaryDerivedAccessStatus: $primaryDerivedAccess[0],
+    primaryDerivedAccessStatus: $primaryDerivedAccess[0], primaryDerivedAccessEpoch: $primaryDerivedAccessEpoch,
     toolVersions: $toolVersions, assertionCount: $assertionCount,
     screenshotCount: $screenshotCount, evidenceInventory: $evidenceInventory}' \
   >"$manifest_tmp"

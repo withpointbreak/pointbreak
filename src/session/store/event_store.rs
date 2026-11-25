@@ -61,6 +61,23 @@ impl EventWriteBatch<'_> {
     }
 }
 
+#[cfg(any(target_os = "macos", windows))]
+/// Immutable serialization prepared before the private durable append intent.
+/// Construction validates through the same validator as the existing writer.
+pub(crate) struct PreparedProgressEvent {
+    event: ShoreEvent,
+    bytes: Vec<u8>,
+}
+#[cfg(any(target_os = "macos", windows))]
+impl PreparedProgressEvent {
+    pub(crate) fn event(&self) -> &ShoreEvent {
+        &self.event
+    }
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 /// One strict journal entry decoded and validated from the same carrier read
 /// that produced its durable byte witness. Bootstrap uses this paired shape so
 /// cursor, locator, and semantic population never reopen a carrier merely to
@@ -92,6 +109,33 @@ impl LocalEventFiles {
 }
 
 impl EventStore {
+    fn refuse_progress_profile(&self) -> Result<()> {
+        if let Some(files) = &self.files {
+            crate::session::store::capabilities::refuse_progress_store(&files.store_dir)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "macos", windows))]
+    pub(crate) fn prepare_owned_progress_event(event: ShoreEvent) -> Result<PreparedProgressEvent> {
+        validate_event(&event, None)?;
+        let bytes = serde_json::to_vec(&event)?;
+        Ok(PreparedProgressEvent { event, bytes })
+    }
+
+    /// Private C4 only: the consumed permit supplies actual held root authority,
+    /// matching durable intent/receipt and one publication of these exact bytes.
+    #[cfg(any(target_os = "macos", windows))]
+    pub(crate) fn publish_owned_progress_event(
+        permit: crate::session::append_progress::PublicationPermit<'_, '_>,
+        prepared: &PreparedProgressEvent,
+    ) -> Result<EventWriteOutcome> {
+        let root = permit.authorize(prepared)?;
+        #[cfg(target_os = "macos")]
+        crate::session::append_progress::consumer::validate_publication(root)?;
+        Self::open(root).publish_validated_event(&prepared.event, &prepared.bytes)
+    }
+
     pub fn open(store_dir: impl AsRef<Path>) -> Self {
         let store_dir = store_dir.as_ref().to_path_buf();
         Self {
@@ -175,6 +219,7 @@ impl EventStore {
             .as_ref()
             .map(|files| StoreAuthorityLock::acquire(&files.store_dir))
             .transpose()?;
+        self.refuse_progress_profile()?;
         preflight_current_product(self.journal.as_ref())?;
         Ok(EventWriteBatch {
             store: self,
@@ -196,6 +241,7 @@ impl EventStore {
             .as_ref()
             .map(|files| StoreAuthorityLock::acquire(&files.store_dir))
             .transpose()?;
+        self.refuse_progress_profile()?;
         preflight_current_product(self.journal.as_ref())?;
         validate_event(event, None)?;
         let bytes = serde_json::to_vec(event)?;
@@ -229,6 +275,7 @@ impl EventStore {
             .as_ref()
             .map(|files| StoreAuthorityLock::acquire(&files.store_dir))
             .transpose()?;
+        self.refuse_progress_profile()?;
         preflight_change_writer(self.journal.as_ref())?;
         validate_event(event, None)?;
         let bytes = serde_json::to_vec(event)?;
@@ -253,6 +300,7 @@ impl EventStore {
         // and a module-scope import would be unused in a non-test build.
         use crate::session::store::capabilities::inspect_journal_records;
 
+        self.refuse_progress_profile()?;
         preflight_change_writer(self.journal.as_ref())?;
         inspect_journal_records(self.journal.as_ref())?
             .event_entries
@@ -460,6 +508,7 @@ impl EventStore {
     /// guard, so two simultaneously live histories are counted as two rather
     /// than one setter silently replacing the other.
     pub(crate) fn list_events_untracked(&self) -> Result<Vec<ShoreEvent>> {
+        self.refuse_progress_profile()?;
         event_entries_for_current_product(self.journal.as_ref())?
             .iter()
             .map(Self::decode_validated_entry)
@@ -474,6 +523,7 @@ impl EventStore {
     /// one physical read. The raw entry bytes are consumed while building the
     /// decoded population, so no second decoded history is created here.
     pub(crate) fn list_events_with_witnesses(&self) -> Result<Vec<ValidatedJournalEntry>> {
+        self.refuse_progress_profile()?;
         let events = event_entries_for_current_product(self.journal.as_ref())?
             .into_iter()
             .map(|entry| {
@@ -495,6 +545,7 @@ impl EventStore {
     /// aborting the read. Any other failure — genuine corruption, IO, a hash or
     /// id mismatch — still propagates, so nothing unexpected is papered over.
     pub fn list_events_lenient(&self) -> Result<(Vec<ShoreEvent>, Vec<SkippedEvent>)> {
+        self.refuse_progress_profile()?;
         let mut events = Vec::new();
         let mut skipped = Vec::new();
         for entry in event_entries_for_current_product(self.journal.as_ref())? {
@@ -702,6 +753,26 @@ mod tests {
     fn counting_scope(byte: char) -> LongitudinalCountingScopeV1 {
         LongitudinalCountingScopeV1::new(std::iter::repeat_n(byte, 64).collect::<String>())
             .expect("valid counting scope")
+    }
+
+    #[test]
+    fn progress_fence_refuses_retained_event_store_without_selector() {
+        let root = tempfile::tempdir().unwrap();
+        let store = EventStore::open(root.path());
+        std::fs::create_dir(root.path().join("append-progress")).unwrap();
+        let error = match store.begin_current_product_batch() {
+            Ok(_) => panic!("partial enrollment reached legacy writer"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("progress_reader_unavailable"));
+        assert!(
+            store
+                .list_events()
+                .unwrap_err()
+                .to_string()
+                .contains("progress_reader_unavailable")
+        );
+        assert!(!root.path().join("events").exists());
     }
 
     #[test]
@@ -926,7 +997,8 @@ mod tests {
         assert_eq!(events.len(), 2);
         let snapshot = scope.snapshot();
         assert_eq!(snapshot.counters.directory_entries_walked, 2);
-        assert_eq!(snapshot.counters.carrier_opens, 2);
+        // Count the absent profile probe in addition to the two event reads.
+        assert_eq!(snapshot.counters.carrier_opens, 3);
         assert_eq!(snapshot.counters.carrier_bytes_read, expected_bytes);
         assert_eq!(snapshot.counters.event_decodes, 2);
         assert_eq!(snapshot.counters.event_validations, 2);
@@ -988,7 +1060,8 @@ mod tests {
         assert_eq!(outcomes, vec![EventWriteOutcome::Created; 3]);
         let snapshot = scope.snapshot();
         assert_eq!(snapshot.counters.directory_entries_walked, 0);
-        assert_eq!(snapshot.counters.carrier_opens, 2);
+        // Count the profile probe in addition to the two capability reads.
+        assert_eq!(snapshot.counters.carrier_opens, 3);
         assert_eq!(snapshot.counters.change_capability_carriers_opened, 2);
         assert_eq!(snapshot.lock_facts.len(), 1);
         assert_eq!(

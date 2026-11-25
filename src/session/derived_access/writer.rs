@@ -163,6 +163,7 @@ impl DerivedWriteCoordinator {
         event: &ShoreEvent,
         publish: impl FnOnce() -> Result<EventWriteOutcome>,
     ) -> Result<EventWriteAcknowledgement> {
+        crate::session::store::capabilities::refuse_progress_store(&self.store_root)?;
         if DerivedWriteMode::load(&self.mode) == DerivedWriteMode::DegradedLoose {
             return self.publish_degraded(publish).map(|outcome| {
                 EventWriteAcknowledgement::new(
@@ -807,6 +808,19 @@ mod tests {
             .truth_head()
             .unwrap()
             .cursor
+    }
+
+    #[test]
+    fn progress_fence_refuses_degraded_coordinator_before_publish() {
+        let root = tempfile::tempdir().unwrap();
+        let coordinator = DerivedWriteCoordinator::degraded(root.path(), "test");
+        std::fs::create_dir(root.path().join("append-progress")).unwrap();
+        let error = coordinator
+            .record_event_once_acknowledged(&event(1), || {
+                panic!("enrolled data reached legacy publication")
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("progress_reader_unavailable"));
     }
 
     #[test]

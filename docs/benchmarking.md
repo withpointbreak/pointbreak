@@ -757,6 +757,10 @@ values are `null` elsewhere. This non-timing developer smoke does not change the
 qualification-smoke schemas, consume a retained or owner root, or activate the derived profile for
 product reads.
 
+On bootstrap-smoke failure, the diagnostic reports and retains its temporary root; successful
+ordinary runs remove it. The D0 bootstrap owner test retains its root through all caller assertions
+on both success and failure and prints the retained path.
+
 Phase attribution is a separate diagnostic mode for revision-page, bootstrap, and governed-write work:
 
 ```sh
@@ -944,6 +948,37 @@ package count; and a row may bind to any packaged execution identity on its plat
 kind's change-read receipt carries its own request-bound identity. Together these let every fixture kind's
 receipt from one exact binary enter a single package. Mixed identities still refuse, historical v4 packages
 keep their recorded refusals, and a V2 successor receipt fragments under v4 or v5 as requested.
+
+
+`pointbreak.qualification-derived-change-read-request.v3` wraps the existing V2 request and binds
+`TIMELINE_PRE_HYDRATION_COUNTING_CONTRACT_SHA256_V2`. Its receipt V3 preserves the embedded V1 Change matrix,
+uses typed Timeline row V2 and requires evaluator v6. Request/ready/release/barrier-receipt V2 coexist with
+unchanged V1 documents; raw receipt V2 remains bound to evaluator v4/v5. No legacy receipt is relabeled.
+
+The `qualification_derived_change_request_builder` helper remains legacy V1/V2-only: it accepts V1 or V2
+templates, rejects V3 templates, and produces and validates a V2 request. It does not prepare requests for
+the V3 producer/V6 evaluator path. Migrating this helper is separate follow-up work; native package
+preparation remains outside this local counting-contract change.
+
+The V2 pin measures T=E+O and E=A+P with checked arithmetic: total opens, fixed-owner negative enrollment
+probe attempts, other opens, completed absent and completed compatible-present probes. O must be zero and
+selected locators positive. Generic same-key, digest, selected, cold-capability and unrelated reads remain
+other. Malformed, progress-profile, failed or incomplete probes cannot earn completion. Counters are not reset
+or adjusted; the existing profile preflight has its own counted receipt bound to the same child. A cold
+transition during the armed request fails instead of buying another warm-up.
+
+Evaluator v6 binds `pointbreak.qualification-derived-access-evaluator-v6-procedure.v1` and
+`QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V6_PROCEDURE_SHA256_V1`. Only the fault-boundary step changes.
+After all same-child/key/ready/release/mutation/witness/strict-after/restoration checks, final total C and
+validations V satisfy C>=T, C<=checked(E+H), C=checked(checked(E+V)+1), where H is the checked primary
+selected/candidate/correlation sum and E is frozen at ready. Every overflow or extra post-pin nonvalidating
+read refuses; normal-row and legacy equations stay unchanged. This does not establish an OS-level I/O census.
+
+New-family original-byte decoders reject nested duplicates and mixed selectors before raw Values can lose
+information. Fragment construction, assembly, publication and verification preserve the exact raw receipt
+as authority and reject cross-version promotion. Existing default/full/longitudinal development gates and
+native macOS/APFS plus real Windows/NTFS evidence requirements are unchanged. A new source implementation,
+local diagnostic or partial package does not supply missing native qualification.
 
 ## Prospective feasibility contract
 

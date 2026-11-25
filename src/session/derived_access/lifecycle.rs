@@ -267,6 +267,8 @@ impl DerivedAccessLifecycle {
         store_root: &Path,
         store_id: impl Into<String>,
     ) -> Result<Self, LifecycleError> {
+        crate::session::store::capabilities::refuse_progress_store(store_root)
+            .map_err(|error| LifecycleError::Truth(error.to_string()))?;
         let store_id = store_id.into();
         if store_id.trim().is_empty() {
             return Err(LifecycleError::EmptyStoreIdentity);
@@ -277,6 +279,11 @@ impl DerivedAccessLifecycle {
             store_id,
             paths: GenerationLayout::new(store_root)?,
         })
+    }
+
+    fn refuse_progress_profile(&self) -> Result<(), LifecycleError> {
+        crate::session::store::capabilities::refuse_progress_store(&self.store_root)
+            .map_err(|error| LifecycleError::Truth(error.to_string()))
     }
 
     pub(crate) fn paths(&self) -> &GenerationLayout {
@@ -355,12 +362,14 @@ impl DerivedAccessLifecycle {
     /// `store derived build`, and the writer-idle rebuild confirmation. Request
     /// readers and status observers use `status_read_only`.
     pub(crate) fn status(&self) -> Result<LifecycleStatus, LifecycleError> {
+        self.refuse_progress_profile()?;
         self.status_with_quarantine(true)
     }
 
     /// Observation classifier: the same classification as `status()` but it
     /// never renames, never takes an exclusive lock and never requests work.
     pub(crate) fn status_read_only(&self) -> Result<LifecycleStatus, LifecycleError> {
+        self.refuse_progress_profile()?;
         self.status_with_quarantine(false)
     }
 
@@ -662,6 +671,7 @@ impl DerivedAccessLifecycle {
             None
         };
         let mut background_authority_lock = self.try_background_authority(execution)?;
+        self.refuse_progress_profile()?;
         let lease = if synchronous_authority_lock
             .as_ref()
             .is_some_and(StoreAuthorityLock::is_reentrant)
@@ -1177,6 +1187,7 @@ impl DerivedAccessLifecycle {
     /// Quarantine-class and rebuild-class failures are reported as typed errors;
     /// the recovery classifier `status()` owns the rename.
     pub(crate) fn open_current(&self) -> Result<Option<CurrentGeneration>, LifecycleError> {
+        self.refuse_progress_profile()?;
         if self.profile == DerivedAccessProfile::Off {
             return Ok(None);
         }
@@ -1285,6 +1296,7 @@ impl DerivedAccessLifecycle {
         &self,
         _writer_lock: &StoreWriterLock,
     ) -> Result<Option<CurrentGeneration>, LifecycleError> {
+        self.refuse_progress_profile()?;
         if self.profile == DerivedAccessProfile::Off || !self.paths.root().exists() {
             return Ok(None);
         }
@@ -1402,6 +1414,7 @@ impl DerivedAccessLifecycle {
     }
 
     pub(crate) fn retire(&self) -> Result<Option<PathBuf>, LifecycleError> {
+        self.refuse_progress_profile()?;
         if self.profile == DerivedAccessProfile::Off {
             return Ok(None);
         }
@@ -1410,6 +1423,7 @@ impl DerivedAccessLifecycle {
     }
 
     pub(crate) fn delete(&self) -> Result<(), LifecycleError> {
+        self.refuse_progress_profile()?;
         if self.profile == DerivedAccessProfile::Off {
             return Ok(());
         }
@@ -1420,6 +1434,7 @@ impl DerivedAccessLifecycle {
     }
 
     pub(crate) fn purge_disposable_root(&self, path: &Path) -> Result<(), LifecycleError> {
+        self.refuse_progress_profile()?;
         if self.profile == DerivedAccessProfile::Off {
             return Err(LifecycleError::Disabled);
         }
@@ -1541,6 +1556,7 @@ impl DerivedAccessLifecycle {
         &self,
         current: &CurrentGeneration,
     ) -> Result<CurrentGenerationValidation, LifecycleError> {
+        self.refuse_progress_profile()?;
         let publication_snapshot = current.service.publication_validation_snapshot()?;
         validate_live_reader_checkpoint(&publication_snapshot, current.reader_receipt.as_ref())?;
         let authority =
@@ -2588,6 +2604,29 @@ mod tests {
     const CHANGE_READER_PROFILE_RESOURCE: &str = "change-reader-profile.json";
 
     #[test]
+    fn progress_fence_rechecks_lifecycle_created_before_enrollment() {
+        let root = tempfile::tempdir().unwrap();
+        let lifecycle =
+            DerivedAccessLifecycle::new(DerivedAccessProfile::Off, root.path(), "test").unwrap();
+        std::fs::create_dir(root.path().join("append-progress")).unwrap();
+        assert!(
+            lifecycle
+                .open_current()
+                .unwrap_err()
+                .to_string()
+                .contains("progress_reader_unavailable")
+        );
+        assert!(
+            lifecycle
+                .status_read_only()
+                .unwrap_err()
+                .to_string()
+                .contains("progress_reader_unavailable")
+        );
+        assert!(!root.path().join("derived").exists());
+    }
+
+    #[test]
     fn lifecycle_implements_the_frozen_transition_table() {
         for state in DerivedAccessAvailability::ALL {
             for successor in DerivedAccessAvailability::ALL {
@@ -3119,7 +3158,10 @@ mod tests {
                 None,
             ]
         );
-        assert_eq!(observed.counters.carrier_opens, 14);
+        assert_eq!(
+            observed.counters.carrier_opens, 17,
+            "fourteen event reads plus rebuild, population and strict-read profile probes"
+        );
         assert_eq!(observed.counters.event_decodes, 14);
         assert_eq!(observed.counters.event_validations, 14);
         assert_eq!(observed.capacity_ownership.retained_decoded_events, 0);
@@ -3644,9 +3686,10 @@ mod tests {
         let counters = scope.snapshot().counters;
         assert_eq!(counters.directory_entries_walked, 0);
         assert_eq!(
-            counters.carrier_opens, 2,
-            "restart point-reads only activation and completion carriers"
+            counters.carrier_opens, 4,
+            "restart reads the capability pair plus constructor and open profile probes"
         );
+        assert_eq!(counters.change_capability_carriers_opened, 2);
         assert_eq!(counters.event_folds, 0);
         assert_eq!(counters.projection_rebuilds, 0);
         assert_eq!(counters.state_rebuilds, 0);

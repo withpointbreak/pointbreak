@@ -147,3 +147,36 @@ Use the error output first, then classify the failure before changing anything:
   release, installer, or evidence contract.
 - Keep public installer paths stable. Prefer documentation over directory churn until a capability
   has a proven independent boundary and all external callers can migrate safely.
+
+### append-progress native gate
+
+`append-progress-native.py` (macOS, Python 3.11+) and `append-progress-native.ps1`
+(Windows PowerShell 5.1, normal nonadmin owner console) own the finite private native gate.
+Invoke through `just test-append-progress-native <config.json>` after building and reviewing the
+exact source and executable receipts. `append-progress-fixture-acl.ps1` is the Windows outer-root
+preparer and independent descriptor oracle; it never sets ACLs on product-created children.
+
+The reviewed `append-progress-gate-v1` configuration supplies `host`, absolute `source`, fresh
+`evidence`, `nextest`, `cargo_metadata`, `binaries_metadata`, `nextest_config`, `junit`,
+`source_manifest`, `fixture_manifest`, `environment`, and a `pins` map of absolute paths to SHA256.
+Bind the source manifest, all executable/metadata/config inputs and native helper/binding files.
+The source manifest lists each source member's `path` and `sha256`. Configure nextest JUnit output
+with successful and failed output retained; `junit` is its resolved output path. The gate moves each
+report into a new per-case directory and rejects missing, stale, repeated or nonpassing results.
+
+The `append-progress-fixtures-v1` manifest supplies `host`, a fresh `append-gate-*` run, canonical
+private `parent`, and complete `allocations` (`version: 1`, `run`, exact `case`, `ordinal`, `root`).
+Root names are `<run>-<case-id>-<two-digit-ordinal>`; counts come from the maintained case inventory.
+Prepare only the empty private parent; every assigned root must be absent. macOS requires mode0700.
+Windows uses a fresh `C:\append-gate-*` parent and a hash-bound ACL binding containing
+`fixture_parent`, `fixture_parent_file_id`, `volume_root_file_id`, `fsutil_sha256`, `cmd_sha256`.
+The environment binds `POINTBREAK_ENROLLMENT_ACL_SCRIPT`, `POINTBREAK_ENROLLMENT_ACL_SHA256`,
+`POINTBREAK_ENROLLMENT_ACL_BINDING`, `POINTBREAK_ENROLLMENT_ACL_BINDING_SHA256`, and
+`POINTBREAK_APPEND_POWERSHELL_SHA256`. macOS S20 instead binds the source-admitted
+`POINTBREAK_ENROLLMENT_PREDECESSOR` and original `POINTBREAK_ENROLLMENT_GIT`, each with its
+`_SHA256` variable. Record original tool paths, host ownership/capacity and source/binary identity
+before execution. SSH may stage/build/collect Windows evidence; it cannot execute this native gate.
+
+Failures stop the attempt and preserve output and fixtures. Inspect the first failure before any
+new attempt under the campaign's finite budget. Ordinary macOS fixture roots are also retained;
+no automatic deletion is authorized by these scripts. No Linux native success is claimed.

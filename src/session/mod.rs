@@ -12,6 +12,19 @@ pub use acknowledgement::{
     OperationReceiptStateV1, WriteAcknowledgementV1,
 };
 pub mod adapter;
+#[cfg(any(target_os = "macos", windows))]
+pub(crate) mod append_progress;
+#[cfg(any(target_os = "macos", windows))]
+#[doc(hidden)]
+pub use append_progress::{
+    AppendExit, AuditExit, AuditLimits, OwnedAppendBootstrap, OwnedAppendOperation,
+    OwnedAuditBootstrap, OwnedDataCommand, OwnedProcessBootstrap, OwnedProcessExit,
+    OwnedProcessFailure, enter_owned_data_command, run_disposable_append, run_disposable_audit,
+    run_disposable_owner,
+};
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub use append_progress::{OwnedDataOperation, OwnedDataRequest, run_owned_data_request};
 #[cfg(feature = "bench")]
 pub(crate) mod benchmark;
 pub(crate) mod derived_access;
@@ -84,6 +97,19 @@ pub fn take_derived_write_diagnostics() -> Vec<ProjectionDiagnostic> {
         })
         .collect()
 }
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub use append_progress::consumer::{
+    OwnedChangeCommand, enter_owned_change_command, take_owned_change_diagnostic,
+};
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub use append_progress::with_owned_inspector_request;
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub use derived_access::enrolled_inspector::{
+    OwnedInspectorGeneration, OwnedInspectorPage, OwnedInspectorReader,
+};
 pub use event::{
     BodyContentType, IngestProvenance, IngestVia, event_signature_pre_authentication_encoding,
     event_to_be_signed,
